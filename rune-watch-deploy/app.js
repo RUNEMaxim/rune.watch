@@ -14471,6 +14471,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       flexWrap: 'wrap'
     }
   }, /*#__PURE__*/React.createElement("a", {
+    className: "tp-footer-btn",
     href: "https://thordex.eth.limo/?ref=maxim",
     target: "_blank",
     rel: "noopener noreferrer",
@@ -14499,6 +14500,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
   }, /*#__PURE__*/React.createElement(IconSwapArrows, {
     size: 14
   }), t('swapHere', lang)), /*#__PURE__*/React.createElement("a", {
+    className: "tp-footer-btn",
     href: "https://x.com/runemaxim?s=11",
     target: "_blank",
     rel: "noopener noreferrer",
@@ -14530,6 +14532,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
   }, /*#__PURE__*/React.createElement(IconX, {
     size: 13
   }), "@runemaxim"), /*#__PURE__*/React.createElement("a", {
+    className: "tp-footer-btn",
     href: "https://github.com/RUNEMaxim/rune.watch",
     target: "_blank",
     rel: "noopener noreferrer",
@@ -14561,6 +14564,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
   }, /*#__PURE__*/React.createElement(IconGithub, {
     size: 13
   }), "Source code"), DONATION_ENABLED && /*#__PURE__*/React.createElement("button", {
+    className: "tp-footer-btn",
     onClick: () => setDonationOpen(v => !v),
     title: t('donateHint', lang),
     style: {
@@ -14591,43 +14595,66 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     }
   }, /*#__PURE__*/React.createElement(IconWallet, {
     size: 13
-  }), t('donate', lang))), DONATION_ENABLED && /*#__PURE__*/React.createElement("div", {
+  }), t('donate', lang))), donationOpen && DONATION_ENABLED && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
+    onClick: () => setDonationOpen(false),
     style: {
-      display: 'grid',
-      gridTemplateRows: donationOpen ? '1fr' : '0fr',
-      transition: 'grid-template-rows 0.25s ease',
-      maxWidth: 460,
-      marginLeft: 'auto',
-      marginRight: 'auto'
+      position: 'fixed',
+      inset: 0,
+      zIndex: 200,
+      background: 'rgba(0,0,0,0.6)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20
     }
   }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
     style: {
-      overflow: 'hidden',
-      opacity: donationOpen ? 1 : 0,
-      transition: 'opacity 0.2s ease'
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 14,
+      ...cardShellStyle,
       textAlign: 'left',
-      background: 'linear-gradient(165deg, #0C1F21 0%, #0A0A0A 100%)',
-      border: '1px solid #172E30',
-      borderRadius: 14,
-      padding: '14px 16px',
-      boxShadow: '0 1px 0 rgba(255,255,255,0.04) inset, 0 14px 28px -18px rgba(0,0,0,0.7)'
+      padding: '18px 18px',
+      maxWidth: 420,
+      width: '100%'
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 11,
-      color: '#7C9698',
-      lineHeight: 1.55
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 12,
+      marginBottom: 12
     }
-  }, t('donateText', lang)), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: '#7C9698',
+      lineHeight: 1.5,
+      paddingTop: 2
+    }
+  }, t('donateText', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDonationOpen(false),
+    "aria-label": t('closeWord', lang),
+    style: {
+      flexShrink: 0,
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 7,
+      width: 26,
+      height: 26,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 15,
+      lineHeight: 1,
+      padding: 0
+    }
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 8,
-      marginTop: 12
+      gap: 8
     }
   }, DONATION_ADDRESSES.map(d => {
     const copied = donationCopied === d.chain;
@@ -14658,9 +14685,8 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
 
     // Aufgebaut über benannte Zwischenvariablen statt einem tief verschachtelten
     // React.createElement(...)-Einzeiler -- bei mehreren Ebenen ineinander verschachtelter
-    // Aufrufe verzählt man sich beim manuellen Zählen der schließenden Klammern leicht (genau
-    // das ist beim ersten Versuch dieser Zeile auch passiert). So bleibt jeder Aufruf für sich
-    // kurz und die Struktur unmittelbar nachvollziehbar.
+    // Aufrufe verzählt man sich beim manuellen Zählen der schließenden Klammern leicht. So
+    // bleibt jeder Aufruf für sich kurz und die Struktur unmittelbar nachvollziehbar.
     const chainLabel = /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 9.5,
@@ -14742,7 +14768,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
         transition: 'border-color 0.2s'
       }
     }, infoColumn, copyButton);
-  }))))))));
+  })))), document.body))));
 }
 
 // Letztes Sicherheitsnetz: fängt jeden unerwarteten Fehler beim Rendern ab (z.B. eine

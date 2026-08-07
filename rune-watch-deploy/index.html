@@ -103,6 +103,10 @@
     .tp-controls-nodestats { flex-shrink: 0 !important; margin-left: 0 !important; }
     .tp-controls-nodestats > button { font-size: 11px !important; gap: 4px !important; }
     .tp-nodestats-mobile { display: flex !important; margin-left: 0 !important; flex-shrink: 0 !important; }
+    /* Footer-Buttons (Swap-Link, X, GitHub, Spenden) auf schmalen Bildschirmen deutlich
+       kompakter -- die Desktop-Größe (9px/18px Padding, 12.5px Schrift) wirkte auf dem Handy
+       überdimensioniert und beanspruchte unnötig viel vertikalen Platz. */
+    .tp-footer-btn { padding: 6px 12px !important; font-size: 11px !important; gap: 5px !important; }
   }
   /* CLS-Fix: reservierter Platz für die Chart-Karte, BEVOR die Chart-Daten geladen sind.
      Ohne das wächst die Karte beim Nachladen der Daten von (fast) leer auf ihre volle Höhe und
