@@ -125,15 +125,41 @@
   .tp-content-row { justify-content: center; }
   .tp-chart-panel { display: block; }
   .tp-details-panel { display: flex; }
-  /* Handy: ursprüngliches Verhalten wiederhergestellt -- zwei umschaltbare Tabs/Seiten
-     (Chart-Tab / Details-Tab), genau wie vor den Layout-Änderungen für den Desktop. */
+  /* PC: die Swap-Karte steht INNERHALB der linken Spalte unter dem Chart (.tp-swap-inline).
+     Die separate dritte Panel-Seite ist dort überflüssig und bleibt ausgeblendet. */
+  .tp-swap-inline { display: block; }
+  .tp-swap-panel { display: none; }
+  /* Handy: drei umschaltbare Seiten (Portfolio / Details / Memoless Swaps). Dort wird die
+     Karte NICHT unter dem Chart gezeigt, sondern bekommt eine eigene, wischbare Seite --
+     sonst würde sie doppelt auftauchen. */
   @media (max-width: 640px) {
     .tp-mobile-tabs { display: flex; }
-    .tp-chart-panel, .tp-details-panel { display: none !important; }
+    .tp-swap-inline { display: none !important; }
+    .tp-chart-panel, .tp-details-panel, .tp-swap-panel { display: none !important; }
     .tp-chart-panel.tp-panel-active { display: block !important; animation: tpMobileTabInFromLeft 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
     .tp-details-panel.tp-panel-active { display: flex !important; animation: tpMobileTabInFromRight 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
-    .tp-chart-panel, .tp-details-panel { max-width: none !important; min-width: 0 !important; width: 100% !important; }
+    .tp-swap-panel.tp-panel-active { display: block !important; animation: tpMobileTabInFromRight 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
+    .tp-chart-panel, .tp-details-panel, .tp-swap-panel { max-width: none !important; min-width: 0 !important; width: 100% !important; }
   }
+  /* Swap-Fenster: dezente, schlanke Scrollbalken statt der dicken System-Scrollbalken --
+     die waagerechte Leiste unter den Chain-Chips und der klobige vertikale Balken in der
+     Asset-Liste waren der Hauptgrund, warum das Fenster "alt" wirkte. */
+  .tp-swap-scroll::-webkit-scrollbar { width: 6px; height: 0; }
+  .tp-swap-scroll::-webkit-scrollbar-track { background: transparent; }
+  .tp-swap-scroll::-webkit-scrollbar-thumb { background: #1E3A3C; border-radius: 999px; }
+  .tp-swap-scroll::-webkit-scrollbar-thumb:hover { background: #2A5052; }
+  .tp-swap-scroll { scrollbar-width: thin; scrollbar-color: #1E3A3C transparent; }
+  /* Chain-Filter-Chips: horizontal wischbar, aber ohne sichtbare Scrollleiste. */
+  .tp-swap-chips::-webkit-scrollbar { height: 0; display: none; }
+  .tp-swap-chips { scrollbar-width: none; -ms-overflow-style: none; }
+  /* Asset-Liste: eigener schlanker Balken + weicher Hover auf den Zeilen. */
+  .tp-swap-list::-webkit-scrollbar { width: 6px; }
+  .tp-swap-list::-webkit-scrollbar-track { background: transparent; }
+  .tp-swap-list::-webkit-scrollbar-thumb { background: #1E3A3C; border-radius: 999px; }
+  .tp-swap-list { scrollbar-width: thin; scrollbar-color: #1E3A3C transparent; }
+  .tp-swap-row { transition: background 0.12s, border-color 0.12s; }
+  .tp-swap-row:hover { background: rgba(0,222,225,0.06) !important; }
+
   /* Ø-Kaufpreis-Dropdown: auf dem PC wie gehabt (rechtsbündig unter dem Trigger-Button). Auf dem
      Handy reicht der Platz neben dem Button oft nicht -- das Panel ragte dann über den
      Bildschirmrand hinaus ("hängt zur Hälfte im Nichts"). Deshalb wird es auf schmalen

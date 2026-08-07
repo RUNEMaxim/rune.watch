@@ -14,6 +14,24 @@ const {
 // niemand versehentlich an eine ungültige Adresse sendet. Sind BEIDE ungültig, verschwindet
 // der Spenden-Bereich komplett.
 // ============================================================================
+// ============================================================================
+// AFFILIATE-KENNUNG für Swaps -- reine SICHTBARKEIT, KEINE Gebühr.
+//
+// Trägt man hier einen registrierten THORName ein (max. 4 Zeichen, z.B. 'rwch'), wird er
+// zusammen mit affiliate_bps=0 an THORChain übergeben: der Swap ist dadurch in Explorern und
+// Ökosystem-Statistiken rune.watch zuordenbar, kostet den Nutzer aber KEINEN Cent extra.
+// 0 Basispunkte = 0 % Gebühr.
+//
+// Solange das Feld leer ist, wird gar kein Affiliate-Parameter mitgeschickt -- die Swaps
+// laufen dann exakt wie bisher, ohne Kennzeichnung.
+//
+// Voraussetzung: Der THORName muss vorher on-chain registriert werden (kostet eine kleine
+// einmalige RUNE-Gebühr). Ein nicht registrierter Name kann dazu führen, dass THORChain den
+// Quote-Aufruf ablehnt -- deshalb erst eintragen, wenn der Name wirklich existiert.
+// ============================================================================
+const SWAP_AFFILIATE_NAME = 'maxim';
+const SWAP_AFFILIATE_BPS = 0; // 0 = keine Gebühr, nur Namensnennung
+
 const DONATION_ADDRESSES = [
   { chain: 'THORChain', assetsHintKey: 'donateAssetsThorchain', address: 'thor1nzyddftjwdfnnwxrs849stf2yw6c9xzda5jeuy' },
   { chain: 'Ethereum', assetsHintKey: 'donateAssetsEthereum', address: '0x4a342E59Dbbd29b4D254a0975A980467bf4B1Bc1' },
@@ -1593,6 +1611,162 @@ const TR = {
     zh: '离开',
     ru: 'уходят',
     ko: '탈퇴'
+  },
+  swapToggleDirection: {
+    en: 'Swap direction',
+    de: 'Richtung tauschen'
+  },
+  swapRefreshQuote: {
+    en: 'Refresh quote',
+    de: 'Kurs aktualisieren'
+  },
+  swapSameAsset: {
+    en: 'Choose two different assets',
+    de: 'Bitte zwei verschiedene Assets wählen'
+  },
+  swapOpen: {
+    en: 'Open swap',
+    de: 'Swap öffnen'
+  },
+  swapSearchPlaceholder: {
+    en: 'Search asset or chain',
+    de: 'Asset oder Chain suchen'
+  },
+  swapAllChains: {
+    en: 'All',
+    de: 'Alle'
+  },
+  swapNoAssetsFound: {
+    en: 'No matching assets',
+    de: 'Keine passenden Assets'
+  },
+  swapTitle: {
+    en: 'Memoless swaps',
+    de: 'Memoless Swaps'
+  },
+  swapSubtitle: {
+    en: 'Native cross-chain swap via THORChain — no wallet connection needed.',
+    de: 'Nativer Cross-Chain-Swap über THORChain — keine Wallet-Verbindung nötig.'
+  },
+  swapFromLabel: {
+    en: 'You send',
+    de: 'Du sendest'
+  },
+  swapToLabel: {
+    en: 'You receive (approx.)',
+    de: 'Du erhältst (ca.)'
+  },
+  swapSelectAsset: {
+    en: 'Select asset',
+    de: 'Asset wählen'
+  },
+  swapAmountLabel: {
+    en: 'Amount',
+    de: 'Menge'
+  },
+  swapDestinationLabel: {
+    en: 'Your receiving address',
+    de: 'Deine Empfangsadresse'
+  },
+  swapDestinationHint: {
+    en: 'Must be an address you control on the destination chain. Double-check it — this cannot be undone.',
+    de: 'Muss eine Adresse sein, die dir auf der Ziel-Chain gehört. Genau prüfen — das lässt sich nicht rückgängig machen.'
+  },
+  swapGetQuote: {
+    en: 'Get quote',
+    de: 'Kurs abrufen'
+  },
+  swapInvalidAmount: {
+    en: 'Enter a valid amount',
+    de: 'Gültige Menge eingeben'
+  },
+  swapInvalidDestination: {
+    en: 'Enter a destination address',
+    de: 'Empfangsadresse eingeben'
+  },
+  swapQuoteExpectedOut: {
+    en: 'Expected output',
+    de: 'Erwarteter Erhalt'
+  },
+  swapQuoteMinOut: {
+    en: 'Minimum (with slippage protection)',
+    de: 'Minimum (mit Slippage-Schutz)'
+  },
+  swapQuoteFees: {
+    en: 'Total fees',
+    de: 'Gesamtgebühren'
+  },
+  swapQuoteTime: {
+    en: 'Estimated time',
+    de: 'Geschätzte Dauer'
+  },
+  swapQuoteMinAmountWarning: {
+    en: 'Recommended minimum input: {amount} {asset}. Sending less risks the fees consuming most or all of the trade.',
+    de: 'Empfohlene Mindestmenge: {amount} {asset}. Bei weniger können Gebühren einen Großteil oder den ganzen Swap auffressen.'
+  },
+  swapContinue: {
+    en: 'Continue',
+    de: 'Weiter'
+  },
+  swapBack: {
+    en: 'Back',
+    de: 'Zurück'
+  },
+  swapPreparingDeposit: {
+    en: 'Preparing deposit address\u2026',
+    de: 'Bereite Einzahlungsadresse vor\u2026'
+  },
+  swapSendExactTitle: {
+    en: 'Send exactly this amount',
+    de: 'Sende genau diesen Betrag'
+  },
+  swapSendExactWarning: {
+    en: 'Send exactly the amount shown, in one single transaction, to the address below. Sending a different amount or splitting it into multiple transactions may result in loss of funds.',
+    de: 'Sende exakt den angezeigten Betrag in einer einzigen Transaktion an die Adresse unten. Ein abweichender Betrag oder mehrere Teiltransaktionen können zu Verlust der Gelder führen.'
+  },
+  swapLossOfFunds: {
+    en: 'This can result in permanent loss of funds.',
+    de: 'Das kann zu unwiederbringlichem Geldverlust führen.'
+  },
+  swapConfirmUnderstand: {
+    en: 'I understand and will send exactly this amount',
+    de: 'Verstanden, ich sende exakt diesen Betrag'
+  },
+  swapDepositAddress: {
+    en: 'Deposit address',
+    de: 'Einzahlungsadresse'
+  },
+  swapExpiresIn: {
+    en: 'Expires in',
+    de: 'Läuft ab in'
+  },
+  swapExpired: {
+    en: 'This deposit address has expired. Start a new swap.',
+    de: 'Diese Einzahlungsadresse ist abgelaufen. Starte einen neuen Swap.'
+  },
+  swapOneTimeUse: {
+    en: 'This address is for this swap only \u2014 do not reuse it or bookmark it for future sends.',
+    de: 'Diese Adresse gilt nur für diesen Swap \u2014 nicht wiederverwenden oder für spätere Sendungen speichern.'
+  },
+  swapStartNew: {
+    en: 'Start a new swap',
+    de: 'Neuen Swap starten'
+  },
+  swapNoWalletNeeded: {
+    en: 'No wallet connection needed \u2014 send from any exchange, hardware wallet, or app that lets you send crypto.',
+    de: 'Keine Wallet-Verbindung nötig \u2014 sende von jeder Börse, Hardware-Wallet oder App, mit der du Krypto versenden kannst.'
+  },
+  swapErrorGeneric: {
+    en: 'Something went wrong. Please try again.',
+    de: 'Etwas ist schiefgelaufen. Bitte nochmal versuchen.'
+  },
+  swapLoadingAssets: {
+    en: 'Loading available assets\u2026',
+    de: 'Lade verfügbare Assets\u2026'
+  },
+  swapPoweredBy: {
+    en: 'Powered directly by THORChain \u2014 no third-party service in between.',
+    de: 'Läuft direkt über THORChain \u2014 kein Drittanbieter dazwischen.'
   },
   donate: {
     en: 'Donate',
@@ -4165,6 +4339,18 @@ function PortfolioChartInner({
     for (const d of ma200OverrideSeries) {
       if (d.date >= fullXMin - pad && d.date <= fullXMax + pad) ma200Series.push(d);
     }
+    // Die MA200-Reihe beruht auf TAGES-Schlusskursen und endet daher beim letzten
+    // abgeschlossenen Tag -- der Chart selbst läuft aber bis zum aktuellen Live-Kurs. Ohne
+    // diese Ergänzung bricht die Linie sichtbar vor dem rechten Rand ab. Der letzte bekannte
+    // MA-Wert wird deshalb waagerecht bis zum Chart-Ende verlängert (der 200-Tage-Schnitt
+    // ändert sich innerhalb eines Tages ohnehin nur minimal).
+    const last = ma200Series[ma200Series.length - 1];
+    if (last && last.date < fullXMax) {
+      ma200Series.push({
+        date: fullXMax,
+        value: last.value
+      });
+    }
   } else if (isCandles || allowMA200) {
     let sum = 0;
     for (let i = 0; i < data.length; i++) {
@@ -4459,12 +4645,23 @@ function PortfolioChartInner({
     clearTouchCrosshairState();
     const down = svgPointerDownRef.current;
     svgPointerDownRef.current = null;
+    // WICHTIG: Das Flag IMMER zuerst konsumieren (auslesen + sofort zurücksetzen), bevor
+    // irgendein früher return greifen kann. Vorher stand "if (dragging) return;" davor:
+    // beim Anklicken einer Trendlinie wird justInteractedRef gesetzt UND dragging aktiviert,
+    // der zugehörige pointerup stieg dann früh aus und ließ das Flag dauerhaft auf true
+    // stehen. Danach wurde JEDER weitere Tap auf die leere Fläche als "schon behandelt"
+    // verworfen -- das Abwählen der Linie funktionierte nie wieder.
+    const wasJustInteracted = justInteractedRef.current;
+    justInteractedRef.current = false;
     if (dragging) return;
-    if (justInteractedRef.current) {
-      justInteractedRef.current = false;
-      return;
-    }
-    if (panDrag || pinchStateRef.current) return;
+    if (wasJustInteracted) return;
+    // panDrag NICHT mehr pauschal abbrechen: mit der Maus wird panDrag schon beim reinen
+    // Drücken gesetzt (fürs Verschieben des Charts), also auch bei einem simplen Klick ohne
+    // Bewegung. Dadurch stieg auf dem PC JEDER Klick hier vorzeitig aus und das Abwählen
+    // einer Trendlinie funktionierte nie -- auf dem Handy dagegen schon, weil dort kein
+    // panDrag gesetzt wird. Ob wirklich verschoben wurde, klärt ohnehin die
+    // Distanz-Prüfung ein paar Zeilen weiter unten (dist > 10).
+    if (pinchStateRef.current) return;
     if (!down) return;
     const pt = getLocalPoint(e);
     const dist = Math.hypot(pt.x - down.x, pt.y - down.y);
@@ -6857,6 +7054,777 @@ const fetchThorchainDenomSupply = async denom => {
   if (!Number.isFinite(amount)) throw new Error('SUPPLY_MISSING');
   return amount;
 };
+// ============================================================================
+// Swap-Feature, aufgeteilt in drei Komponenten:
+//   SwapTriggerCard -- kompaktes Kärtchen, das sich in die Kachel-Struktur der Seite einfügt
+//                      (gleiche Größe/Optik wie das 24h-Volumen-Kärtchen). Klick öffnet:
+//   SwapModal       -- mittig positioniertes Fenster mit dem eigentlichen Ablauf
+//   AssetPickerView -- kompakte, durchsuchbare Asset-Auswahl (Chain-Filter + kuratierte
+//                      Reihenfolge nach Bekanntheit), angelehnt an swap.thorchain.org
+// Alle als eigene Top-Level-Komponenten statt inline verschachtelt -- bei tief verschachtelten
+// React.createElement(...)-Aufrufen verzählt man sich beim Klammernzählen leicht.
+// ============================================================================
+
+// Kuratierte Reihenfolge wie im Referenz-Interface: die gängigsten Assets zuerst, alles
+// Weitere danach alphabetisch. Ohne das steht z.B. eine exotische Chain vor BTC/ETH.
+const SWAP_FEATURED_ASSETS = ['BTC.BTC', 'ETH.ETH', 'THOR.RUNE', 'AVAX.AVAX', 'BSC.BNB', 'BCH.BCH', 'DOGE.DOGE', 'GAIA.ATOM', 'LTC.LTC', 'XRP.XRP', 'BASE.ETH', 'ARB.ETH', 'OP.ETH', 'SOL.SOL', 'TRON.TRX', 'POL.POL', 'ZEC.ZEC', 'NEAR.NEAR', 'BERA.BERA', 'GNO.xDAI'];
+
+// Anzeige-Nachkommastellen je Asset: ETH mit 4, alles Uebrige mit 2 Stellen.
+// Sicherheitsnetz: Betraege, die dabei auf 0 gerundet wuerden (z.B. kleine BTC-Mengen),
+// bekommen so viele Stellen wie noetig -- sonst stuende dort irrefuehrend "0.00".
+function formatSwapAmount(value, ticker, lang) {
+  if (!Number.isFinite(value)) return '';
+  const base = String(ticker || '').toUpperCase() === 'ETH' ? 4 : 2;
+  const rounded = Number(value.toFixed(base));
+  if (rounded === 0 && value > 0) {
+    return value.toLocaleString(localeFor(lang), { maximumFractionDigits: 8 });
+  }
+  return value.toLocaleString(localeFor(lang), {
+    minimumFractionDigits: base,
+    maximumFractionDigits: base
+  });
+}
+
+// "BTC.BTC" -> { chain: 'BTC', ticker: 'BTC' }; "ETH.USDC-0X123..." -> { chain: 'ETH', ticker: 'USDC' }
+function parseSwapAsset(identifier) {
+  const raw = String(identifier || '');
+  const dot = raw.indexOf('.');
+  const chain = dot > 0 ? raw.slice(0, dot) : raw;
+  const rest = dot > 0 ? raw.slice(dot + 1) : '';
+  const ticker = (rest.split('-')[0] || chain).toUpperCase();
+  return { chain, ticker, identifier: raw };
+}
+
+function sortSwapAssets(list) {
+  return list.slice().sort((a, b) => {
+    const ia = SWAP_FEATURED_ASSETS.indexOf(a);
+    const ib = SWAP_FEATURED_ASSETS.indexOf(b);
+    if (ia !== -1 && ib !== -1) return ia - ib;
+    if (ia !== -1) return -1;
+    if (ib !== -1) return 1;
+    return a.localeCompare(b);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Kompaktes Trigger-Kärtchen -- fügt sich in die bestehende Kachel-Struktur ein
+// ---------------------------------------------------------------------------
+function SwapTriggerCard({ lang, onOpen }) {
+  const headerRow = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#B7D4D6',
+      fontSize: 11.5,
+      fontWeight: 700,
+      letterSpacing: '0.04em',
+      textTransform: 'uppercase'
+    }
+  }, t('swapTitle', lang)));
+
+  const teaser = /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#8FA9AB',
+      fontSize: 10.5,
+      lineHeight: 1.45,
+      marginBottom: 14
+    }
+  }, t('swapSubtitle', lang));
+
+  const openButton = /*#__PURE__*/React.createElement("button", {
+    onClick: onOpen,
+    style: {
+      width: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      background: 'linear-gradient(135deg, #14F1F4 0%, #00C2CC 100%)',
+      color: '#04191A',
+      border: 'none',
+      borderRadius: 10,
+      padding: '12px 16px',
+      fontSize: 12.5,
+      fontWeight: 800,
+      boxShadow: '0 6px 18px -8px rgba(0,222,225,0.7)',
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement(IconSwapArrows, {
+    size: 14
+  }), t('swapHere', lang));
+
+  return /*#__PURE__*/React.createElement("div", {
+    className: "tp-side-card",
+    style: {
+      ...cardShellStyle,
+      padding: '18px 20px',
+      // Kraeftiger als die reinen Daten-Karten: leichter Tuerkis-Schimmer im Verlauf und im
+      // Rahmen, damit die Aktions-Karte sich klar abhebt statt blass mitzulaufen.
+      background: 'linear-gradient(165deg, #0E2A2C 0%, #0A1618 100%)',
+      border: '1px solid #24565A',
+      boxShadow: '0 1px 0 rgba(255,255,255,0.06) inset, 0 14px 30px -18px rgba(0,0,0,0.8), 0 0 0 1px rgba(0,222,225,0.07)'
+    }
+  }, headerRow, teaser, openButton);
+}
+
+// ---------------------------------------------------------------------------
+// Asset-Auswahl: Suche + Chain-Filter + kompakte Liste
+// ---------------------------------------------------------------------------
+function AssetPickerView({ lang, assets, selected, onSelect }) {
+  const [query, setQuery] = useState('');
+  const [chainFilter, setChainFilter] = useState('ALL');
+
+  const parsed = (assets || []).map(parseSwapAsset);
+  const chains = ['ALL', ...Array.from(new Set(parsed.map(a => a.chain))).sort()];
+  const q = query.trim().toLowerCase();
+
+  // WICHTIG (aus dem Referenz-Interface übernommen): OHNE Sucheingabe und mit Filter "Alle"
+  // werden NUR die kuratierten Standard-Assets gezeigt -- sonst kippt die Liste sofort in
+  // hunderte Einträge und wirkt unübersichtlich. Erst beim Tippen wird der volle Bestand
+  // durchsucht; ein gewählter Chain-Filter zeigt ebenfalls alles dieser Chain.
+  let visible;
+  if (!q && chainFilter === 'ALL') {
+    visible = parsed.filter(a => SWAP_FEATURED_ASSETS.includes(a.identifier));
+    if (!visible.length) visible = parsed.slice(0, 20); // Notnagel, falls gar nichts matcht
+  } else {
+    visible = parsed.filter(a => {
+      if (chainFilter !== 'ALL' && a.chain !== chainFilter) return false;
+      if (!q) return true;
+      return a.ticker.toLowerCase().includes(q) || a.chain.toLowerCase().includes(q) || a.identifier.toLowerCase().includes(q);
+    });
+  }
+
+  // Trefferqualität wie im Original: exakter Ticker zuerst, dann "beginnt mit", dann "enthält",
+  // danach die kuratierten Assets, zuletzt der Rest -- jeweils alphabetisch innerhalb der Gruppe.
+  const priority = a => {
+    const tk = a.ticker.toLowerCase();
+    if (q) {
+      if (tk === q) return 1;
+      if (tk.startsWith(q)) return 2;
+      if (tk.includes(q)) return 3;
+    }
+    const idx = SWAP_FEATURED_ASSETS.indexOf(a.identifier);
+    if (idx !== -1) return 6 + idx / 1000;
+    return 7;
+  };
+  visible = visible.slice().sort((a, b) => {
+    const pa = priority(a), pb = priority(b);
+    if (pa !== pb) return pa - pb;
+    return a.ticker.localeCompare(b.ticker);
+  });
+
+  const searchField = /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    value: query,
+    onChange: e => setQuery(e.target.value),
+    placeholder: t('swapSearchPlaceholder', lang),
+    autoFocus: true,
+    style: {
+      width: '100%', background: '#0E2426', border: '1px solid #1A3436',
+      borderRadius: 9, padding: '9px 12px', color: '#DCE7E8', fontSize: 12,
+      fontFamily: "'Inter', sans-serif", outline: 'none', boxSizing: 'border-box'
+    }
+  });
+
+  const chainChips = /*#__PURE__*/React.createElement("div", {
+    className: "tp-swap-chips",
+    style: { display: 'flex', gap: 5, overflowX: 'auto', marginTop: 10, paddingBottom: 3 }
+  }, chains.map(ch => /*#__PURE__*/React.createElement("button", {
+    key: ch,
+    onClick: () => setChainFilter(ch),
+    style: {
+      flexShrink: 0,
+      background: chainFilter === ch ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: chainFilter === ch ? '#00DEE1' : '#7C9698',
+      border: `1px solid ${chainFilter === ch ? 'rgba(0,222,225,0.55)' : '#1A3436'}`,
+      borderRadius: 999, padding: '4px 10px', fontSize: 10, fontWeight: 600,
+      cursor: 'pointer', fontFamily: "'Inter', sans-serif", whiteSpace: 'nowrap'
+    }
+  }, ch === 'ALL' ? t('swapAllChains', lang) : ch)));
+
+  const rows = visible.map(a => {
+    const isSel = a.identifier === selected;
+    return /*#__PURE__*/React.createElement("button", {
+      key: a.identifier,
+      className: "tp-swap-row",
+      onClick: () => onSelect(a.identifier),
+      style: {
+        width: '100%', display: 'flex', alignItems: 'center',
+        justifyContent: 'space-between', gap: 10,
+        background: isSel ? 'rgba(0,222,225,0.08)' : 'transparent',
+        border: `1px solid ${isSel ? 'rgba(0,222,225,0.35)' : 'transparent'}`,
+        borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
+        textAlign: 'left', fontFamily: "'Inter', sans-serif"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 0 }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: { color: '#FFFFFF', fontSize: 12.5, fontWeight: 700, lineHeight: 1.15 }
+    }, a.ticker), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#5C7274', fontSize: 9.5, lineHeight: 1.15,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+      }
+    }, a.chain)), isSel && /*#__PURE__*/React.createElement("span", {
+      style: { flexShrink: 0, color: '#00DEE1' }
+    }, /*#__PURE__*/React.createElement(IconCheck, { size: 12 })));
+  });
+
+  const emptyState = !visible.length && /*#__PURE__*/React.createElement("div", {
+    style: { padding: '20px 4px', textAlign: 'center', color: '#5C7274', fontSize: 11 }
+  }, t('swapNoAssetsFound', lang));
+
+  const list = /*#__PURE__*/React.createElement("div", {
+    className: "tp-swap-list",
+    style: {
+      marginTop: 10, maxHeight: 320, overflowY: 'auto',
+      display: 'flex', flexDirection: 'column', gap: 1
+    }
+  }, rows, emptyState);
+
+  return /*#__PURE__*/React.createElement("div", null, searchField, chainChips, list);
+}
+
+// ---------------------------------------------------------------------------
+// Haupt-Fenster (mittig, per Portal) mit Formular / Quote / Deposit
+// ---------------------------------------------------------------------------
+function SwapModal(props) {
+  const {
+    isOpen, onClose, lang, step,
+    memolessAssets, memolessAssetsLoading, memolessAssetsError, pools,
+    fromAsset, setFromAsset, toAsset, setToAsset,
+    amount, setAmount, destination, setDestination,
+    quoteLoading, quoteError, quote, quoteAt, quoteTtlMs, onRefreshQuote, runePrice, assetUsd,
+    onConfirmQuote, onBack, registerLoading, registerError,
+    deposit, nowMs, warningChecked, setWarningChecked, onStartNew
+  } = props;
+
+  const [pickerFor, setPickerFor] = useState(null); // null | 'from' | 'to'
+
+  if (!isOpen) return null;
+
+  // USD-Kurs je Asset: RUNE aus der Preisanzeige, alles Übrige aus den Pool-Kursen.
+  const usdPriceOf = assetId => {
+    if (!assetId) return null;
+    if (assetId === 'THOR.RUNE') return Number.isFinite(runePrice) ? runePrice : null;
+    const v = assetUsd && assetUsd[assetId];
+    return Number.isFinite(v) ? v : null;
+  };
+  // Einheitliche Klammer-Darstellung "( $123.45 )" -- entfällt still, wenn kein Kurs vorliegt,
+  // statt einen falschen oder leeren Wert anzuzeigen.
+  const usdSuffix = (amountNum, assetId, extraStyle) => {
+    const p = usdPriceOf(assetId);
+    if (!Number.isFinite(amountNum) || amountNum <= 0 || p == null) return null;
+    return /*#__PURE__*/React.createElement("span", {
+      style: { color: '#7FA0A2', fontWeight: 500, marginLeft: 6, ...(extraStyle || {}) }
+    }, "(", fmtUSD(amountNum * p, lang, 'usd'), ")");
+  };
+
+  const fromInfo = parseSwapAsset(fromAsset);
+  const toInfo = parseSwapAsset(toAsset);
+
+  const closeButton = /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    "aria-label": t('closeWord', lang),
+    style: {
+      flexShrink: 0, background: 'transparent', border: '1px solid #1A3436',
+      borderRadius: 7, width: 28, height: 28, display: 'flex',
+      alignItems: 'center', justifyContent: 'center', color: '#7C9698',
+      cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: 0
+    }
+  }, "\u2715");
+
+  const header = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      gap: 12, marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#B7D4D6', fontSize: 11.5, fontWeight: 700,
+      letterSpacing: '0.04em', textTransform: 'uppercase'
+    }
+  }, pickerFor ? t('swapSelectAsset', lang) : t('swapTitle', lang)), closeButton);
+
+  // Im Auswahl-Modus: Zurück-Pfeil LINKS neben dem Titel (statt eines Buttons ganz unten --
+  // der war nach dem Scrollen durch die Liste gar nicht mehr sichtbar).
+  const pickerHeader = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      gap: 12, marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPickerFor(null),
+    "aria-label": t('swapBack', lang),
+    style: {
+      flexShrink: 0, background: 'transparent', border: '1px solid #1A3436',
+      borderRadius: 7, width: 28, height: 28, display: 'flex',
+      alignItems: 'center', justifyContent: 'center', color: '#7C9698',
+      cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0
+    }
+  }, "\u2190"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#96AEB0', fontSize: 11.5, fontWeight: 600,
+      letterSpacing: '0.04em', textTransform: 'uppercase'
+    }
+  }, t('swapSelectAsset', lang))), closeButton);
+
+  // ---- Asset-Auswahl statt Formular anzeigen ----
+  if (pickerFor) {
+    // Fallback: liefert der Memoless-Assets-Endpunkt nichts (Ausfall/CORS/leer), wird die
+    // Pool-Liste verwendet -- sonst waere bei "Du sendest" gar nichts auswaehlbar. Beides sind
+    // gueltige Quell-Assets; ob der konkrete Swap memoless moeglich ist, zeigt spaetestens die
+    // Registrierung beim Bestaetigen (mit klarer Fehlermeldung statt leerer Liste).
+    const memolessIds = (memolessAssets || []).map(a => a.asset);
+    const poolIds = (pools || []).map(p => p.asset);
+    // WICHTIG: /thorchain/pools listet THOR.RUNE NICHT mit -- RUNE ist die Basis-Waehrung des
+    // Netzwerks und hat keinen eigenen Pool gegen sich selbst. Ohne diese Ergaenzung fehlte
+    // ausgerechnet RUNE komplett in der Auswahl.
+    const withRune = ids => ids.includes('THOR.RUNE') ? ids : ['THOR.RUNE', ...ids];
+    const pickerAssets = pickerFor === 'from' ? withRune(memolessIds.length ? memolessIds : poolIds) : withRune(poolIds);
+    const pickerView = /*#__PURE__*/React.createElement(AssetPickerView, {
+      lang,
+      assets: pickerAssets,
+      selected: pickerFor === 'from' ? fromAsset : toAsset,
+      onSelect: id => {
+        if (pickerFor === 'from') setFromAsset(id);
+        else setToAsset(id);
+        setPickerFor(null);
+      },
+    });
+    return ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
+      onClick: onClose,
+      style: {
+        position: 'fixed', inset: 0, zIndex: 220, background: 'rgba(0,0,0,0.65)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      onClick: e => e.stopPropagation(),
+      className: "tp-swap-scroll",
+      style: {
+        ...cardShellStyle,
+        textAlign: 'left',
+        padding: '20px 20px 18px',
+        maxWidth: 400,
+        width: '100%',
+        maxHeight: '88vh',
+        overflowY: 'auto',
+        borderRadius: 22,
+        border: '1px solid #1E3A3C',
+        boxShadow: '0 1px 0 rgba(255,255,255,0.05) inset, 0 24px 60px -20px rgba(0,0,0,0.85), 0 0 0 1px rgba(0,222,225,0.05)'
+      }
+    }, pickerHeader, pickerView)), document.body);
+  }
+
+  // ---- Asset-Auswahl-Button (statt <select>, wie im Referenz-Interface) ----
+  const assetButton = (info, onClick) => /*#__PURE__*/React.createElement("button", {
+    onClick,
+    style: {
+      flexShrink: 0, display: 'flex', alignItems: 'center', gap: 7,
+      background: '#173033',
+      border: '1px solid #2E5F62', borderRadius: 999,
+      padding: '7px 13px', cursor: 'pointer', fontFamily: "'Inter', sans-serif",
+      transition: 'border-color 0.15s, background 0.15s'
+    },
+    onMouseOver: e => { e.currentTarget.style.borderColor = 'rgba(0,222,225,0.5)'; },
+    onMouseOut: e => { e.currentTarget.style.borderColor = '#24484A'; }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: { color: '#FFFFFF', fontSize: 13, fontWeight: 700, lineHeight: 1.15 }
+  }, info.ticker), /*#__PURE__*/React.createElement("span", {
+    style: { color: '#7FA0A2', fontSize: 9, lineHeight: 1.15, letterSpacing: '0.03em' }
+  }, info.chain)), /*#__PURE__*/React.createElement("span", {
+    style: { color: '#5C7274', fontSize: 9, marginLeft: 1 }
+  }, "\u25BE"));
+
+  const boxStyle = {
+    background: '#0D2426',
+    border: '1px solid #24484A',
+    borderRadius: 16, padding: '15px 16px'
+  };
+  const labelStyle = {
+    fontSize: 10.5, fontWeight: 700, color: '#9FBDBF',
+    letterSpacing: '0.03em', textTransform: 'uppercase', marginBottom: 10
+  };
+
+  const fromBox = /*#__PURE__*/React.createElement("div", {
+    style: boxStyle
+  }, /*#__PURE__*/React.createElement("div", { style: labelStyle }, t('swapFromLabel', lang)),
+  /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', alignItems: 'center', gap: 10 }
+  }, /*#__PURE__*/React.createElement("input", {
+    // Bewusst type="text" statt "number": Zahlenfelder blenden im Browser die grauen
+    // Hoch/Runter-Pfeile ein, die hier nur stören (der Betrag wird immer selbst eingetippt).
+    // inputMode="decimal" sorgt auf dem Handy trotzdem für die Ziffern-Tastatur.
+    type: "text",
+    inputMode: "decimal",
+    autoComplete: "off",
+    spellCheck: false,
+    value: amount,
+    onChange: e => {
+      // Nur Ziffern und EIN Trennzeichen zulassen; Komma wird zu Punkt normalisiert, damit
+      // parseFloat weiter unten unabhängig vom Tastaturlayout korrekt rechnet.
+      let v = e.target.value.replace(',', '.').replace(/[^0-9.]/g, '');
+      const firstDot = v.indexOf('.');
+      if (firstDot !== -1) {
+        v = v.slice(0, firstDot + 1) + v.slice(firstDot + 1).replace(/\./g, '');
+      }
+      setAmount(v);
+    },
+    placeholder: "0.0",
+    style: {
+      flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none',
+      color: '#FFFFFF', fontSize: 24, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }), memolessAssetsLoading ? /*#__PURE__*/React.createElement(IconLoader, { size: 15 }) : assetButton(fromInfo, () => setPickerFor('from'))),
+  usdSuffix(parseFloat(amount), fromAsset, { marginLeft: 0, marginTop: 4, display: 'block', fontSize: 11 }));
+
+  // Richtungstausch: vertauscht Quell- und Ziel-Asset. War bisher nur ein Symbol ohne Funktion.
+  // Der Betrag wird bewusst NICHT mit übernommen -- "1 BTC" ergäbe nach dem Tausch "1 RUNE",
+  // also einen völlig anderen Gegenwert. Stattdessen wird der zuletzt berechnete Erhalt als
+  // neuer Ausgangsbetrag gesetzt, was der Erwartung entspricht (wie im Referenz-Interface).
+  const handleToggleAssets = () => {
+    const prevFrom = fromAsset;
+    const prevTo = toAsset;
+    const outNum = quote ? Number(quote.expected_amount_out) / 1e8 : null;
+    setFromAsset(prevTo);
+    setToAsset(prevFrom);
+    if (Number.isFinite(outNum) && outNum > 0) {
+      // Auf sinnvolle Stellen kürzen, damit im Feld keine 8-stellige Nachkommazahl steht.
+      setAmount(String(Number(outNum.toFixed(8))));
+    }
+  };
+
+  const toggleRow = /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', justifyContent: 'center', margin: '-9px 0', position: 'relative', zIndex: 2 }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: handleToggleAssets,
+    title: t('swapToggleDirection', lang),
+    "aria-label": t('swapToggleDirection', lang),
+    style: {
+      width: 32, height: 32, borderRadius: '50%', padding: 0,
+      background: 'linear-gradient(160deg, #1B3234 0%, #14282A 100%)',
+      border: '4px solid #0A1416', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', color: '#00DEE1', cursor: 'pointer',
+      boxShadow: '0 4px 12px -4px rgba(0,0,0,0.8)',
+      transition: 'transform 0.15s, color 0.15s'
+    },
+    onMouseOver: e => {
+      e.currentTarget.style.transform = 'rotate(180deg)';
+    },
+    onMouseOut: e => {
+      e.currentTarget.style.transform = 'none';
+    }
+  }, /*#__PURE__*/React.createElement(IconSwapArrows, { size: 13 })));
+
+  const expectedOutBase = quote ? Number(quote.expected_amount_out) : null;
+  const expectedOutHuman = Number.isFinite(expectedOutBase) ? formatSwapAmount(expectedOutBase / 1e8, toInfo.ticker, lang) : '';
+
+  // Countdown-Ring: zeigt, wie lange der aktuelle Kurs noch gilt; Klick holt sofort einen neuen.
+  const secsLeft = quoteAt ? Math.max(0, Math.ceil((quoteTtlMs - (nowMs - quoteAt)) / 1000)) : null;
+  const ringR = 9;
+  const ringLen = 2 * Math.PI * ringR;
+  const ringOffset = secsLeft != null ? ringLen - ringLen * (secsLeft * 1000 / quoteTtlMs) : ringLen;
+  const quoteTimer = quote && !quoteLoading && secsLeft != null && /*#__PURE__*/React.createElement("button", {
+    onClick: onRefreshQuote,
+    title: t('swapRefreshQuote', lang),
+    style: {
+      position: 'relative', width: 22, height: 22, padding: 0, background: 'transparent',
+      border: 'none', cursor: 'pointer', flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 22, height: 22, viewBox: "0 0 22 22",
+    style: { transform: 'rotate(-90deg)' }
+  }, /*#__PURE__*/React.createElement("circle", {
+    cx: 11, cy: 11, r: ringR, fill: "none", stroke: "#1C3739", strokeWidth: 2
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: 11, cy: 11, r: ringR, fill: "none", stroke: "#00DEE1", strokeWidth: 2,
+    strokeDasharray: ringLen, strokeDashoffset: ringOffset, strokeLinecap: "round"
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+      fontSize: 8.5, fontWeight: 700, color: '#7FA0A2', fontFamily: "'Inter', sans-serif"
+    }
+  }, secsLeft));
+
+  const toBox = /*#__PURE__*/React.createElement("div", {
+    style: boxStyle
+  }, /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }
+  }, /*#__PURE__*/React.createElement("div", { style: labelStyle }, t('swapToLabel', lang)), quoteTimer),
+  /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', alignItems: 'center', gap: 10 }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1, minWidth: 0, color: expectedOutHuman ? '#FFFFFF' : '#4C6062',
+      fontSize: 24, fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif",
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+    }
+  }, expectedOutHuman || "0.0"), assetButton(toInfo, () => setPickerFor('to'))),
+  usdSuffix(Number.isFinite(expectedOutBase) ? expectedOutBase / 1e8 : null, toAsset, { marginLeft: 0, marginTop: 4, display: 'block', fontSize: 11 }));
+
+  const stackedBoxes = /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', flexDirection: 'column', gap: 6 }
+  }, fromBox, toggleRow, toBox);
+
+  const destinationField = /*#__PURE__*/React.createElement("div", {
+    style: { marginTop: 10 }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text", value: destination, onChange: e => setDestination(e.target.value),
+    placeholder: t('swapDestinationLabel', lang),
+    style: {
+      width: '100%', background: '#0E2426', border: '1px solid #1A3436', borderRadius: 10,
+      padding: '11px 14px', color: '#DCE7E8', fontSize: 12,
+      fontFamily: "'JetBrains Mono', monospace", outline: 'none', boxSizing: 'border-box'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: { fontSize: 10, color: '#5C7274', marginTop: 5, lineHeight: 1.4 }
+  }, t('swapDestinationHint', lang)));
+
+  const errBox = (msg, key) => msg && /*#__PURE__*/React.createElement("div", {
+    key,
+    style: {
+      marginTop: 10, fontSize: 11.5, color: '#C97A7A',
+      background: 'rgba(201,122,122,0.1)', border: '1px solid rgba(201,122,122,0.3)',
+      borderRadius: 8, padding: '8px 10px'
+    }
+  }, msg);
+
+  let detailsBox = null, minWarning = null;
+  if (quote) {
+    const feeBase = Number(quote?.fees?.total);
+    const feeAssetId = quote?.fees?.asset || toAsset;
+    const feeTicker = parseSwapAsset(feeAssetId).ticker;
+    const feeAmount = Number.isFinite(feeBase) ? feeBase / 1e8 : null;
+    const feeHuman = feeAmount != null ? formatSwapAmount(feeAmount, feeTicker, lang) : null;
+
+    const timeSec = Number(quote.total_swap_seconds);
+    const timeHuman = Number.isFinite(timeSec) ? `~${Math.max(1, Math.round(timeSec / 60))} min` : null;
+    const rowStyle = { display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#96AEB0', padding: '6px 0' };
+    const valStyle = { color: '#DCE7E8', fontWeight: 600 };
+    // Umrechnungszeile wie im Referenz-Interface: macht den Kurs auf einen Blick vergleichbar,
+    // unabhaengig von der eingegebenen Menge.
+    const enteredNum = parseFloat(amount);
+    const outNum = Number(quote.expected_amount_out) / 1e8;
+    const rateRow = Number.isFinite(enteredNum) && enteredNum > 0 && Number.isFinite(outNum) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex', justifyContent: 'space-between', fontSize: 11,
+        color: '#96AEB0', padding: '6px 0', borderBottom: '1px solid #16292B'
+      }
+    }, `1 ${fromInfo.ticker}`, /*#__PURE__*/React.createElement("span", {
+      style: { color: '#DCE7E8', fontWeight: 600 }
+    }, "= ", formatSwapAmount(outNum / enteredNum, toInfo.ticker, lang), " ", toInfo.ticker,
+      usdSuffix(outNum / enteredNum, toAsset)));
+
+    detailsBox = /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 12, padding: '4px 12px',
+        background: 'rgba(13,36,38,0.6)',
+        border: '1px solid #1A3436',
+        borderRadius: 12
+      }
+    }, rateRow, feeHuman && /*#__PURE__*/React.createElement("div", { style: rowStyle }, t('swapQuoteFees', lang),
+      /*#__PURE__*/React.createElement("span", { style: valStyle }, feeHuman, " ", feeTicker,
+        usdSuffix(feeAmount, feeAssetId))),
+    timeHuman && /*#__PURE__*/React.createElement("div", { style: rowStyle }, t('swapQuoteTime', lang),
+      /*#__PURE__*/React.createElement("span", { style: valStyle }, timeHuman)));
+
+    const recMinBase = Number(quote.recommended_min_amount_in);
+    const enteredBase = Math.round((parseFloat(amount) || 0) * 1e8);
+    if (Number.isFinite(recMinBase) && enteredBase < recMinBase) {
+      minWarning = /*#__PURE__*/React.createElement("div", {
+        style: {
+          marginTop: 4, fontSize: 10.5, color: '#D9A441',
+          background: 'rgba(217,164,65,0.1)', border: '1px solid rgba(217,164,65,0.3)',
+          borderRadius: 8, padding: '7px 10px', lineHeight: 1.45
+        }
+      }, t('swapQuoteMinAmountWarning', lang).replace('{amount}', (recMinBase / 1e8).toLocaleString(localeFor(lang), { maximumFractionDigits: 8 })).replace('{asset}', fromInfo.ticker));
+    }
+  }
+
+  const busy = quoteLoading || registerLoading;
+  const mainButton = /*#__PURE__*/React.createElement("button", {
+    onClick: onConfirmQuote,
+    disabled: busy,
+    style: {
+      width: '100%', marginTop: 12,
+      background: busy ? '#1A3436' : 'linear-gradient(135deg, #14F1F4 0%, #00C2CC 100%)',
+      color: busy ? '#7C9698' : '#04191A', border: 'none', borderRadius: 12,
+      padding: '14px 16px', fontSize: 13.5, fontWeight: 800,
+      boxShadow: busy ? 'none' : '0 8px 22px -10px rgba(0,222,225,0.75)',
+      cursor: busy ? 'default' : 'pointer', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', gap: 8, fontFamily: "'Inter', sans-serif"
+    }
+  }, busy && /*#__PURE__*/React.createElement(IconLoader, { size: 14 }),
+  registerLoading ? t('swapPreparingDeposit', lang) : t('swapContinue', lang));
+
+  const backLink = quote && !registerLoading && /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    style: {
+      width: '100%', marginTop: 8, background: 'transparent', color: '#7C9698',
+      border: 'none', padding: 4, fontSize: 11.5, fontWeight: 600,
+      cursor: 'pointer', fontFamily: "'Inter', sans-serif"
+    }
+  }, t('swapBack', lang));
+
+  const formContent = /*#__PURE__*/React.createElement(React.Fragment, null,
+    stackedBoxes, destinationField,
+    errBox(quoteError, 'qerr'),
+    detailsBox, minWarning, errBox(registerError, 'rerr'),
+    mainButton, backLink);
+
+  // ---- Deposit-Ansicht ----
+  let depositContent = null;
+  if (deposit) {
+    const secLeft = deposit.expiresAtMs ? Math.max(0, Math.round((deposit.expiresAtMs - nowMs) / 1000)) : null;
+    const expired = secLeft === 0;
+    const countdown = secLeft != null ? `${Math.floor(secLeft / 60)}:${String(secLeft % 60).padStart(2, '0')}` : null;
+    const revealed = warningChecked;
+
+    const warningBox = /*#__PURE__*/React.createElement("label", {
+      style: {
+        display: 'flex', alignItems: 'flex-start', gap: 8,
+        background: 'rgba(217,164,65,0.08)', border: '1px solid rgba(217,164,65,0.3)',
+        borderRadius: 10, padding: '10px 12px', cursor: 'pointer'
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "checkbox", checked: warningChecked,
+      onChange: e => setWarningChecked(e.target.checked),
+      style: { marginTop: 2, width: 14, height: 14, flexShrink: 0, accentColor: '#D9A441' }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: { fontSize: 11, color: '#C9A461', lineHeight: 1.5 }
+    }, /*#__PURE__*/React.createElement("strong", null, t('swapSendExactTitle', lang)), ". ",
+      t('swapSendExactWarning', lang), " ",
+      /*#__PURE__*/React.createElement("strong", null, t('swapLossOfFunds', lang))));
+
+    const depositBox = /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12,
+        background: '#0E2426', border: '1px solid #1A3436', borderRadius: 14,
+        padding: '18px 16px', marginTop: 10
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: { fontSize: 19, fontWeight: 700, color: '#DCE7E8', fontFamily: "'Space Grotesk', sans-serif" }
+    }, deposit.amount, " ", fromInfo.ticker), /*#__PURE__*/React.createElement(CopyIconButton, { value: deposit.amount })),
+    usdSuffix(parseFloat(deposit.amount), fromAsset, { marginLeft: 0, marginTop: -4, fontSize: 11 }),
+    deposit.qrCodeDataUrl && /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: 156, height: 156, background: '#FFFFFF', borderRadius: 14, padding: 9,
+        boxSizing: 'border-box', filter: revealed ? 'none' : 'blur(8px)', transition: 'filter 0.15s'
+      }
+    }, /*#__PURE__*/React.createElement("img", {
+      src: deposit.qrCodeDataUrl, alt: t('swapDepositAddress', lang),
+      style: { width: '100%', height: '100%' }
+    })),
+    /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex', alignItems: 'center', gap: 8,
+        filter: revealed ? 'none' : 'blur(6px)', userSelect: revealed ? 'auto' : 'none',
+        transition: 'filter 0.15s'
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5, color: '#B7C7C8',
+        fontFamily: "'JetBrains Mono', monospace", wordBreak: 'break-all'
+      }
+    }, deposit.address), revealed && /*#__PURE__*/React.createElement(CopyIconButton, { value: deposit.address })),
+    expired ? /*#__PURE__*/React.createElement("div", {
+      style: { fontSize: 11.5, color: '#C97A7A', fontWeight: 600 }
+    }, t('swapExpired', lang)) : countdown && /*#__PURE__*/React.createElement("div", {
+      style: { fontSize: 10.5, color: '#7C9698' }
+    }, t('swapExpiresIn', lang), ": ", /*#__PURE__*/React.createElement("span", {
+      style: { color: '#D9A441', fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }
+    }, countdown)));
+
+    depositContent = /*#__PURE__*/React.createElement(React.Fragment, null, warningBox, depositBox,
+    /*#__PURE__*/React.createElement("div", {
+      style: { fontSize: 10, color: '#5C7274', textAlign: 'center', lineHeight: 1.4, marginTop: 8 }
+    }, t('swapOneTimeUse', lang)),
+    /*#__PURE__*/React.createElement("button", {
+      onClick: onStartNew,
+      style: {
+        width: '100%', marginTop: 10, background: 'transparent', color: '#96AEB0',
+        border: '1px solid #1A3436', borderRadius: 10, padding: '10px 16px',
+        fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: "'Inter', sans-serif"
+      }
+    }, t('swapStartNew', lang)));
+  }
+
+  const poweredBy = /*#__PURE__*/React.createElement("div", {
+    style: { marginTop: 14, textAlign: 'center', fontSize: 9.5, color: '#3E5254' }
+  }, t('swapPoweredBy', lang));
+
+  const body = step === 'deposit' && deposit ? depositContent : formContent;
+
+  return ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: 'fixed', inset: 0, zIndex: 220, background: 'rgba(0,0,0,0.65)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "tp-swap-scroll",
+    style: {
+      ...cardShellStyle,
+      textAlign: 'left',
+      padding: '20px 20px 18px',
+      maxWidth: 400,
+      width: '100%',
+      maxHeight: '88vh',
+      overflowY: 'auto',
+      borderRadius: 22,
+      border: '1px solid #1E3A3C',
+      boxShadow: '0 1px 0 rgba(255,255,255,0.05) inset, 0 24px 60px -20px rgba(0,0,0,0.85), 0 0 0 1px rgba(0,222,225,0.05)'
+    }
+  }, header, body, poweredBy)), document.body);
+}
+
+// Kleiner, wiederverwendbarer Kopier-Button für die Deposit-Ansicht.
+function CopyIconButton({ value }) {
+  const [copied, setCopied] = useState(false);
+  const doCopy = async () => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = value;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {/* Kopieren fehlgeschlagen -- Wert bleibt sichtbar zum Abtippen */}
+  };
+  return /*#__PURE__*/React.createElement("button", {
+    onClick: doCopy,
+    style: {
+      flexShrink: 0,
+      background: copied ? 'rgba(111,191,143,0.16)' : 'rgba(0,222,225,0.1)',
+      border: `1px solid ${copied ? 'rgba(111,191,143,0.45)' : 'rgba(0,222,225,0.35)'}`,
+      borderRadius: 6, width: 24, height: 24, display: 'flex',
+      alignItems: 'center', justifyContent: 'center',
+      color: copied ? '#6FBF8F' : '#00DEE1', cursor: 'pointer', padding: 0
+    }
+  }, copied ? /*#__PURE__*/React.createElement(IconCheck, { size: 11 }) : /*#__PURE__*/React.createElement(IconCopy, { size: 11 }));
+}
+
 function ThorchainPortfolio() {
   // lang wird ganz oben deklariert (statt weiter unten bei den anderen UI-Einstellungen),
   // weil der Node-Polling-Effect weiter unten im Code sie bereits braucht, um
@@ -7030,6 +7998,305 @@ function ThorchainPortfolio() {
 
   const [donationCopied, setDonationCopied] = useState(null);
   const [donationOpen, setDonationOpen] = useState(false);
+
+  // ============================================================================
+  // SWAP-FEATURE (memoless / "instant" Swaps direkt über THORChain)
+  // ============================================================================
+  // Läuft komplett ohne Wallet-Verbindung und ohne Drittanbieter-SDK: der Nutzer sendet von
+  // IRGENDWO (Exchange, Hardware-Wallet, jede App) an eine von THORChain selbst ausgegebene
+  // Einmal-Adresse. rune.watch fasst zu keinem Zeitpunkt einen privaten Schlüssel an, signiert
+  // nichts und hält kein Geld -- die Seite zeigt nur an, wohin und wie viel gesendet werden muss.
+  //
+  // Drei Aufrufe, alle direkt gegen THORChains eigene, öffentliche, kostenlose Endpunkte (kein
+  // API-Key nötig, kein SwapKit, kein Drittanbieter):
+  //  1. GET  [THORNode]/thorchain/quote/swap  -- liefert u.a. den fertigen Swap-Memo
+  //  2. POST https://api.thorchain.org/memoless/api/v1/register   -- registriert den Memo,
+  //     liefert eine Referenz-Nummer zurück
+  //  3. POST https://api.thorchain.org/memoless/api/v1/preflight  -- liefert die tatsächliche
+  //     Einzahlungsadresse + fertigen QR-Code + Ablaufzeit
+  const MEMOLESS_API_BASE = 'https://api.thorchain.org/memoless/api/v1';
+
+  const [swapModalOpen, setSwapModalOpen] = useState(false);
+  const [swapStep, setSwapStep] = useState('form'); // 'form' | 'quote' | 'deposit'
+
+  const [swapMemolessAssets, setSwapMemolessAssets] = useState([]); // [{asset, decimals, priceUSD, status}]
+  const [swapMemolessAssetsLoading, setSwapMemolessAssetsLoading] = useState(false);
+  const [swapMemolessAssetsError, setSwapMemolessAssetsError] = useState(null);
+
+  const [swapPools, setSwapPools] = useState([]); // [{asset}] -- für die Ziel-Asset-Auswahl
+  const [swapPoolsLoading, setSwapPoolsLoading] = useState(false);
+
+  const [swapFromAsset, setSwapFromAsset] = useState('');
+  const [swapToAsset, setSwapToAsset] = useState('THOR.RUNE');
+  const [swapAmount, setSwapAmount] = useState('');
+  const [swapDestination, setSwapDestination] = useState('');
+
+  const [swapQuote, setSwapQuote] = useState(null);
+  const [swapQuoteLoading, setSwapQuoteLoading] = useState(false);
+  const [swapQuoteError, setSwapQuoteError] = useState(null);
+
+  const [swapDeposit, setSwapDeposit] = useState(null); // {address, amount, qrCodeDataUrl, expiresAtMs}
+  const [swapRegisterLoading, setSwapRegisterLoading] = useState(false);
+  const [swapRegisterError, setSwapRegisterError] = useState(null);
+  const [swapWarningChecked, setSwapWarningChecked] = useState(false);
+  const [swapNowMs, setSwapNowMs] = useState(() => Date.now());
+  // Kurs-Ablauf wie im Referenz-Interface: ein Kurs gilt 60s, danach wird automatisch ein
+  // frischer geholt. Ohne das könnte ein minutenalter Kurs bestätigt werden -- bei volatilen
+  // Assets weicht der dann spürbar vom tatsächlichen ab.
+  const SWAP_QUOTE_TTL_MS = 60000;
+  const [swapQuoteAt, setSwapQuoteAt] = useState(null);
+  const [swapQuoteNonce, setSwapQuoteNonce] = useState(0);
+
+  // Countdown-Ticker für die Ablaufzeit der Einzahlungsadresse -- läuft nur, während der
+  // Deposit-Schritt tatsächlich sichtbar ist, damit keine unnötigen Re-Renders passieren,
+  // solange der Nutzer noch im Formular ist.
+  useEffect(() => {
+    if (!swapModalOpen) return;
+    const timer = setInterval(() => setSwapNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [swapModalOpen]);
+
+  // Läuft der Kurs ab, automatisch einen frischen holen -- aber nur solange das Fenster offen
+  // ist und noch keine Einzahlungsadresse erzeugt wurde (danach ist der Kurs bereits fixiert).
+  useEffect(() => {
+    if (!swapModalOpen || swapStep === 'deposit' || !swapQuoteAt) return;
+    if (swapNowMs - swapQuoteAt < SWAP_QUOTE_TTL_MS) return;
+    setSwapQuoteNonce(n => n + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [swapNowMs, swapQuoteAt, swapModalOpen, swapStep]);
+
+  // USD-Kurse der aktuell gewählten Assets, damit neben jedem Betrag der Gegenwert stehen kann.
+  // RUNE kommt aus der bereits vorhandenen Preisanzeige, alle übrigen Assets über denselben
+  // Midgard-Pool-Endpunkt, den die App auch sonst für Coin-Preise nutzt (assetPriceUSD).
+  const [swapAssetUsd, setSwapAssetUsd] = useState({});
+  useEffect(() => {
+    if (!swapModalOpen) return;
+    const wanted = [swapFromAsset, swapToAsset].filter(Boolean);
+    let cancelled = false;
+    (async () => {
+      for (const asset of wanted) {
+        if (asset === 'THOR.RUNE') continue; // kommt direkt aus price.usd
+        if (swapAssetUsd[asset] !== undefined) continue; // schon bekannt (auch null = "nicht ermittelbar")
+        try {
+          const { usd } = await fetchThorchainPoolPrice(asset);
+          if (cancelled) return;
+          setSwapAssetUsd(prev => ({ ...prev, [asset]: Number.isFinite(usd) ? usd : null }));
+        } catch (e) {
+          if (cancelled) return;
+          // null merken, damit nicht bei jedem Rendern erneut erfolglos angefragt wird
+          setSwapAssetUsd(prev => ({ ...prev, [asset]: null }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [swapModalOpen, swapFromAsset, swapToAsset]);
+
+  const resetSwapFlow = () => {
+    setSwapStep('form');
+    setSwapQuote(null);
+    setSwapQuoteError(null);
+    setSwapDeposit(null);
+    setSwapRegisterError(null);
+    setSwapWarningChecked(false);
+  };
+
+  const fetchMemolessAssetsNow = async () => {
+    setSwapMemolessAssetsLoading(true);
+    setSwapMemolessAssetsError(null);
+    try {
+      const res = await fetchWithTimeout(`${MEMOLESS_API_BASE}/assets`);
+      if (!res.ok) throw new Error(`HTTP_${res.status}`);
+      const data = await res.json();
+      const list = Array.isArray(data?.assets) ? data.assets : [];
+      const available = list.filter(a => !a.status || /available/i.test(a.status));
+      setSwapMemolessAssets(available);
+      if (!swapFromAsset && available.length) setSwapFromAsset(available[0].asset);
+    } catch (e) {
+      setSwapMemolessAssetsError(t('swapErrorGeneric', lang));
+    } finally {
+      setSwapMemolessAssetsLoading(false);
+    }
+  };
+
+  const fetchSwapPoolsNow = async () => {
+    setSwapPoolsLoading(true);
+    try {
+      const res = await fetchThorchainApiWithFallback('/thorchain/pools');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          const available = data.filter(p => p.status === 'Available');
+          setSwapPools(available);
+          // Fallback-Vorbelegung: hat der Memoless-Abruf kein Quell-Asset geliefert (Ausfall),
+          // wird hier ein sinnvoller Standard aus der Pool-Liste gesetzt, damit das Feld
+          // "Du sendest" nie leer/unbedienbar bleibt.
+          setSwapFromAsset(prev => {
+            if (prev) return prev;
+            const preferred = available.find(p => p.asset === 'BTC.BTC') || available[0];
+            return preferred ? preferred.asset : prev;
+          });
+        }
+      }
+    } catch (e) {/* Zielauswahl fällt dann auf RUNE zurück, kein harter Fehler */} finally {
+      setSwapPoolsLoading(false);
+    }
+  };
+
+  // Die Swap-Karte ist jetzt immer sichtbar (kein Popup mehr) -- Listen also einmalig beim
+  // ersten Rendern laden, nicht mehr an ein "Fenster geöffnet"-Ereignis gekoppelt.
+  useEffect(() => {
+    fetchMemolessAssetsNow();
+    fetchSwapPoolsNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Holt einen Kurs von THORChain. destination ist OPTIONAL: für die reine Vorschau ("You
+  // receive" beim Tippen) wird ohne Zieladresse angefragt -- der Kurs hängt nicht davon ab.
+  // Für die tatsächliche Ausführung MUSS die Adresse mitgegeben werden, weil sie im Memo
+  // steht und bestimmt, wohin THORChain auszahlt.
+  const fetchQuoteFor = async (amountNum, fromAsset, toAsset, destination) => {
+    // THORChain rechnet INTERN unabhängig von der tatsächlichen On-Chain-Präzision des Assets
+    // immer in 1e8-Basiseinheiten (1 BTC = 100_000_000, genau wie bei ETH mit 18 Dezimalstellen
+    // on-chain). Diese Umrechnung gilt NUR für den Quote-Aufruf -- der spätere "sende genau X"-
+    // Betrag kommt als fertiger Dezimal-String direkt vom register/preflight-Aufruf zurück.
+    const amountBase = Math.round(amountNum * 1e8);
+    const params = new URLSearchParams({
+      from_asset: fromAsset,
+      to_asset: toAsset,
+      amount: String(amountBase)
+    });
+    if (destination) params.set('destination', destination);
+    // Affiliate-Kennung nur mitschicken, wenn oben ein Name hinterlegt ist (siehe
+    // SWAP_AFFILIATE_NAME). Mit 0 Basispunkten entsteht dem Nutzer kein zusätzlicher Kosten --
+    // der Swap wird lediglich rune.watch zugeordnet.
+    if (SWAP_AFFILIATE_NAME) {
+      params.set('affiliate', SWAP_AFFILIATE_NAME);
+      params.set('affiliate_bps', String(SWAP_AFFILIATE_BPS));
+    }
+    const res = await fetchThorchainApiWithFallback(`/thorchain/quote/swap?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || `HTTP_${res.status}`);
+    }
+    return data;
+  };
+
+  // Live-Vorschau: sobald Menge/Assets stehen, wird der erwartete Erhalt automatisch geholt --
+  // ohne Klick und ohne dass schon eine Zieladresse eingetragen sein muss. Verzögert um 450ms,
+  // damit nicht bei jedem einzelnen Tastendruck eine Anfrage rausgeht.
+  useEffect(() => {
+    if (swapStep === 'deposit') return; // fertige Einzahlung nicht überschreiben
+    const amountNum = parseFloat(swapAmount);
+    if (!swapFromAsset || !swapToAsset || !Number.isFinite(amountNum) || amountNum <= 0) {
+      setSwapQuote(null);
+      setSwapQuoteError(null);
+      return;
+    }
+    if (swapFromAsset === swapToAsset) {
+      setSwapQuote(null);
+      setSwapQuoteError(t('swapSameAsset', lang));
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setSwapQuoteLoading(true);
+      setSwapQuoteError(null);
+      try {
+        const data = await fetchQuoteFor(amountNum, swapFromAsset, swapToAsset, swapDestination.trim() || null);
+        if (cancelled) return;
+        setSwapQuote(data);
+        setSwapQuoteAt(Date.now());
+      } catch (e) {
+        if (cancelled) return;
+        setSwapQuote(null);
+        setSwapQuoteError(e?.message || t('swapErrorGeneric', lang));
+      } finally {
+        if (!cancelled) setSwapQuoteLoading(false);
+      }
+    }, 450);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [swapAmount, swapFromAsset, swapToAsset, swapDestination, swapStep, lang, swapQuoteNonce]);
+
+  const confirmSwapQuote = async () => {
+    const amountNum = parseFloat(swapAmount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      setSwapRegisterError(t('swapInvalidAmount', lang));
+      return;
+    }
+    const dest = swapDestination.trim();
+    if (!dest) {
+      setSwapRegisterError(t('swapInvalidDestination', lang));
+      return;
+    }
+    setSwapRegisterLoading(true);
+    setSwapRegisterError(null);
+    try {
+      // WICHTIG: Vor der Registrierung IMMER einen frischen Kurs MIT Zieladresse holen.
+      // Die Live-Vorschau läuft absichtlich ohne Adresse -- deren Memo enthält dann kein
+      // Auszahlungsziel und dürfte niemals registriert werden. Außerdem ist der Kurs beim
+      // Bestätigen so garantiert aktuell und nicht Sekunden alt.
+      const freshQuote = await fetchQuoteFor(amountNum, swapFromAsset, swapToAsset, dest);
+      if (!freshQuote.memo) {
+        throw new Error(t('swapErrorGeneric', lang));
+      }
+      setSwapQuote(freshQuote);
+
+      const registerRes = await fetchWithTimeout(`${MEMOLESS_API_BASE}/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          asset: swapFromAsset,
+          memo: freshQuote.memo,
+          requested_in_asset_amount: swapAmount
+        })
+      });
+      const registerData = await registerRes.json();
+      if (!registerRes.ok || !registerData.success || !registerData.reference) {
+        throw new Error(registerData?.error?.message || t('swapErrorGeneric', lang));
+      }
+      const amountForPreflight = registerData.suggested_in_asset_amount || swapAmount;
+
+      const preflightRes = await fetchWithTimeout(`${MEMOLESS_API_BASE}/preflight`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          asset: swapFromAsset,
+          reference: registerData.reference,
+          amount: amountForPreflight
+        })
+      });
+      const preflightData = await preflightRes.json();
+      if (!preflightRes.ok || !preflightData.success || !preflightData.data?.inbound_address) {
+        throw new Error(preflightData?.error?.message || t('swapErrorGeneric', lang));
+      }
+
+      const expiresAtMs = Number.isFinite(preflightData.data.seconds_remaining) ? Date.now() + preflightData.data.seconds_remaining * 1000 : null;
+
+      setSwapDeposit({
+        address: preflightData.data.inbound_address,
+        amount: amountForPreflight,
+        qrCodeDataUrl: preflightData.data.qr_code_data_url || null,
+        expiresAtMs
+      });
+      setSwapNowMs(Date.now());
+      setSwapStep('deposit');
+    } catch (e) {
+      setSwapRegisterError(e?.message || t('swapErrorGeneric', lang));
+    } finally {
+      setSwapRegisterLoading(false);
+    }
+  };
 
   const [purchasesSyncStatus, setPurchasesSyncStatus] = useState('idle'); // 'idle'|'syncing'|'synced'|'error'
   const [syncDebugInfo, setSyncDebugInfo] = useState(null); // { remoteCount, updatedAt } -- fürs manuelle Nachschauen
@@ -8250,10 +9517,24 @@ function ThorchainPortfolio() {
   const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
   const [volume24h, setVolume24h] = useState(null); // RUNE-Menge, netzwerkweit
   const [volumeHistory, setVolumeHistory] = useState(null); // [{ t, volumeRune }] letzte 30 Tage
-  // Zwei "Seiten" auf dem Handy (Chart / Details), damit man nicht mehr scrollen muss --
+  // Drei "Seiten" auf dem Handy (Chart / Details / Swap), damit man nicht mehr scrollen muss --
   // per Tab-Button oder Wischgeste wechselbar. Auf dem Desktop bleibt alles nebeneinander
-  // sichtbar (siehe .tp-panel Regeln im <style>-Block).
-  const [mobileTab, setMobileTab] = useState('chart'); // 'chart' | 'details'
+  // sichtbar (siehe .tp-panel Regeln im <style>-Block) -- die Swap-Karte ordnet sich dort
+  // einfach als drittes Element neben Chart und Sidebar ein (tp-content-row hat flexWrap, rutscht
+  // bei zu wenig Platz automatisch in eine neue Zeile, statt das Layout zu sprengen).
+  const [mobileTab, setMobileTab] = useState('chart'); // 'chart' | 'details' | 'swap'
+  // Entscheidet, an WELCHER Stelle die Swap-Karte im Baum landet: auf dem PC unter dem Chart,
+  // auf dem Handy als eigene dritte Seite. Bewusst in JS statt per CSS ein-/auszublenden --
+  // so existiert die Karte immer nur EINMAL im DOM und kann gar nicht doppelt erscheinen.
+  const [isNarrowViewport, setIsNarrowViewport] = useState(() => typeof window !== 'undefined' && window.innerWidth < 640);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onResize = () => setIsNarrowViewport(window.innerWidth < 640);
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const MOBILE_TAB_ORDER = ['chart', 'details', 'swap'];
   const swipeStartRef = useRef(null);
   const handleContentTouchStart = e => {
     swipeStartRef.current = {
@@ -8268,8 +9549,9 @@ function ThorchainPortfolio() {
     const dx = e.changedTouches[0].clientX - start.x;
     const dy = e.changedTouches[0].clientY - start.y;
     if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return; // zu kurz oder eher vertikal -> ignorieren
-    if (dx < 0) setMobileTab('details'); // nach links wischen -> Details
-    else setMobileTab('chart'); // nach rechts wischen -> Chart
+    const idx = MOBILE_TAB_ORDER.indexOf(mobileTab);
+    if (dx < 0) setMobileTab(MOBILE_TAB_ORDER[Math.min(idx + 1, MOBILE_TAB_ORDER.length - 1)]); // links wischen -> weiter
+    else setMobileTab(MOBILE_TAB_ORDER[Math.max(idx - 1, 0)]); // rechts wischen -> zurück
   };
 
   // Vollständige tägliche RUNE-Preishistorie (seit Listing) — ein einziger Abruf pro Basis, um
@@ -10115,7 +11397,6 @@ function ThorchainPortfolio() {
   const fetchPortfolioRef = useRef(null);
   const fetchPortfolio = useCallback(async walletsOverride => {
     const list = (walletsOverride || wallets).map(w => w.trim()).filter(Boolean);
-    if (!list.length) return;
     setLoading(true);
     setError(null);
 
@@ -10125,6 +11406,19 @@ function ThorchainPortfolio() {
     // try-Kette -- schlug die Wallet-Abfrage fehl, wurde der Preis-Teil nie erreicht, obwohl er
     // nichts mit Liquify/THORNode zu tun hat. Jetzt laufen beide parallel über Promise.allSettled.
     const fetchWalletData = async () => {
+      // Leere Wallet-Liste ist kein Fehler (z.B. Besucher, der noch gar keine Adresse
+      // eingetragen hat) -- sauberes Nullresultat statt weiter unten in den
+      // "alle Wallets fehlgeschlagen"-Fehlerfall zu laufen (der sonst eine Fehlermeldung UND
+      // einen endlosen Auto-Retry-Loop auslösen würde, obwohl gar nichts fehlgeschlagen ist).
+      if (!list.length) {
+        return {
+          availableAmount: 0,
+          bondedAmount: 0,
+          accruedAwardAtomicSum: 0,
+          combinedNodeBreakdown: [],
+          bondedWallets: []
+        };
+      }
       // Balance + Bonded für JEDE Wallet einzeln abfragen (parallel), dann zu einer
       // Gesamtsumme zusammenzählen. Schlägt eine einzelne Wallet fehl, blockiert das nicht die
       // anderen — nur wenn ALLE fehlschlagen, wird ein Fehler angezeigt.
@@ -10483,11 +11777,14 @@ function ThorchainPortfolio() {
     return () => clearInterval(id);
   }, [wallets.length]);
 
-  // Beim Start automatisch laden, falls Wallets gespeichert sind.
+  // Beim Start immer laden, unabhängig davon, ob schon eine Wallet gespeichert ist. Vorher lief
+  // das nur "if (wallets.length)" -- dadurch blieb hasData für Besucher OHNE getrackte Wallet
+  // dauerhaft false, und damit auch Chart/Details UND die Swap-Karte unsichtbar (obwohl Swap
+  // laut eigenem Anspruch "kein Wallet nötig" für jeden nutzbar sein soll). fetchPortfolio()
+  // holt bei leerer Wallet-Liste einfach nur Preis/Chart (kein Fehler, siehe fetchWalletData),
+  // das allein reicht laut Kommentar weiter unten schon aus, um hasData auf true zu setzen.
   useEffect(() => {
-    if (wallets.length) {
-      fetchPortfolio();
-    }
+    fetchPortfolio();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -10999,10 +12296,13 @@ function ThorchainPortfolio() {
     className: "tp-flow",
     style: {
       position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      height: 2
+      // siehe Kommentar bei den Haupt-Karten: seitlich um den Eckenradius eingerückt,
+      // damit die gerade Linie nicht über die abgerundeten Ecken hinausragt.
+      top: 1,
+      left: 18,
+      right: 18,
+      height: 2,
+      borderRadius: 2
     }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -11322,10 +12622,13 @@ function ThorchainPortfolio() {
     className: "tp-flow",
     style: {
       position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      height: 2
+      // siehe Kommentar bei den Haupt-Karten: seitlich um den Eckenradius eingerückt,
+      // damit die gerade Linie nicht über die abgerundeten Ecken hinausragt.
+      top: 1,
+      left: 18,
+      right: 18,
+      height: 2,
+      borderRadius: 2
     }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -11892,50 +13195,121 @@ function ThorchainPortfolio() {
   // dort gibt es nichts anzugleichen.
   const volCardRef = useRef(null);
   const chartTitleRef = useRef(null);
+  const sidebarColRef = useRef(null);
+  const mainColRef = useRef(null);
   const [matchedChartHeight, setMatchedChartHeight] = useState(null);
   const [matchedCardHeight, setMatchedCardHeight] = useState(null);
+
+  // --- Spaltenhöhen angleichen ---
+  // Die Swap-Karte sitzt jetzt unter dem Chart in der LINKEN Spalte. Damit beide Spalten
+  // gleich hoch enden, wird der Chart als einziges dehnbares Element passend nachgeregelt:
+  // gemessen wird die tatsächliche Höhe beider Spalten, die Differenz landet auf der
+  // Chart-Höhe. Das korrigiert sich selbst (eine Änderung der Chart-Höhe ändert die linke
+  // Spalte, beim nächsten Durchlauf ist die Differenz kleiner) und stoppt, sobald der
+  // Unterschied unter 2px liegt -- daher keine Endlosschleife.
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    let raf = null;
     const compute = () => {
       if (window.innerWidth < 640) {
         setMatchedChartHeight(null);
         setMatchedCardHeight(null);
         return;
       }
-      const volEl = volCardRef.current;
+      const sideEl = sidebarColRef.current;
+      const mainEl = mainColRef.current;
       const titleEl = chartTitleRef.current;
-      if (!volEl || !titleEl) {
-        setMatchedChartHeight(null);
-        setMatchedCardHeight(null);
-        return;
-      }
-      const volH = volEl.getBoundingClientRect().height;
+      if (!sideEl || !mainEl || !titleEl) return;
+      const sideH = sideEl.getBoundingClientRect().height;
+      const mainH = mainEl.getBoundingClientRect().height;
       const titleH = titleEl.getBoundingClientRect().height;
-      if (!volH || !titleH) return;
-      const chrome = 16 + 8 + titleH + 10;
-      const next = Math.round(volH - chrome);
-      // Untergrenze als Sicherheitsnetz: sollte die Messung mal unsinnig klein ausfallen
-      // (z.B. Kärtchen gerade ausgeblendet), lieber auf den statischen Standardwert zurückfallen.
-      if (next >= 120) {
-        setMatchedChartHeight(next);
-        // Exakte Kartenhöhe zusätzlich als Inline-Stil setzen -- schlägt die CSS-Regel
-        // .tp-chart-card { min-height: ... } aus index.html, damit die Karte weder von einem
-        // zu hohen reservierten Mindestwert aufgebläht noch vom Chart selbst überdehnt wird.
-        setMatchedCardHeight(Math.round(volH));
-      } else {
-        setMatchedChartHeight(null);
-        setMatchedCardHeight(null);
-      }
+      if (!sideH || !mainH || !titleH) return;
+      const diff = sideH - mainH;
+      if (Math.abs(diff) < 2) return; // schon bündig -- nichts tun
+      setMatchedChartHeight(prev => {
+        const current = prev != null ? prev : 193;
+        // Ober-/Untergrenze, damit der Chart bei ungewöhnlichen Fensterhöhen weder zu einem
+        // Strich zusammenfällt noch die Seite unnötig in die Länge zieht.
+        const next = Math.round(Math.min(520, Math.max(140, current + diff)));
+        return next === current ? prev : next;
+      });
+      setMatchedCardHeight(null); // Chart-Karte darf frei mitwachsen
     };
-    compute();
-    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(compute) : null;
-    if (ro && volCardRef.current) ro.observe(volCardRef.current);
-    window.addEventListener('resize', compute);
+    const schedule = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(compute);
+    };
+    schedule();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+    if (ro) {
+      if (sidebarColRef.current) ro.observe(sidebarColRef.current);
+      if (mainColRef.current) ro.observe(mainColRef.current);
+    }
+    window.addEventListener('resize', schedule);
     return () => {
+      if (raf) cancelAnimationFrame(raf);
       if (ro) ro.disconnect();
-      window.removeEventListener('resize', compute);
+      window.removeEventListener('resize', schedule);
     };
-  }, [volume24h, volumeHistory, activePrice, lang, currency, hideValue]);
+  }, [volume24h, volumeHistory, activePrice, lang, currency, hideValue, matchedChartHeight]);
+
+  // Swap-Karte als drittes Element neben Chart und Sidebar -- auf dem Desktop ordnet sie sich
+  // dank flexWrap in tp-content-row einfach mit ein (rutscht bei zu wenig Platz automatisch in
+  // eine neue Zeile), auf dem Handy wird sie zur dritten wischbaren Tab-Seite (siehe
+  // mobileTab/tp-swap-panel weiter oben und die zugehörigen CSS-Regeln in index.html).
+  // Kompaktes Trigger-Kärtchen in der Kachel-Struktur; das eigentliche Fenster wird per
+  // Portal mittig über der Seite geöffnet (siehe swapModal weiter unten).
+  // Trigger-Kaertchen sitzt jetzt IN der Seitenspalte (zusammen mit Bond Rewards und
+  // 24h-Volumen), statt in einer eigenen dritten Spalte -- dort stand es allein neben viel
+  // leerem Raum und wirkte verloren.
+  const swapTriggerCard = /*#__PURE__*/React.createElement(SwapTriggerCard, {
+    lang,
+    onOpen: () => {
+      resetSwapFlow();
+      setSwapModalOpen(true);
+    }
+  });
+
+  const swapModal = /*#__PURE__*/React.createElement(SwapModal, {
+    isOpen: swapModalOpen,
+    onClose: () => {
+      setSwapModalOpen(false);
+      resetSwapFlow();
+    },
+    lang,
+    step: swapStep,
+    memolessAssets: swapMemolessAssets,
+    memolessAssetsLoading: swapMemolessAssetsLoading,
+    memolessAssetsError: swapMemolessAssetsError,
+    pools: swapPools,
+    fromAsset: swapFromAsset,
+    setFromAsset: setSwapFromAsset,
+    toAsset: swapToAsset,
+    setToAsset: setSwapToAsset,
+    amount: swapAmount,
+    setAmount: setSwapAmount,
+    destination: swapDestination,
+    setDestination: setSwapDestination,
+    quoteLoading: swapQuoteLoading,
+    quoteError: swapQuoteError,
+    quote: swapQuote,
+    quoteAt: swapQuoteAt,
+    quoteTtlMs: SWAP_QUOTE_TTL_MS,
+    runePrice: price ? price.usd : null,
+    assetUsd: swapAssetUsd,
+    onRefreshQuote: () => setSwapQuoteNonce(n => n + 1),
+    onConfirmQuote: confirmSwapQuote,
+    onBack: resetSwapFlow,
+    registerLoading: swapRegisterLoading,
+    registerError: swapRegisterError,
+    deposit: swapDeposit,
+    nowMs: swapNowMs,
+    warningChecked: swapWarningChecked,
+    setWarningChecked: setSwapWarningChecked,
+    onStartNew: () => {
+      resetSwapFlow();
+    }
+  });
 
   const purchaseTrackerBox = /*#__PURE__*/React.createElement("div", {
     style: {
@@ -13046,11 +14420,15 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     className: "tp-flow",
     style: {
       position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
+      // Der Streifen ist eine GERADE Linie, die Karte hat aber abgerundete Ecken (18px).
+      // Ohne diesen seitlichen Abstand ragte er an beiden Ecken sichtbar über die Kante
+      // hinaus. Um den Eckenradius eingerückt endet er sauber auf dem geraden Teil der
+      // Oberkante. top: 1 hält ihn zusätzlich innerhalb des 1px-Rahmens.
+      top: 1,
+      left: 18,
+      right: 18,
       height: 2,
-      borderRadius: '18px 18px 0 0'
+      borderRadius: 2
     }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -14039,7 +15417,25 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       overflow: 'hidden',
       textOverflow: 'ellipsis'
     }
-  }, t('detailsTab', lang))), /*#__PURE__*/React.createElement("div", {
+  }, t('detailsTab', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMobileTab('swap'),
+    style: {
+      flex: 1,
+      minWidth: 0,
+      background: mobileTab === 'swap' ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: mobileTab === 'swap' ? '#00DEE1' : '#7C9698',
+      border: `1px solid ${mobileTab === 'swap' ? 'rgba(0,222,225,0.55)' : '#1A3436'}`,
+      borderRadius: 8,
+      padding: '8px 6px',
+      fontSize: 11,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif",
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, t('swapTitle', lang))), /*#__PURE__*/React.createElement("div", {
     className: "tp-content-row",
     style: {
       display: 'flex',
@@ -14052,6 +15448,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     onTouchStart: handleContentTouchStart,
     onTouchEnd: handleContentTouchEnd
   }, /*#__PURE__*/React.createElement("div", {
+    ref: mainColRef,
     className: `tp-chart-panel ${mobileTab === 'chart' ? 'tp-panel-active' : ''}`,
     style: {
       flex: '1 1 420px',
@@ -14070,11 +15467,15 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     className: "tp-flow",
     style: {
       position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
+      // Der Streifen ist eine GERADE Linie, die Karte hat aber abgerundete Ecken (18px).
+      // Ohne diesen seitlichen Abstand ragte er an beiden Ecken sichtbar über die Kante
+      // hinaus. Um den Eckenradius eingerückt endet er sauber auf dem geraden Teil der
+      // Oberkante. top: 1 hält ihn zusätzlich innerhalb des 1px-Rahmens.
+      top: 1,
+      left: 18,
+      right: 18,
       height: 2,
-      borderRadius: '18px 18px 0 0'
+      borderRadius: 2
     }
   }), /*#__PURE__*/React.createElement("div", {
     className: "tp-main-card-header",
@@ -14401,12 +15802,21 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     restrictHoverToLine: true,
     showAxis: false,
     showAreaFill: true
-  })))), (volume24h != null || bonded != null && bonded > 0 || altPrice != null || hasAnyNodeRewardsData) && /*#__PURE__*/React.createElement("div", {
+  }))), !isNarrowViewport && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 20
+    }
+  }, swapTriggerCard)), /*#__PURE__*/React.createElement("div", {
+    ref: sidebarColRef,
     className: `tp-sidebar-col tp-details-panel ${mobileTab === 'details' ? 'tp-panel-active' : ''}`,
     style: {
-      flex: '1 1 240px',
-      maxWidth: 300,
-      minWidth: 240,
+      // Breiter als zuvor (max. 300px), damit die Karten rechts nicht deutlich kleiner
+      // wirken als die linken. Die linke Spalte bleibt mit 420px Basis/640px Maximum die
+      // breitere -- der Chart braucht mehr Platz -- aber der Unterschied ist jetzt moderat
+      // statt auffaellig.
+      flex: '1 1 360px',
+      maxWidth: 440,
+      minWidth: 300,
       display: 'flex',
       flexDirection: 'column',
       gap: 20
@@ -14454,7 +15864,14 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     activePrice: activePrice,
     lang: lang,
     currency: currency
-  }))))), runePriceChartModal, compareChartModal, /*#__PURE__*/React.createElement("div", {
+  })))), isNarrowViewport && /*#__PURE__*/React.createElement("div", {
+    className: `tp-swap-panel ${mobileTab === 'swap' ? 'tp-panel-active' : ''}`,
+    style: {
+      flex: '1 1 240px',
+      maxWidth: 300,
+      minWidth: 240
+    }
+  }, swapTriggerCard)), swapModal, runePriceChartModal, compareChartModal, /*#__PURE__*/React.createElement("div", {
     className: "tp-footer",
     style: {
       marginTop: 40,
@@ -14476,30 +15893,33 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     target: "_blank",
     rel: "noopener noreferrer",
     style: {
-      color: '#0A0A0A',
+      color: '#FFFFFF',
       fontSize: 12.5,
       fontWeight: 700,
       textDecoration: 'none',
       display: 'inline-flex',
       alignItems: 'center',
       gap: 7,
-      background: 'linear-gradient(135deg, #00DEE1, #00A8B0)',
+      background: '#102224',
+      border: '1px solid #223638',
       padding: '9px 18px',
       borderRadius: 999,
-      boxShadow: '0 0 0 rgba(0, 222, 225, 0)',
-      transition: 'box-shadow 0.2s, transform 0.2s'
+      boxShadow: '0 0 0 rgba(255, 255, 255, 0)',
+      transition: 'box-shadow 0.2s, border-color 0.2s, transform 0.2s'
     },
     onMouseOver: e => {
-      e.currentTarget.style.boxShadow = '0 0 18px rgba(0, 222, 225, 0.55)';
+      e.currentTarget.style.boxShadow = '0 0 14px rgba(255, 255, 255, 0.25)';
+      e.currentTarget.style.borderColor = '#5C7274';
       e.currentTarget.style.transform = 'translateY(-1px)';
     },
     onMouseOut: e => {
-      e.currentTarget.style.boxShadow = '0 0 0 rgba(0, 222, 225, 0)';
+      e.currentTarget.style.boxShadow = '0 0 0 rgba(255, 255, 255, 0)';
+      e.currentTarget.style.borderColor = '#223638';
       e.currentTarget.style.transform = 'none';
     }
   }, /*#__PURE__*/React.createElement(IconSwapArrows, {
     size: 14
-  }), t('swapHere', lang)), /*#__PURE__*/React.createElement("a", {
+  }), "Thordex"), /*#__PURE__*/React.createElement("a", {
     className: "tp-footer-btn",
     href: "https://x.com/runemaxim?s=11",
     target: "_blank",
