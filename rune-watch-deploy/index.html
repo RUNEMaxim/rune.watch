@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>rune.watch</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCI+CiAgPGRlZnM+CiAgICA8cmFkaWFsR3JhZGllbnQgaWQ9ImciIGN4PSI1MCUiIGN5PSI0NiUiIHI9IjY1JSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiMwZjJmMzAiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSI1NSUiIHN0b3AtY29sb3I9IiMwYTE0MTQiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjMDUwNzA3Ii8+CiAgICA8L3JhZGlhbEdyYWRpZW50PgogIDwvZGVmcz4KICA8cmVjdCB4PSIxIiB5PSIxIiB3aWR0aD0iOTgiIGhlaWdodD0iOTgiIHJ4PSIyMyIgcnk9IjIzIiBmaWxsPSJ1cmwoI2cpIi8+CiAgPHBhdGggZD0iTTE0LDUwIFE1MCwyMSA4Niw1MCBRNTAsNzkgMTQsNTAgWiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNUNFQkVFIiBzdHJva2Utd2lkdGg9IjUuMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CiAgPHBhdGggZmlsbD0iIzVDRUJFRSIgZD0iTTU1LjIsMzMuNSBMMzkuOCw1Mi41IEw0Ny42LDUzLjIgTDQ0LjMsNjUuOCBMNTksNDYuNSBMNTEuMiw0NS45IFoiLz4KPC9zdmc+Cg==">
+<link rel="apple-touch-icon" href="data:image/png;base64,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">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- Nicht-render-blockierendes Laden der Google-Fonts-Stylesheet: wird zunächst mit
+     media="print" geladen (blockiert das Rendering NICHT), sobald die Datei da ist, wechselt
+     onload media auf "all" und sie greift wie eine normale Stylesheet. Bis dahin rendert der
+     Browser mit den System-Fallback-Fonts, die dank font-display:swap in der URL beim
+     tatsächlichen Laden dann eingetauscht werden -- verbessert FCP/LCP, da das erste Rendering
+     nicht mehr auf den Google-Fonts-Request warten muss. <noscript> als Fallback für den (sehr
+     seltenen) Fall, dass JS deaktiviert ist. -->
+<!-- font-display=optional statt swap: verhindert den späten Schrift-Tausch (System-Font ->
+     Unbounded/Space Grotesk), der nach dem Umbau auf nicht-blockierendes Font-Laden zu einem
+     großen, einmaligen Layout-Shift führte (viele große Zahlen-Displays ändern gleichzeitig
+     ihre Breite). Mit "optional" bleibt für einen Seitenaufruf dauerhaft die Fallback-Schrift,
+     falls die Google-Font nicht innerhalb von ~100ms bereitsteht -- kein nachträglicher Tausch,
+     kein Shift mehr. FCP bleibt weiterhin nicht-blockierend. -->
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Unbounded:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=optional" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Unbounded:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=optional" rel="stylesheet"></noscript>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #000000; min-height: 100vh; overscroll-behavior-x: none; }
+  body { font-family: 'Inter', sans-serif; }
+  #root { min-height: 100vh; }
+  .tp-input::placeholder { color: #4C6062; }
+  .tp-input:focus { outline: none; border-color: #00DEE1 !important; color: #F5F5F5 !important; box-shadow: 0 0 0 3px rgba(0,222,225,0.18) !important; }
+  .tp-range-btn:hover { color: #00DEE1 !important; }
+  .tp-price-tile-btn:hover { background: rgba(255,255,255,0.05) !important; }
+  .tp-price-tile-btn:active { background: rgba(255,255,255,0.08) !important; }
+  @keyframes flow {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 200% 50%; }
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes tpChartFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .tp-chart-fade-in { animation: tpChartFadeIn 0.45s ease; }
+  /* Verhindert zuverlässig das native "Kopieren/Nachschlagen"-Kontextmenü bei längerem Drücken
+     auf einem Chart -- ergänzt das JS-seitige preventDefault() in PortfolioChartInner. SVG-Text
+     (Achsenbeschriftungen, Preis-Label im Fadenkreuz usw.) hält sich auf manchen mobilen Browsern
+     NICHT zuverlässig an ein user-select:none, das nur auf einem Vorfahren-Element gesetzt ist --
+     deshalb hier explizit auch auf svg text/tspan selbst. */
+  .tp-chart-card svg, .tp-chart-card svg text, .tp-chart-card svg tspan {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  /* Weicher Übergang beim Wechseln zwischen Chart- und Details-Tab auf dem Handy (per Tab-Klick
+     oder Wischgeste): die neu aktive Seite gleitet leicht aus der jeweiligen Richtung ein und
+     blendet dabei ein, statt hart umzuschalten. Chart = "linke" Seite -> gleitet von links ein.
+     Details = "rechte" Seite -> gleitet von rechts ein. Nur auf dem Handy aktiv, siehe
+     @media (max-width: 640px) weiter unten. */
+  @keyframes tpMobileTabInFromLeft { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes tpMobileTabInFromRight { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+  /* Preiszeile jetzt immer oben (über den Tabs) sichtbar -- unabhängig von Bildschirmbreite
+     und davon, ob gerade der Chart- oder der Details-Tab aktiv ist. Die Sidebar-Variante
+     bleibt dauerhaft ausgeblendet, damit die Preise nicht verschwinden, wenn man in den
+     Chart-Tab wechselt. */
+  .tp-price-top { display: block; }
+  .tp-price-sidebar { display: none; }
+  .tp-nodestats-mobile { display: flex; margin-left: auto; }
+  /* Kleines Tages-Verlaufs-Chart neben dem Preis, füllt den sonst leeren Platz in der breiten
+     Preis-Karte -- nur auf PC-Bildschirmen sichtbar (auf dem Handy bleibt die Kachel kompakt). */
+  .tp-price-daily-chart { display: none; }
+  @media (min-width: 641px) {
+    .tp-price-daily-chart { display: block; }
+    /* Alt-Coin-Kachel soll sich auf dem PC nicht mehr über die volle Restbreite strecken,
+       damit der Dropdown-Pfeil (Coin-Auswahl) näher am Mini-Chart bleibt statt weit rechts
+       am Kachelrand zu kleben. */
+    .tp-alt-price-btn { flex: 0 1 auto !important; }
+  }
+  .tp-flow {
+    background: linear-gradient(90deg, transparent, #FFFFFF, transparent, #FFFFFF, transparent);
+    background-size: 200% 100%;
+    animation: flow 6s linear infinite;
+  }
+  .tp-spin { animation: spin 1s linear infinite; }
+  .tp-totals-row { flex-wrap: wrap; }
+  /* Kompakteres Layout auf schmalen Bildschirmen: weniger Innen-/Außenabstand,
+     damit die Seite nicht unnötig in die Länge gezogen wird wie am Desktop. */
+  @media (max-width: 640px) {
+    .tp-content-row { gap: 12px !important; }
+    .tp-main-card { padding: 16px 16px !important; margin-bottom: 12px !important; }
+    .tp-main-card-header { margin-bottom: 12px !important; }
+    .tp-chart-card { padding: 10px 4px 4px !important; }
+    .tp-sidebar-col { gap: 12px !important; }
+    .tp-side-card { padding: 14px 16px !important; }
+    .tp-range-row { margin-bottom: 8px !important; }
+    .tp-footer { margin-top: 20px !important; padding-top: 12px !important; }
+    .tp-price-top { margin-top: 8px !important; margin-bottom: 12px !important; }
+    .tp-totals-row { padding-top: 12px !important; }
+    .tp-controls-row { flex-wrap: nowrap !important; padding-bottom: 4px; }
+    .tp-controls-left { flex-wrap: nowrap !important; max-width: none !important; gap: 10px !important; flex-shrink: 0 !important; }
+    .tp-controls-spacer { display: none !important; }
+    .tp-controls-wallets { flex-shrink: 0 !important; gap: 10px !important; }
+    .tp-controls-wallets > div > button { font-size: 11px !important; gap: 3px !important; }
+    .tp-controls-nodestats { flex-shrink: 0 !important; margin-left: 0 !important; }
+    .tp-controls-nodestats > button { font-size: 11px !important; gap: 4px !important; }
+    .tp-nodestats-mobile { display: flex !important; margin-left: 0 !important; flex-shrink: 0 !important; }
+  }
+  /* CLS-Fix: reservierter Platz für die Chart-Karte, BEVOR die Chart-Daten geladen sind.
+     Ohne das wächst die Karte beim Nachladen der Daten von (fast) leer auf ihre volle Höhe und
+     schiebt alles darunter nach unten -- das war der Haupttreiber der CLS-Werte von 0.25-0.4.
+     WICHTIG: Der Wert muss der TATSÄCHLICHEN Endhöhe der Karte entsprechen. Stand er zu hoch
+     (vorher 360px), erzwang er eine überhohe Karte, in der der Chart nur oben klebte und
+     darunter leerer Raum blieb -- die per height-Prop gesetzte Chart-Höhe war dann wirkungslos.
+     Die Karte soll bündig mit dem 24h-Volumen-Kärtchen der Seitenspalte abschließen (~235px);
+     die exakte Feinjustierung übernimmt zur Laufzeit matchedCardHeight in app.js. */
+  .tp-chart-card { min-height: 235px; }
+  @media (max-width: 640px) {
+    .tp-chart-card { min-height: 230px; }
+  }
+  /* PC/Browser: eine einzige Seite, Chart und Details nebeneinander (kein Tab-Umschalten). */
+  .tp-mobile-tabs { display: none; }
+  .tp-content-row { justify-content: center; }
+  .tp-chart-panel { display: block; }
+  .tp-details-panel { display: flex; }
+  /* Handy: ursprüngliches Verhalten wiederhergestellt -- zwei umschaltbare Tabs/Seiten
+     (Chart-Tab / Details-Tab), genau wie vor den Layout-Änderungen für den Desktop. */
+  @media (max-width: 640px) {
+    .tp-mobile-tabs { display: flex; }
+    .tp-chart-panel, .tp-details-panel { display: none !important; }
+    .tp-chart-panel.tp-panel-active { display: block !important; animation: tpMobileTabInFromLeft 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
+    .tp-details-panel.tp-panel-active { display: flex !important; animation: tpMobileTabInFromRight 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
+    .tp-chart-panel, .tp-details-panel { max-width: none !important; min-width: 0 !important; width: 100% !important; }
+  }
+  /* Ø-Kaufpreis-Dropdown: auf dem PC wie gehabt (rechtsbündig unter dem Trigger-Button). Auf dem
+     Handy reicht der Platz neben dem Button oft nicht -- das Panel ragte dann über den
+     Bildschirmrand hinaus ("hängt zur Hälfte im Nichts"). Deshalb wird es auf schmalen
+     Bildschirmen stattdessen zu einem zentrierten, fest positionierten Overlay mit Backdrop --
+     garantiert komplett innerhalb des Bildschirms, unabhängig davon, wo der Button gerade sitzt. */
+  .tp-purchase-dropdown-backdrop { display: none; }
+  @media (max-width: 640px) {
+    .tp-purchase-dropdown-backdrop {
+      display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 29;
+    }
+    .tp-purchase-dropdown-panel {
+      position: fixed !important; top: 50% !important; left: 12px !important; right: 12px !important;
+      bottom: auto !important; transform: translateY(-50%); width: auto !important; max-width: none !important;
+      max-height: 82vh !important; margin-top: 0 !important;
+    }
+  }
+</style>
+</head>
+<body>
+<div id="root"><div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#000000;">
+  <div style="display:flex;flex-direction:column;align-items:center;gap:14px;">
+    <div style="width:34px;height:34px;border-radius:50%;border:3px solid rgba(0,222,225,0.18);border-top-color:#00DEE1;animation:tpBootSpin 0.8s linear infinite;"></div>
+    <div style="color:#4C6062;font-family:'Inter',sans-serif;font-size:12px;letter-spacing:0.04em;">rune.watch wird geladen &hellip;</div>
+  </div>
+</div></div>
+<style>@keyframes tpBootSpin{to{transform:rotate(360deg);}}</style>
+
+<!-- React/ReactDOM jetzt lokal aus /vendor statt von unpkg.com geladen: spart eine komplette
+     DNS+TLS+Request-Runde zu einer dritten Domain im kritischen Rendering-Pfad. Alle drei
+     Scripts (React, ReactDOM, App) haben "defer", damit sie das Parsen von HTML/CSS NICHT mehr
+     blockieren -- der Browser kann den Rest der Seite (inkl. des Boot-Spinners oben) sofort
+     rendern, während die Scripts im Hintergrund laden. "defer" garantiert bei klassischen
+     Scripts (kein type="module"), dass sie trotzdem in genau dieser Reihenfolge ausgeführt
+     werden, NACH dem HTML-Parsing aber VOR DOMContentLoaded -- App-Script kann also weiterhin
+     sicher auf die globalen React/ReactDOM-Objekte zugreifen. Der frühere ~500-KB-Inline-Block
+     ist dafür in eine eigene Datei app.js ausgelagert (nur externe Scripts können defer nutzen,
+     Inline-Scripts würden defer ignorieren und weiterhin sofort/blockierend laufen). -->
+<!-- Alle drei Dateien liegen FLACH auf derselben Ebene wie diese index.html (kein Unterordner) --
+     ein "vendor/"-Unterordner ging beim Hochladen wiederholt verloren und führte zu 404-Fehlern
+     und einer ewig ladenden Seite. Relative Pfade (ohne führenden Slash), damit es auch dann
+     funktioniert, wenn die Seite nicht direkt im Domain-Root liegt.
+     "defer" sorgt dafür, dass das Parsen von HTML/CSS nicht blockiert wird, die
+     Ausführungsreihenfolge aber garantiert bleibt (React -> ReactDOM -> App). -->
+<script defer src="react.production.min.js"></script>
+<script defer src="react-dom.production.min.js"></script>
+<script defer src="app.js"></script>
+</body>
+</html>
