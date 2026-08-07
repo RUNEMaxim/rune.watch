@@ -1616,6 +1616,22 @@ const TR = {
     en: 'Swap direction',
     de: 'Richtung tauschen'
   },
+  swapBelowMinimum: {
+    en: 'Amount is below the minimum of {min} for wallet-free swaps. Enter at least this amount to continue.',
+    de: 'Betrag liegt unter dem Mindestbetrag von {min} für Swaps ohne Wallet-Verbindung. Bitte mindestens diesen Betrag eingeben.'
+  },
+  swapAmountRaisedNote: {
+    en: 'The amount was adjusted from {requested} to {actual}. THORChain appends a reference number to the last digits so it can identify your swap, and raises amounts that are too small to cover the fees.',
+    de: 'Der Betrag wurde von {requested} auf {actual} angepasst. THORChain hängt eine Referenznummer an die letzten Stellen, um deinen Swap zuzuordnen, und hebt zu kleine Beträge an, damit sie die Gebühren decken.'
+  },
+  swapMinimumIs: {
+    en: 'Minimum for this pair: {min}.',
+    de: 'Mindestbetrag für dieses Paar: {min}.'
+  },
+  swapTimeout: {
+    en: 'The network took too long to respond. Please try again.',
+    de: 'Das Netzwerk hat zu lange gebraucht. Bitte nochmal versuchen.'
+  },
   swapRefreshQuote: {
     en: 'Refresh quote',
     de: 'Kurs aktualisieren'
@@ -7326,6 +7342,18 @@ function SwapModal(props) {
     }, "(", fmtUSD(amountNum * p, lang, 'usd'), ")");
   };
 
+  // Mindestbetrag für memoless Swaps -- Formel aus dem Referenz-Interface:
+  // 10^-(Dezimalstellen - 5). Die 5 Stellen sind der Platz, den THORChain am Ende des Betrags
+  // für die Referenznummer braucht. Beispiel ETH (8 Dezimalstellen): 10^-3 = 0.001 ETH.
+  // Dadurch lässt sich schon VOR dem Bestätigen warnen, statt den Betrag später stillschweigend
+  // anzuheben.
+  const fromMemolessEntry = (memolessAssets || []).find(a => a.asset === fromAsset);
+  const memolessMin = fromMemolessEntry && Number.isFinite(Number(fromMemolessEntry.decimals))
+    ? Math.pow(10, -(Number(fromMemolessEntry.decimals) - 5))
+    : null;
+  const enteredAmountNum = parseFloat(amount);
+  const belowMemolessMin = memolessMin != null && Number.isFinite(enteredAmountNum) && enteredAmountNum > 0 && enteredAmountNum < memolessMin;
+
   const fromInfo = parseSwapAsset(fromAsset);
   const toInfo = parseSwapAsset(toAsset);
 
@@ -7647,20 +7675,32 @@ function SwapModal(props) {
           background: 'rgba(217,164,65,0.1)', border: '1px solid rgba(217,164,65,0.3)',
           borderRadius: 8, padding: '7px 10px', lineHeight: 1.45
         }
-      }, t('swapQuoteMinAmountWarning', lang).replace('{amount}', (recMinBase / 1e8).toLocaleString(localeFor(lang), { maximumFractionDigits: 8 })).replace('{asset}', fromInfo.ticker));
+      }, t('swapQuoteMinAmountWarning', lang).replace('{amount}', formatSwapAmount(recMinBase / 1e8, fromInfo.ticker, lang)).replace('{asset}', fromInfo.ticker));
     }
   }
 
   const busy = quoteLoading || registerLoading;
+  // Unter dem Mindestbetrag darf gar nicht erst bestätigt werden -- sonst würde THORChain den
+  // Betrag später eigenmächtig anheben (verwirrend) oder der Swap schlägt fehl.
+  const blocked = busy || belowMemolessMin;
+  const minBlockNote = belowMemolessMin && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10, fontSize: 11, color: '#D9A441',
+      background: 'rgba(217,164,65,0.1)', border: '1px solid rgba(217,164,65,0.35)',
+      borderRadius: 9, padding: '9px 11px', lineHeight: 1.45
+    }
+  }, t('swapBelowMinimum', lang)
+    .replace('{min}', `${formatSwapAmount(memolessMin, fromInfo.ticker, lang)} ${fromInfo.ticker}`));
+
   const mainButton = /*#__PURE__*/React.createElement("button", {
     onClick: onConfirmQuote,
-    disabled: busy,
+    disabled: blocked,
     style: {
       width: '100%', marginTop: 12,
       background: busy ? '#1A3436' : 'linear-gradient(135deg, #14F1F4 0%, #00C2CC 100%)',
       color: busy ? '#7C9698' : '#04191A', border: 'none', borderRadius: 12,
       padding: '14px 16px', fontSize: 13.5, fontWeight: 800,
-      boxShadow: busy ? 'none' : '0 8px 22px -10px rgba(0,222,225,0.75)',
+      boxShadow: blocked ? 'none' : '0 8px 22px -10px rgba(0,222,225,0.75)',
       cursor: busy ? 'default' : 'pointer', display: 'flex', alignItems: 'center',
       justifyContent: 'center', gap: 8, fontFamily: "'Inter', sans-serif"
     }
@@ -7679,7 +7719,7 @@ function SwapModal(props) {
   const formContent = /*#__PURE__*/React.createElement(React.Fragment, null,
     stackedBoxes, destinationField,
     errBox(quoteError, 'qerr'),
-    detailsBox, minWarning, errBox(registerError, 'rerr'),
+    detailsBox, minWarning, minBlockNote, errBox(registerError, 'rerr'),
     mainButton, backLink);
 
   // ---- Deposit-Ansicht ----
@@ -7705,6 +7745,22 @@ function SwapModal(props) {
     }, /*#__PURE__*/React.createElement("strong", null, t('swapSendExactTitle', lang)), ". ",
       t('swapSendExactWarning', lang), " ",
       /*#__PURE__*/React.createElement("strong", null, t('swapLossOfFunds', lang))));
+
+    // Wurde der Betrag gegenüber der Eingabe angehoben, wird das ausdrücklich erklärt --
+    // vorher änderte er sich still und wirkte wie ein Fehler.
+    const reqNum = parseFloat(deposit.requestedAmount);
+    const sendNum = parseFloat(deposit.amount);
+    const wasRaised = Number.isFinite(reqNum) && Number.isFinite(sendNum) && sendNum > reqNum * 1.01;
+    const amountChangedNote = wasRaised && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 10, padding: '9px 11px', fontSize: 10.5, lineHeight: 1.5,
+        color: '#9FBDBF', background: 'rgba(0,222,225,0.06)',
+        border: '1px solid rgba(0,222,225,0.22)', borderRadius: 10
+      }
+    }, t('swapAmountRaisedNote', lang)
+      .replace('{requested}', `${formatSwapAmount(reqNum, fromInfo.ticker, lang)} ${fromInfo.ticker}`)
+      .replace('{actual}', `${deposit.amount} ${fromInfo.ticker}`),
+      deposit.minimumAmount ? ' ' + t('swapMinimumIs', lang).replace('{min}', `${deposit.minimumAmount} ${fromInfo.ticker}`) : '');
 
     const depositBox = /*#__PURE__*/React.createElement("div", {
       style: {
@@ -7747,7 +7803,7 @@ function SwapModal(props) {
       style: { color: '#D9A441', fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }
     }, countdown)));
 
-    depositContent = /*#__PURE__*/React.createElement(React.Fragment, null, warningBox, depositBox,
+    depositContent = /*#__PURE__*/React.createElement(React.Fragment, null, warningBox, amountChangedNote, depositBox,
     /*#__PURE__*/React.createElement("div", {
       style: { fontSize: 10, color: '#5C7274', textAlign: 'center', lineHeight: 1.4, marginTop: 8 }
     }, t('swapOneTimeUse', lang)),
@@ -8014,7 +8070,21 @@ function ThorchainPortfolio() {
   //     liefert eine Referenz-Nummer zurück
   //  3. POST https://api.thorchain.org/memoless/api/v1/preflight  -- liefert die tatsächliche
   //     Einzahlungsadresse + fertigen QR-Code + Ablaufzeit
-  const MEMOLESS_API_BASE = 'https://api.thorchain.org/memoless/api/v1';
+  // Läuft über den eigenen Cloudflare Worker statt direkt gegen api.thorchain.org: der
+  // Browser blockiert die direkten Aufrufe, weil dort die CORS-Freigaben fehlen ("Failed to
+  // fetch" beim Registrieren). Der Worker holt die Antwort server-seitig und reicht sie mit
+  // den nötigen Headern weiter -- dasselbe Muster wie schon bei /balance.
+  // WICHTIG: Der Worker muss die /memoless/*-Route kennen (siehe worker-komplett.js, FIX 10).
+  // PURCHASES_SYNC_BACKEND_BASE (modul-weit) statt REWARDS_BACKEND_BASE -- letzteres wird erst
+  // WEITER UNTEN in der Komponente deklariert und wäre hier noch nicht initialisiert
+  // (ReferenceError beim Rendern). Beide zeigen auf denselben Worker.
+  const MEMOLESS_API_BASE = `${PURCHASES_SYNC_BACKEND_BASE}/memoless`;
+  // Diese Aufrufe gehen über den Worker, der seinerseits THORChain anfragt (dort bis zu 15s
+  // Zeitlimit). Mit dem 6s-Standard von fetchWithTimeout brach das Frontend deshalb ab, bevor
+  // der Worker überhaupt antworten konnte -- sichtbar als "signal is aborted without reason".
+  // 20s liegt bewusst ÜBER dem Worker-Limit, damit im Zweifel dessen echte Fehlermeldung
+  // ankommt statt eines nichtssagenden Abbruchs.
+  const MEMOLESS_TIMEOUT_MS = 20000;
 
   const [swapModalOpen, setSwapModalOpen] = useState(false);
   const [swapStep, setSwapStep] = useState('form'); // 'form' | 'quote' | 'deposit'
@@ -8107,7 +8177,7 @@ function ThorchainPortfolio() {
     setSwapMemolessAssetsLoading(true);
     setSwapMemolessAssetsError(null);
     try {
-      const res = await fetchWithTimeout(`${MEMOLESS_API_BASE}/assets`);
+      const res = await fetchWithTimeout(`${MEMOLESS_API_BASE}/assets`, {}, MEMOLESS_TIMEOUT_MS);
       if (!res.ok) throw new Error(`HTTP_${res.status}`);
       const data = await res.json();
       const list = Array.isArray(data?.assets) ? data.assets : [];
@@ -8258,7 +8328,7 @@ function ThorchainPortfolio() {
           memo: freshQuote.memo,
           requested_in_asset_amount: swapAmount
         })
-      });
+      }, MEMOLESS_TIMEOUT_MS);
       const registerData = await registerRes.json();
       if (!registerRes.ok || !registerData.success || !registerData.reference) {
         throw new Error(registerData?.error?.message || t('swapErrorGeneric', lang));
@@ -8275,7 +8345,7 @@ function ThorchainPortfolio() {
           reference: registerData.reference,
           amount: amountForPreflight
         })
-      });
+      }, MEMOLESS_TIMEOUT_MS);
       const preflightData = await preflightRes.json();
       if (!preflightRes.ok || !preflightData.success || !preflightData.data?.inbound_address) {
         throw new Error(preflightData?.error?.message || t('swapErrorGeneric', lang));
@@ -8286,13 +8356,23 @@ function ThorchainPortfolio() {
       setSwapDeposit({
         address: preflightData.data.inbound_address,
         amount: amountForPreflight,
+        // Der tatsächlich zu sendende Betrag weicht oft vom eingegebenen ab: THORChain hängt
+        // die Referenznummer an die letzten Stellen an UND hebt zu kleine Beträge auf die
+        // Mindestmenge an. Beides wird hier festgehalten, damit die Einzahlungs-Ansicht es
+        // erklären kann, statt den Nutzer mit einer stillschweigend geänderten Zahl
+        // zurückzulassen.
+        requestedAmount: swapAmount,
+        minimumAmount: registerData.minimum_amount_to_send || null,
         qrCodeDataUrl: preflightData.data.qr_code_data_url || null,
         expiresAtMs
       });
       setSwapNowMs(Date.now());
       setSwapStep('deposit');
     } catch (e) {
-      setSwapRegisterError(e?.message || t('swapErrorGeneric', lang));
+      // Abbruch durch Zeitüberschreitung verständlich benennen -- die Browser-Meldung
+      // ("signal is aborted without reason") sagt Nutzern nichts.
+      const isAbort = e && (e.name === 'AbortError' || /abort/i.test(e.message || ''));
+      setSwapRegisterError(isAbort ? t('swapTimeout', lang) : e?.message || t('swapErrorGeneric', lang));
     } finally {
       setSwapRegisterLoading(false);
     }
