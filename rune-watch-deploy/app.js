@@ -1616,6 +1616,22 @@ const TR = {
     en: 'Swap Volume History',
     de: 'Swap-Volumen-Historie'
   },
+  topPairsTitle: {
+    en: 'Top Swap Pairs',
+    de: 'Top Swap-Paare'
+  },
+  topPairsHint: {
+    en: 'Most-swapped asset pairs network-wide, collected in the background.',
+    de: 'Am häufigsten geswapte Asset-Paare netzwerkweit, im Hintergrund gesammelt.'
+  },
+  topPairsEmpty: {
+    en: 'Not enough data collected yet — check back in a few minutes.',
+    de: 'Noch nicht genug Daten gesammelt — in ein paar Minuten nochmal schauen.'
+  },
+  topPairsSwapsCount: {
+    en: 'swaps',
+    de: 'Swaps'
+  },
   volumeHistoryDesc: {
     en: 'THORChain network-wide swap volume over time, from Midgard.',
     de: 'THORChain-weites Swap-Volumen über die Zeit, von Midgard.'
@@ -6608,13 +6624,120 @@ function smoothLinePath(points) {
   return d;
 }
 
+// Tickende Liste einzelner Swap-Fee-Ereignisse -- ersetzt im "Live"-Modus die Chart-Linie durch
+// eine echte Ereignis-für-Ereignis-Ansicht: jeder neue Swap erscheint als eigene Zeile ganz
+// oben, ältere rutschen nach unten. "events" kommt bereits neueste-zuerst sortiert (siehe
+// liveFeeEvents in ThorchainPortfolio) und ist auf die letzten 12 begrenzt.
+function LiveFeeTicker({ events, lang, hideValue }) {
+  // Eigener Sekunden-Takt NUR für die "vor Xs"-Zeitangaben -- lebt komplett lokal in dieser
+  // Komponente (läuft automatisch nicht mehr, sobald auf 7D/30D umgeschaltet wird und diese
+  // Komponente unmountet), beeinflusst nichts außerhalb.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+  const fmtAgo = t => {
+    const secs = Math.max(0, Math.round((now - t) / 1000));
+    if (secs < 1) return '0s';
+    if (secs < 60) return `${secs}s`;
+    const mins = Math.floor(secs / 60);
+    return `${mins}m`;
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      // Genug Höhe für 7 Zeilen auf einmal (kein Scrollen nötig) -- war zuvor auf 5 Zeilen
+      // (132px) ausgelegt. Zeilen jetzt kompakter (3px statt 4px Padding, kleinere Schrift),
+      // dadurch passen 7 Zeilen à ~19px (3px Padding oben/unten + ~13px Textzeile) plus 6x 3px
+      // Zwischenraum ≈ 151px, mit etwas Luft aufgerundet.
+      height: 156,
+      overflow: 'hidden',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3
+    }
+  }, events.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#5C7274',
+      fontSize: 10,
+      textAlign: 'center',
+      padding: '58px 0'
+    }
+  }, t('volumeSparklineLiveCollecting', lang)) : events.map(ev => /*#__PURE__*/React.createElement("div", {
+    key: ev.id,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+      padding: '3px 7px',
+      borderRadius: 6,
+      background: ev.big ? 'rgba(245,195,107,0.07)' : 'rgba(0,222,225,0.05)',
+      flexShrink: 0,
+      // Neue Zeilen gleiten von oben leicht herein und blenden dabei ein -- macht "fließend"
+      // sichtbar statt dass Einträge einfach abrupt erscheinen. Spielt automatisch beim
+      // Einhängen ab, da React für jeden neuen Eintrag (eindeutiger key=ev.id) ein wirklich
+      // NEUES DOM-Element erzeugt.
+      animation: 'tpFeeRowIn 0.4s ease-out'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 5,
+      height: 5,
+      borderRadius: '50%',
+      background: ev.big ? '#F5C36B' : '#00DEE1',
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 9.5,
+      color: '#C3D5D6',
+      fontFamily: "'Inter', sans-serif",
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, `${ev.fromTicker} \u2192 ${ev.toTicker}`)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 9.5,
+      fontWeight: 700,
+      color: ev.big ? '#F5C36B' : '#00DEE1',
+      fontFamily: "'Space Grotesk', sans-serif",
+      whiteSpace: 'nowrap'
+    }
+  }, hideValue ? '••••' : ev.volumeRune != null ? `+${ev.volumeRune.toFixed(4)}` : '—'), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 8.5,
+      color: '#5C7274',
+      minWidth: 18,
+      textAlign: 'right'
+    }
+  }, fmtAgo(ev.t))))));
+}
+
 // Kleiner Sparkline-Graph für das Tages-Handelsvolumen der letzten 30 Tage.
 // Zeigt zusätzlich die letzte Woche (7 Tage) farblich hervorgehoben.
 function VolumeSparkline({
   data,
   liveData,
   liveFeeRune,
+  liveFeeEvents,
   onOpenHistory,
+  onOpenTopPairs,
   activePrice,
   lang,
   currency,
@@ -6806,6 +6929,43 @@ function VolumeSparkline({
     d: "M3.05 13A9 9 0 1 0 6 5.3L3 8"
   }), /*#__PURE__*/React.createElement("path", {
     d: "M12 7v5l4 2"
+  }))), onOpenTopPairs && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: onOpenTopPairs,
+    title: t('topPairsTitle', lang),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'rgba(0,222,225,0.1)',
+      border: '1px solid rgba(0,222,225,0.28)',
+      borderRadius: 999,
+      width: 24,
+      height: 24,
+      padding: 0,
+      flexShrink: 0,
+      cursor: 'pointer'
+    }
+    // Podium-/Rangliste-Symbol (drei unterschiedlich hohe Balken) -- steht für "Top-Rangliste",
+    // konsistent mit dem Verlaufs-Symbol (Uhr) direkt daneben in derselben Zeile.
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 13,
+    height: 13,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "#6FE3E5",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    style: {
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M6 20v-6"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 20V6"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M18 20v-10"
   }))), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setVolRange('live');
@@ -6851,7 +7011,7 @@ function VolumeSparkline({
       cursor: 'pointer',
       fontFamily: "'Inter', sans-serif"
     }
-  }, rangeLabel(r, lang)))), /*#__PURE__*/React.createElement("div", {
+  }, rangeLabel(r, lang)))), !isLive && /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
     style: {
       position: 'relative',
@@ -6969,7 +7129,11 @@ function VolumeSparkline({
       whiteSpace: 'nowrap',
       pointerEvents: 'none'
     }
-  }, fmtDate(hoverPoint.t, lang)))), /*#__PURE__*/React.createElement("div", {
+  }, fmtDate(hoverPoint.t, lang)))), isLive && /*#__PURE__*/React.createElement(LiveFeeTicker, {
+    events: liveFeeEvents || [],
+    lang: lang,
+    hideValue: hideValue
+  }), !isLive && /*#__PURE__*/React.createElement("div", {
     style: {
       // WICHTIG: konstant, NICHT abhängig vom Hover-Status -- sonst ändert sich beim Hovern die
       // Gesamthöhe dieser Karte, was benachbarte Karten im Layout mitverschiebt/neu anordnet.
@@ -6986,18 +7150,18 @@ function VolumeSparkline({
       letterSpacing: '0.03em',
       marginBottom: 2
     }
-  }, isLive ? t('volumeSparklineLiveFees', lang) : volRange === 7 ? t('last7d', lang) : t('last30d', lang)), /*#__PURE__*/React.createElement("div", {
+  }, volRange === 7 ? t('last7d', lang) : t('last30d', lang)), /*#__PURE__*/React.createElement("div", {
     style: {
-      color: isLive ? '#F5C36B' : '#F5F5F5',
+      color: '#F5F5F5',
       fontSize: 13,
       fontWeight: 600,
       fontFamily: "'Space Grotesk', sans-serif"
     }
-    // Zeigt im Live-Modus NUR NOCH die tatsächliche Swap-Gebühr (RUNE) -- die zuvor zusätzlich
-    // gezeigte Swap-VOLUMEN-Zeile (RUNE-Menge + USD-Gegenwert) wurde entfernt, um Verwechslung
-    // zwischen "wie viel wurde gehandelt" und "wie viel Gebühr ist dabei angefallen" zu
-    // vermeiden -- hier zählt nur Letzteres.
-  }, hideValue ? '••••' : isLive ? `+${fmtRune(liveFeeRune || 0, lang)} RUNE` : totalUsd != null ? fmtUSDRounded(totalUsd, lang, currency) : '—')));
+    // Diese Zusammenfassungszeile (Label + Zahl) gibt es jetzt NUR NOCH im 7D/30D-Modus. Im
+    // Live-Modus stand hier vorher zusätzlich zur Ticker-Liste noch "Swap Fees Generated
+    // (Live) +X RUNE" als aufsummierte Gesamtzahl seit dem Laden der Seite -- auf Wunsch
+    // entfernt, die einzelnen Zeilen in der Liste darüber sprechen für sich.
+  }, hideValue ? '••••' : totalUsd != null ? fmtUSDRounded(totalUsd, lang, currency) : '—')));
 }
 
 // Größerer Balken-Chart für die Swap-Volumen-Historie im Modal (1M/3M/1J/2J/3J) -- ähnliches
@@ -8579,9 +8743,15 @@ function formatSwapAmount(value, ticker, lang) {
 // "BTC.BTC" -> { chain: 'BTC', ticker: 'BTC' }; "ETH.USDC-0X123..." -> { chain: 'ETH', ticker: 'USDC' }
 function parseSwapAsset(identifier) {
   const raw = String(identifier || '');
-  const dot = raw.indexOf('.');
-  const chain = dot > 0 ? raw.slice(0, dot) : raw;
-  const rest = dot > 0 ? raw.slice(dot + 1) : '';
+  // THORChain trennt Chain/Ticker bei normalen Layer1-Assets mit "." (z.B. "BTC.BTC"), bei
+  // synthetischen bzw. Trade-Assets dagegen mit "~" (z.B. "ETH~ETH", "TRON~TRX"). Vorher wurde
+  // NUR "." erkannt -- bei einem "~"-Asset fand sich kein Trennzeichen, wodurch der KOMPLETTE
+  // Rohbezeichner (z.B. "ETH~ETH" statt nur "ETH") als Ticker landete. Beide Trennzeichen
+  // kommen bei einem einzelnen Asset-Bezeichner nie gemeinsam vor, Math.max wählt also
+  // zuverlässig das tatsächlich vorhandene aus (das jeweils andere liefert -1).
+  const sep = Math.max(raw.indexOf('.'), raw.indexOf('~'));
+  const chain = sep > 0 ? raw.slice(0, sep) : raw;
+  const rest = sep > 0 ? raw.slice(sep + 1) : '';
   const ticker = (rest.split('-')[0] || chain).toUpperCase();
   return { chain, ticker, identifier: raw };
 }
@@ -11583,6 +11753,10 @@ function ThorchainPortfolio() {
   // unten) -- ein reiner Ref-Wert allein löst keinen Re-Render aus, ohne diesen State würde
   // die Anzeige nie aktualisiert.
   const [liveFeeAccumRune, setLiveFeeAccumRune] = useState(0);
+  // Einzelne Fee-Ereignisse für die tickende Live-Liste (siehe LiveFeeTicker weiter oben) --
+  // im Unterschied zu liveFeeAccumRune (nur die laufende SUMME) hier jeder Swap als eigener
+  // Eintrag mit Zeitstempel/Betrag/Asset-Paar, neueste zuerst, auf die letzten 12 begrenzt.
+  const [liveFeeEvents, setLiveFeeEvents] = useState([]);
   // Sät liveVolumeSeries mit zwei Startpunkten bei 0, sobald volume24h zum ERSTEN Mal einen
   // Wert bekommt (nur als Signal "die App ist bereit" genutzt -- der eigentliche Startwert ist
   // bewusst 0, nicht volume24h selbst, siehe liveSwapFeeAccumRuneRef weiter unten für die
@@ -11837,6 +12011,13 @@ function ThorchainPortfolio() {
   const [calcCustomDate, setCalcCustomDate] = useState(''); // ISO yyyy-mm-dd; wenn gesetzt, hat Vorrang vor calcPeriodDays
   const [calcCustomApyStrs, setCalcCustomApyStrs] = useState(['5', '10', '15']); // ebenfalls roher Text, aus demselben Grund
   const [showVolumeHistoryModal, setShowVolumeHistoryModal] = useState(false);
+  // Top-5-Swap-Paare-Modal (12h/24h) -- Daten kommen aus dem Worker (/top-pairs), der sie im
+  // Hintergrund über den ohnehin laufenden Cron-Job sammelt (siehe FIX 12 im Worker-Code).
+  const [showTopPairsModal, setShowTopPairsModal] = useState(false);
+  const [topPairsHours, setTopPairsHours] = useState(24);
+  const [topPairsData, setTopPairsData] = useState(null); // { hours, pairs: [{pair,count,volumeUsd}] }
+  const [topPairsLoading, setTopPairsLoading] = useState(false);
+  const [topPairsError, setTopPairsError] = useState(null);
   const [volumeHistoryRangeDays, setVolumeHistoryRangeDays] = useState(30);
   // Cache je Zeitraum (Tage -> { loading, error, data }), damit ein bereits geladener Zeitraum
   // beim erneuten Anklicken nicht jedes Mal neu von Midgard abgefragt werden muss.
@@ -12062,7 +12243,7 @@ function ThorchainPortfolio() {
   // beim Schließen exakt an der ursprünglichen Scroll-Position wiederhergestellt. WICHTIG: hier
   // ALLE Modals der App eintragen -- fehlt eines, wackelt/scrollt der Hintergrund bei dessen
   // Öffnen weiterhin unkontrolliert mit (genau das war der gemeldete Bug).
-  const anyModalOpen = showRunePriceChart || showCompareChart || showApyHistoryModal || showVolumeHistoryModal || showApyCalculatorModal || showDeTaxModal || swapModalOpen;
+  const anyModalOpen = showRunePriceChart || showCompareChart || showApyHistoryModal || showVolumeHistoryModal || showApyCalculatorModal || showDeTaxModal || swapModalOpen || showTopPairsModal;
   // Hier (statt direkt bei der Deklaration weiter oben) befüllt, weil anyModalOpen erst an
   // dieser Stelle im Funktionskörper existiert -- ein Zugriff weiter oben würde an der
   // "temporal dead zone" von "const" scheitern.
@@ -12967,6 +13148,32 @@ function ThorchainPortfolio() {
       cancelled = true;
     };
   }, [showVolumeHistoryModal, volumeHistoryRangeDays]);
+
+  // Lädt die Top-5-Swap-Paare, sobald das Modal geöffnet wird oder der 12h/24h-Zeitraum
+  // wechselt. Läuft über den Worker (/top-pairs), der die Daten im Hintergrund per Cron
+  // sammelt -- die Abfrage selbst ist dadurch schnell (liest nur aus einer kleinen,
+  // vorbereiteten D1-Tabelle), kein Live-Durchsuchen tausender Midgard-Actions nötig.
+  useEffect(() => {
+    if (!showTopPairsModal) return;
+    let cancelled = false;
+    setTopPairsLoading(true);
+    setTopPairsError(null);
+    fetchWithTimeout(`${PURCHASES_SYNC_BACKEND_BASE}/top-pairs?hours=${topPairsHours}`, {}, 10000).then(async res => {
+      if (!res.ok) throw new Error('HTTP_' + res.status);
+      const data = await res.json();
+      if (cancelled) return;
+      setTopPairsData(data);
+      setTopPairsLoading(false);
+    }).catch(e => {
+      if (cancelled) return;
+      console.warn('[RUNE Portfolio] Top-Paare-Anfrage fehlgeschlagen:', e);
+      setTopPairsError(e && e.message || String(e));
+      setTopPairsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [showTopPairsModal, topPairsHours]);
 
   // WICHTIG: Der letzte Balken der 30-Tage-Historie oben ist NUR das laufende UTC-Kalendertag
   // (00:00 UTC bis jetzt) — je nach Tageszeit oft nur ein Bruchteil eines vollen Tages. Die große
@@ -13978,6 +14185,28 @@ function ThorchainPortfolio() {
       window.removeEventListener('focus', retryNow);
       window.removeEventListener('online', retryNow);
     };
+  }, []);
+
+  // Setzt den Mobile-Tab beim WIEDERÖFFNEN der App zurück auf "Portfolio" (mobileTab='chart').
+  // WICHTIG: die App ist eine normale Webseite, kein echter Neustart bei jedem Öffnen -- schließt
+  // man den Browser-Tab auf dem Handy nicht wirklich, sondern legt ihn nur in den Hintergrund
+  // (App-Wechsler, Sperrbildschirm etc.), hält der Browser den kompletten React-Zustand am Leben
+  // und stellt ihn beim Zurückkehren per "pageshow"-Event mit event.persisted=true unverändert
+  // wieder her -- OHNE die Seite neu zu laden, OHNE den useState('chart')-Default erneut
+  // auszuführen. War beim letzten Verlassen gerade der "Bond Rewards"-Tab aktiv, blieb er es auch
+  // beim nächsten Öffnen -- das war der Grund, warum ein reiner Fix des allerersten Ladens (siehe
+  // weiter unten bei "!hasData && nodeRewardsBox") das gemeldete Verhalten NICHT behoben hat:
+  // dieser Fall betrifft nicht den ersten Ladevorgang, sondern das Wiederaufnehmen einer bereits
+  // laufenden Sitzung. Bewusst NUR bei event.persisted (= aus dem bfcache wiederhergestellt),
+  // nicht bei jedem kurzen App-Wechsel/visibilitychange -- sonst würde ein Nutzer, der z.B. mitten
+  // im Swap-Tab kurz eine Benachrichtigung checkt und sofort zurückkommt, unerwartet auf
+  // Portfolio zurückgeworfen, obwohl er eigentlich mittendrin war.
+  useEffect(() => {
+    const onPageShow = e => {
+      if (e.persisted) setMobileTab('chart');
+    };
+    window.addEventListener('pageshow', onPageShow);
+    return () => window.removeEventListener('pageshow', onPageShow);
   }, []);
 
   // Regelmäßiges Auto-Refresh, auch wenn die Seite einfach offen bleibt (kein Tab-/App-Wechsel,
@@ -15219,6 +15448,51 @@ function ThorchainPortfolio() {
     }
   };
 
+  // Bereinigt einen rohen Asset-Bezeichner auf einen kurzen, lesbaren Ticker -- schneidet
+  // ALLES ab dem ersten "-" ab (Contract-Adressen-Suffix bei Token-Assets wie
+  // "USDC-0xA0b8...") und kappt zur Sicherheit zusätzlich auf 8 Zeichen, falls trotzdem noch
+  // etwas Langes durchrutscht (z.B. wenn gar kein bekanntes Trennzeichen im Rohbezeichner
+  // vorkommt).
+  const cleanTickerPart = raw => {
+    if (!raw) return '?';
+    const short = String(raw).split('-')[0];
+    return short.length > 8 ? short.slice(0, 8) : short;
+  };
+  // Baut aus einem Midgard-Asset-Bezeichner das Anzeige-Label für die Live-Liste. WICHTIG:
+  // reiner Ticker allein (z.B. "USDT") ist bei Token-Assets MEHRDEUTIG -- es gibt USDT auf
+  // Ethereum, auf TRON, auf BSC usw., alle mit demselben Ticker, aber unterschiedlichen Chains.
+  // Bei Swaps wie "RUNE -> TRX" konnte man vorher nicht erkennen, ob damit natives TRX gemeint
+  // war oder z.B. ein Token wie TRX.USDT -- beides zeigte einfach nur "TRX" bzw. "USDT". Bei
+  // NATIVEN Assets (Chain und Ticker sind identisch, z.B. "BTC.BTC" -> Chain=BTC, Ticker=BTC)
+  // bleibt es beim schlichten Ticker (kein Grund, "BTC.BTC" zu zeigen). Nur wenn sich Chain und
+  // Ticker UNTERSCHEIDEN (= ein Token AUF einer Chain), wird beides kombiniert angezeigt, im
+  // selben "CHAIN.TICKER"-Format, das THORChain selbst verwendet.
+  const swapAssetLabel = identifier => {
+    if (!identifier) return '?';
+    const parsed = parseSwapAsset(identifier);
+    const chain = cleanTickerPart(parsed.chain);
+    const ticker = cleanTickerPart(parsed.ticker);
+    return chain && chain !== ticker ? `${chain}.${ticker}` : ticker;
+  };
+  // Ermittelt Von-/Nach-Asset-Label für die Live-Liste aus einer Midgard-Swap-Action -- an
+  // EINER Stelle gebündelt statt (wie vorher) doppelt fast identisch im Willkommens-Burst UND
+  // im normalen Poll-Batch nachgebaut.
+  const deriveSwapTickers = action => {
+    try {
+      const inAsset = action && action.in && action.in[0] && action.in[0].coins && action.in[0].coins[0] && action.in[0].coins[0].asset;
+      const outAsset = action && action.out && action.out[0] && action.out[0].coins && action.out[0].coins[0] && action.out[0].coins[0].asset || (action && action.pools && action.pools[action.pools.length - 1]);
+      return {
+        fromTicker: swapAssetLabel(inAsset),
+        toTicker: swapAssetLabel(outAsset)
+      };
+    } catch (e) {
+      return {
+        fromTicker: '?',
+        toTicker: '?'
+      };
+    }
+  };
+
   // Lässt einen einzelnen Partikel vom unteren zum oberen Rand des Kanals wandern und pulsiert
   // bei Ankunft kurz die Reward-Karte/-Zahl. sizeUsd steuert Partikel-Größe UND Lauf-Tempo
   // (größerer Swap = größerer, etwas fixerer Partikel) -- LOG-skaliert, weil Swap-Größen von
@@ -15341,7 +15615,15 @@ function ThorchainPortfolio() {
         // Worker hat zusätzlich einen eigenen kurzen Cache (4s), damit bei mehreren
         // gleichzeitig aktiven Nutzern nicht jeder Poll einzeln bis zu Midgard durchgereicht
         // wird.
-        const res = await fetchWithTimeout(`${PURCHASES_SYNC_BACKEND_BASE}/recent-swaps`, {}, 8000);
+        // WICHTIG: Timeout MUSS länger sein als der interne Timeout des Backend-Workers für
+        // diese Anfrage (12s, siehe timeoutMs im Worker-Code bei fetchRecentSwapActions) --
+        // vorher stand hier 8000ms, also KÜRZER als die 12s, die der Worker sich selbst gibt.
+        // Das Frontend brach dadurch regelmäßig ab, BEVOR der Worker (der bei einem langsamen,
+        // aber letztlich erfolgreichen Versuch durchaus 10+ Sekunden brauchen kann) überhaupt
+        // fertig werden konnte -- der nächste Poll (7s später) startete dann wieder bei 0,
+        // ohne je eine Chance zu bekommen, die eigentlich erfolgreiche, nur langsame Antwort
+        // abzuwarten. Das erklärte den anhaltend langsamen "Collecting live data..."-Zustand.
+        const res = await fetchWithTimeout(`${PURCHASES_SYNC_BACKEND_BASE}/recent-swaps`, {}, 15000);
         if (!res.ok) throw new Error('HTTP_' + res.status);
         const json = await res.json();
         if (cancelled) return;
@@ -15361,12 +15643,37 @@ function ThorchainPortfolio() {
           // drin, ein zusätzlicher Bump würde doppelt zählen).
           liveFlowFirstPollRef.current = false;
           liveFlowLastHeightRef.current = maxHeight;
-          const welcome = actions.slice(0, 4);
+          const welcome = actions.slice(0, 7);
           welcome.forEach((action, i) => {
             setTimeout(() => {
               if (cancelled) return;
-              spawnSwapParticle(estimateSwapUsd(action));
-            }, i * 420);
+              const usd = estimateSwapUsd(action);
+              spawnSwapParticle(usd);
+              // NEU: die Ticker-Liste sofort mit den letzten paar echten Swaps füttern, statt
+              // nur die Partikel abzufeuern -- vorher stand dort bis zum nächsten Poll-Zyklus
+              // (7s) UND einem tatsächlich NEUEN Swap "Collecting live data...", was bei
+              // ruhigem Netzwerk-Verkehr lange dauern konnte. Bewusst weiterhin OHNE den
+              // Fee-Akkumulator/Chart zu bumpen (siehe Kommentar oben, Doppelzählung) -- nur
+              // die reine Anzeige-Liste wird sofort gefüllt.
+              const {
+                activePrice: price
+              } = liveFlowStateRef.current;
+              const volumeRune = usd != null && price ? usd / price : null;
+              const sizeScale = usd != null ? Math.min(1, Math.log10(Math.max(10, Math.min(usd, 2000000))) / Math.log10(2000000)) : 0;
+              const {
+                fromTicker,
+                toTicker
+              } = deriveSwapTickers(action);
+              setLiveFeeEvents(prev => [{
+                id: `welcome-${action.height}-${i}-${Date.now()}`,
+                t: Date.now(),
+                feeRune: estimateSwapFeeRune(action),
+                volumeRune,
+                big: sizeScale > 0.6,
+                fromTicker,
+                toTicker
+              }, ...prev].slice(0, 7));
+            }, i * 150);
           });
           return;
         }
@@ -15383,15 +15690,44 @@ function ThorchainPortfolio() {
             if (cancelled) return;
             const usd = estimateSwapUsd(action);
             spawnSwapParticle(usd);
-            // Echte Liquidity-Fee dieses Swaps akkumulieren -- das speist jetzt sowohl die
-            // Textzeile ("Swap Fees Generated") ALS AUCH den Live-Chart direkt darüber (siehe
-            // ausführliche Begründung bei der Ref-Deklaration weiter oben: beide zeigen jetzt
-            // konsequent dieselbe Größe, vorher zeichnete der Chart eine ANDERE Zahl
-            // (Volumen) als der Text darunter auswies).
+            // activePrice wird jetzt HIER (statt erst weiter unten) gelesen -- wird sowohl für
+            // den Live-Chart/volume24h-Bump weiter unten ALS AUCH für die Volumen-Anzeige in
+            // der Ticker-Zeile direkt darunter gebraucht.
+            const {
+              activePrice: price
+            } = liveFlowStateRef.current;
+            // Echte Liquidity-Fee dieses Swaps akkumulieren -- speist weiterhin den Live-Chart
+            // direkt darüber (die Kurve selbst bleibt an der Fee-Summe, nur die einzelnen
+            // Ticker-ZEILEN darunter zeigen jetzt das Volumen statt der Fee, siehe unten).
             const feeRune = estimateSwapFeeRune(action);
             if (feeRune != null) {
               liveSwapFeeAccumRuneRef.current += feeRune;
               setLiveFeeAccumRune(liveSwapFeeAccumRuneRef.current);
+              // Einzelnes Ereignis für die tickende Live-Liste -- dieselbe Größen-Einstufung
+              // (big/klein) wie bei den Partikeln, damit beide konsistent dieselbe Farbe
+              // (Teal/Gold) für dieselbe Swap-Größe verwenden.
+              const sizeScale = usd != null ? Math.min(1, Math.log10(Math.max(10, Math.min(usd, 2000000))) / Math.log10(2000000)) : 0;
+              // Swap-Volumen in RUNE für die Zeilen-Anzeige (statt der Fee) -- dieselbe Karte
+              // heißt oben schon "24H VOLUME", die einzelnen Zeilen sollten dieselbe Größe
+              // zeigen statt einer andersartigen Fee-Zahl, die dort verwirrend wirkte.
+              const volumeRune = usd != null && price ? usd / price : null;
+              const {
+                fromTicker,
+                toTicker
+              } = deriveSwapTickers(action);
+              setLiveFeeEvents(prev => [{
+                id: `${action.height}-${fromTicker}-${toTicker}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                t: Date.now(),
+                feeRune,
+                volumeRune,
+                big: sizeScale > 0.6,
+                fromTicker,
+                toTicker
+                // Auf 7 begrenzt (war 5) -- exakt so viele, wie ohne Scrollen auf die Karte
+                // passen sollen, in kompakterer Kartenhöhe (siehe LiveFeeTicker weiter oben).
+                // Ältere fliegen dabei automatisch für immer raus, es wird nichts irgendwo
+                // zusätzlich aufgehoben.
+              }, ...prev].slice(0, 7));
               // Sofortiger Live-Sample-Push zusätzlich zum periodischen Heartbeat weiter unten
               // -- damit der Chart nicht erst beim nächsten 5s-Takt reagiert, sondern in genau
               // dem Moment einen sichtbaren Sprung macht, in dem der Partikel landet. 60
@@ -15419,9 +15755,6 @@ function ThorchainPortfolio() {
             // Poll-Batch feuern eng gestaffelt hintereinander (siehe oben) -- ohne den
             // Updater könnte ein zweiter Bump kurz vor dem nächsten Render noch den alten
             // Stand lesen und den ersten Bump dadurch überschreiben statt draufzuaddieren.
-            const {
-              activePrice: price
-            } = liveFlowStateRef.current;
             let bumpedVol = null;
             if (usd != null && price) {
               setVolume24h(prev => {
@@ -16309,6 +16642,176 @@ function ThorchainPortfolio() {
   // weiter die (identischen) Daten von "1J" zeigen, ohne dass der Fehler sichtbar wird.
   const volumeHistoryDisplayData = volumeHistoryEntry && volumeHistoryEntry.data ? volumeHistoryEntry.data : volumeHistoryEntry && volumeHistoryEntry.loading && volumeHistoryDisplay ? volumeHistoryDisplay.data : null;
   const volumeHistoryIsRefreshing = !!(volumeHistoryEntry && volumeHistoryEntry.loading && volumeHistoryDisplayData);
+  const topPairsModal = showTopPairsModal && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowTopPairsModal(false),
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      background: 'rgba(0,0,0,0.75)',
+      zIndex: 1000,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "tp-apy-history-scroll",
+    style: {
+      ...cardShellStyle,
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
+      width: '100%',
+      maxWidth: 440,
+      maxHeight: '92vh',
+      overflow: 'auto',
+      padding: '18px 20px 18px',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 17,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, t('topPairsTitle', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowTopPairsModal(false),
+    title: t('closeWord', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 7,
+      width: 30,
+      height: 30,
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 15,
+      lineHeight: 1,
+      flexShrink: 0
+    }
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 12,
+      marginBottom: 14
+    }
+  }, t('topPairsHint', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4,
+      marginBottom: 14
+    }
+  }, [12, 24].map(h => /*#__PURE__*/React.createElement("button", {
+    key: h,
+    onClick: () => setTopPairsHours(h),
+    style: {
+      background: topPairsHours === h ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: topPairsHours === h ? '#00DEE1' : '#A0BABC',
+      border: `1px solid ${topPairsHours === h ? 'rgba(0,222,225,0.3)' : '#1A3436'}`,
+      borderRadius: 7,
+      padding: '4px 12px',
+      fontSize: 11.5,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, `${h}H`))), topPairsLoading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 12,
+      textAlign: 'center',
+      padding: '40px 0'
+    }
+  }, t('loading', lang)) : topPairsError ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5C36B',
+      fontSize: 12,
+      textAlign: 'center',
+      padding: '40px 0'
+    }
+  }, t('couldNotLoadVolume', lang)) : !topPairsData || !topPairsData.pairs || topPairsData.pairs.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 12,
+      textAlign: 'center',
+      padding: '40px 0'
+    }
+  }, t('topPairsEmpty', lang)) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, topPairsData.pairs.map((p, i) => /*#__PURE__*/React.createElement("div", {
+    key: p.pair + i,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      background: '#0D2022',
+      border: '1px solid #172E30',
+      borderRadius: 8,
+      padding: '10px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: i === 0 ? '#F5C36B' : '#5C7274',
+      fontSize: 14,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif",
+      width: 18,
+      flexShrink: 0
+    }
+  }, `#${i + 1}`), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      color: '#EAF6F6',
+      fontSize: 13,
+      fontWeight: 600,
+      fontFamily: "'Inter', sans-serif",
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    }
+  }, p.pair), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: 'right',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#00DEE1',
+      fontSize: 12.5,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, `${p.count} ${t('topPairsSwapsCount', lang)}`), p.volumeUsd != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#5C7274',
+      fontSize: 10.5,
+      marginTop: 1
+    }
+  }, fmtUSDCompact(p.volumeUsd, lang, 'usd'))))))));
   const volumeHistoryModal = showVolumeHistoryModal && /*#__PURE__*/React.createElement("div", {
     onClick: () => setShowVolumeHistoryModal(false),
     style: {
@@ -19620,19 +20123,15 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       color: '#7C9698',
       fontSize: 13
     }
-  }, t('enterAddressPrompt', lang)), !hasData && nodeRewardsBox && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      justifyContent: 'flex-end',
-      marginTop: 20
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: '1 1 240px',
-      maxWidth: 300,
-      minWidth: 240
-    }
-  }, nodeRewardsBox)), hasData && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    // WICHTIG: hier stand früher zusätzlich ein "!hasData && nodeRewardsBox && ..."-Zweig, der
+    // die Bond-Rewards-Karte aus dem lokalen Cache anzeigte, SOBALD gecachte Reward-Daten
+    // verfügbar waren -- auch wenn das restliche Portfolio (hasData) noch gar nicht fertig
+    // geladen war. Auf dem Handy sprang dieser Zweig damit der eigentlichen Tab-Leiste (mit
+    // "Portfolio" als Standard-Tab, siehe mobileTab-Default weiter oben) vor: Bond Rewards war
+    // dadurch das ALLERERSTE, was beim App-Start sichtbar wurde, bevor die normale Ansicht
+    // überhaupt aufgebaut war -- genau das war der gemeldete Bug. Entfernt: bis hasData fertig
+    // ist, wird jetzt nichts vorgezogen: Portfolio bleibt der erste sichtbare Tab.
+  }, t('enterAddressPrompt', lang)), hasData && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     className: "tp-mobile-tabs",
     style: {
       gap: 8,
@@ -20129,15 +20628,14 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
   }, priceRowBox), nodeRewardsBox, hasAnyNodeRewardsData && volume24h != null && /*#__PURE__*/React.createElement("div", {
     // Der Kanal, durch den die Swap-Partikel von der Volumen-Kachel HOCH in die
     // Bond-Rewards-Karte darüber wandern (siehe spawnSwapParticle/liveFlowChannelRef weiter
-    // oben). Deutlich höher als die erste Fassung (war 22px mit -9px Margin -- dadurch blieb
-    // durch overflow:hidden kaum sichtbare Laufstrecke übrig, die Partikel waren fast nicht zu
-    // erkennen). Die leichte negative Margin zieht ihn nur noch MINIMAL in den bestehenden
-    // Kartenabstand hinein, statt ihn fast komplett zu verschlucken.
+    // oben). Höhe + Margin verkleinert (war 64px/-4px) -- zusammen mit dem 20px-Grundabstand
+    // der Spalte (siehe gap:20 am äußeren Flex-Container) wirkte der Gesamtabstand zwischen
+    // Bond-Rewards- und Volumen-Karte zu groß.
     ref: liveFlowChannelRef,
     style: {
       position: 'relative',
-      height: 64,
-      margin: '-4px 0',
+      height: 40,
+      margin: '-10px 0',
       pointerEvents: 'none',
       overflow: 'hidden'
     }
@@ -20208,7 +20706,9 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     data: volumeHistory,
     liveData: liveVolumeSeries,
     liveFeeRune: liveFeeAccumRune,
+    liveFeeEvents: liveFeeEvents,
     onOpenHistory: () => setShowVolumeHistoryModal(true),
+    onOpenTopPairs: () => setShowTopPairsModal(true),
     activePrice: activePrice,
     lang: lang,
     currency: currency,
@@ -20273,7 +20773,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       width: '100%',
       minWidth: 0
     }
-  }, swapInline)), swapModal, runePriceChartModal, compareChartModal, apyHistoryModal, volumeHistoryModal, apyCalculatorModal, deTaxModal, /*#__PURE__*/React.createElement("div", {
+  }, swapInline)), swapModal, runePriceChartModal, compareChartModal, apyHistoryModal, volumeHistoryModal, topPairsModal, apyCalculatorModal, deTaxModal, /*#__PURE__*/React.createElement("div", {
     className: "tp-footer",
     style: {
       marginTop: 40,

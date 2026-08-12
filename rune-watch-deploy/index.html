@@ -57,13 +57,12 @@
      wandert vom unteren Rand (Swap-Volumen-Kachel) zum oberen Rand (Bond-Rewards-Karte
      darüber) und blendet dabei leicht ein/aus. translate3d statt top/bottom-Animation, damit
      der Browser das auf der Grafikkarte statt per Layout-Neuberechnung erledigt.
-     Laufstrecke an die 64px hohe Kanalhöhe angepasst (war -22px in der ersten, viel kürzeren
-     Kanal-Fassung -- dadurch waren die Partikel kaum vom Rand zu unterscheiden). */
+     Laufstrecke an die jetzt 40px hohe Kanalhöhe angepasst (war -66px bei 64px Kanalhöhe). */
   @keyframes tpSwapParticleUp {
-    0% { transform: translate3d(0,8px,0); opacity: 0; }
+    0% { transform: translate3d(0,6px,0); opacity: 0; }
     12% { opacity: 1; }
     82% { opacity: 1; }
-    100% { transform: translate3d(0,-66px,0); opacity: 0; }
+    100% { transform: translate3d(0,-42px,0); opacity: 0; }
   }
   /* Kurzer Puls der tickenden Reward-Zahl bei Ankunft eines Partikels (siehe
      liveFlowNumberRef in app.js) -- rein optisch, keine Layout-Verschiebung (nur transform),
@@ -81,6 +80,13 @@
   @keyframes tpArrivalRipple {
     0% { transform: scale(0.4); opacity: 0.9; border-width: 2px; }
     100% { transform: scale(3.2); opacity: 0; border-width: 1px; }
+  }
+  /* Neue Zeilen in der Live-Fee-Ticker-Liste (siehe LiveFeeTicker in app.js) gleiten von oben
+     leicht herein und blenden dabei ein -- macht "fließend" sichtbar statt dass neue Swaps
+     abrupt in der Liste erscheinen. */
+  @keyframes tpFeeRowIn {
+    0% { opacity: 0; transform: translateY(-8px); }
+    100% { opacity: 1; transform: translateY(0); }
   }
   /* Durchgehender, sanfter Schimmer auf der Leitspur im Live-Flow-Kanal (siehe
      liveFlowChannelRef in app.js) -- macht die Verbindung zwischen Volumen- und
