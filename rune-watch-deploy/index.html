@@ -15,17 +15,31 @@
      tatsächlichen Laden dann eingetauscht werden -- verbessert FCP/LCP, da das erste Rendering
      nicht mehr auf den Google-Fonts-Request warten muss. <noscript> als Fallback für den (sehr
      seltenen) Fall, dass JS deaktiviert ist. -->
-<!-- font-display=optional statt swap: verhindert den späten Schrift-Tausch (System-Font ->
-     Unbounded/Space Grotesk), der nach dem Umbau auf nicht-blockierendes Font-Laden zu einem
-     großen, einmaligen Layout-Shift führte (viele große Zahlen-Displays ändern gleichzeitig
-     ihre Breite). Mit "optional" bleibt für einen Seitenaufruf dauerhaft die Fallback-Schrift,
-     falls die Google-Font nicht innerhalb von ~100ms bereitsteht -- kein nachträglicher Tausch,
-     kein Shift mehr. FCP bleibt weiterhin nicht-blockierend. -->
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Unbounded:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=optional" rel="stylesheet" media="print" onload="this.media='all'">
-<noscript><link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Unbounded:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=optional" rel="stylesheet"></noscript>
+<!-- font-display=swap (nicht mehr "optional"): "optional" gab dem Browser nur ein enges
+     ~100ms-Zeitfenster, um die Google-Font zu laden -- schaffte er das nicht rechtzeitig,
+     blieb für den GESAMTEN Seitenbesuch die System-Fallback-Schrift stehen, ohne späteren
+     Tausch. Auf iPhones (meist schnelleres Netz, warmer Cache) wurde das Fenster fast immer
+     eingehalten, auf Android-Geräten (langsameres Netz, kalter Cache) dagegen deutlich
+     häufiger gerissen -- das Ergebnis: dieselbe Seite zeigte je nach Gerät unterschiedliche
+     Schriftarten (Android landete bei Roboto statt Space Grotesk/Unbounded/Inter). Das Design
+     MUSS aber auf jedem Endgerät gleich aussehen, deshalb jetzt "swap": die Google-Font wird
+     IMMER nachgetauscht, sobald sie fertig geladen ist, egal wie lange das dauert -- kein
+     Gerät bleibt mehr dauerhaft auf der falschen Schrift hängen. Nimmt dafür einen möglichen
+     einmaligen Layout-Sprung beim Nachtausch in Kauf (Zahlen-Displays können kurz die Breite
+     ändern) -- das ist der bewusst gewählte, kleinere Nachteil gegenüber inkonsistenten
+     Schriftarten zwischen Geräten. -->
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Unbounded:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Unbounded:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"></noscript>
 <style>
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: #000000; min-height: 100vh; overscroll-behavior-x: none; }
+  html, body { margin: 0; padding: 0; background: #000000; min-height: 100vh; overflow-x: hidden; }
+  /* overscroll-behavior NUR auf body, NICHT auf html: html hatte in manchen Chrome-Versionen
+     einen bekannten Bug, bei dem overscroll-behavior auf dem WURZEL-Element das komplette
+     Scrollen der Seite blockieren konnte, nicht nur das gewünschte Pull-to-Refresh/Bounce am
+     Rand. 'contain' statt 'none': verhindert weiterhin, dass ein Scroll am oberen/unteren Rand
+     auf die Browser-Chrome-Ebene durchschlägt (Pull-to-Refresh etc.), ist aber die vom Spec
+     empfohlene, konservativere Variante für genau diesen Zweck. */
+  body { overscroll-behavior-y: contain; }
   body { font-family: 'Inter', sans-serif; }
   #root { min-height: 100vh; }
   .tp-input::placeholder { color: #4C6062; }
@@ -39,8 +53,45 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  /* Swap-Partikel im Live-Flow-Kanal (siehe liveFlowChannelRef/spawnSwapParticle in app.js):
+     wandert vom unteren Rand (Swap-Volumen-Kachel) zum oberen Rand (Bond-Rewards-Karte
+     darüber) und blendet dabei leicht ein/aus. translate3d statt top/bottom-Animation, damit
+     der Browser das auf der Grafikkarte statt per Layout-Neuberechnung erledigt.
+     Laufstrecke an die 64px hohe Kanalhöhe angepasst (war -22px in der ersten, viel kürzeren
+     Kanal-Fassung -- dadurch waren die Partikel kaum vom Rand zu unterscheiden). */
+  @keyframes tpSwapParticleUp {
+    0% { transform: translate3d(0,8px,0); opacity: 0; }
+    12% { opacity: 1; }
+    82% { opacity: 1; }
+    100% { transform: translate3d(0,-66px,0); opacity: 0; }
+  }
+  /* Kurzer Puls der tickenden Reward-Zahl bei Ankunft eines Partikels (siehe
+     liveFlowNumberRef in app.js) -- rein optisch, keine Layout-Verschiebung (nur transform),
+     damit umliegender Text nicht mitspringt. */
+  @keyframes tpRewardPulse {
+    0% { transform: scale(1); }
+    35% { transform: scale(1.07); }
+    100% { transform: scale(1); }
+  }
   @keyframes tpChartFadeIn { from { opacity: 0; } to { opacity: 1; } }
   .tp-chart-fade-in { animation: tpChartFadeIn 0.45s ease; }
+  /* Ankunfts-Ripple am unteren Rand der Bond-Rewards-Karte (siehe spawnSwapParticle in
+     app.js): ein Ring wächst kurz auf und blendet dabei aus -- deutlicherer "Einschlag"-Moment
+     als nur ein Farbwechsel der Karte allein. */
+  @keyframes tpArrivalRipple {
+    0% { transform: scale(0.4); opacity: 0.9; border-width: 2px; }
+    100% { transform: scale(3.2); opacity: 0; border-width: 1px; }
+  }
+  /* Durchgehender, sanfter Schimmer auf der Leitspur im Live-Flow-Kanal (siehe
+     liveFlowChannelRef in app.js) -- macht die Verbindung zwischen Volumen- und
+     Bond-Rewards-Karte auch OHNE gerade laufenden Partikel als "aktiv" erkennbar, statt wie
+     eine tote, unsichtbare Linie im Leerraum zu wirken (genau das war vorher der Fall: direkt
+     beim Laden der Seite sah man dort schlicht nichts). */
+  @keyframes tpTrackShimmer {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.85; }
+  }
+  .tp-flow-track { animation: tpTrackShimmer 2.2s ease-in-out infinite; }
   /* Verhindert zuverlässig das native "Kopieren/Nachschlagen"-Kontextmenü bei längerem Drücken
      auf einem Chart -- ergänzt das JS-seitige preventDefault() in PortfolioChartInner. SVG-Text
      (Achsenbeschriftungen, Preis-Label im Fadenkreuz usw.) hält sich auf manchen mobilen Browsern
@@ -52,12 +103,19 @@
     -webkit-touch-callout: none;
   }
   /* Weicher Übergang beim Wechseln zwischen Chart- und Details-Tab auf dem Handy (per Tab-Klick
-     oder Wischgeste): die neu aktive Seite gleitet leicht aus der jeweiligen Richtung ein und
-     blendet dabei ein, statt hart umzuschalten. Chart = "linke" Seite -> gleitet von links ein.
-     Details = "rechte" Seite -> gleitet von rechts ein. Nur auf dem Handy aktiv, siehe
+     oder Wischgeste): die neu aktive Seite gleitet VOLLSTÄNDIG aus der jeweiligen Richtung ein
+     (kein Ausblenden/Fade mehr), passend zum Gegenstück in app.js (flingSwipeTransform), das die
+     verlassende Seite ebenfalls VOLLSTÄNDIG aus dem Bild gleiten lässt statt sie nur anzudeuten
+     und gleichzeitig auszublenden. Chart = "linke" Seite -> gleitet von links ein. Details/Swap
+     = "rechte" Seite -> gleitet von rechts ein. Nur auf dem Handy aktiv, siehe
      @media (max-width: 640px) weiter unten. */
-  @keyframes tpMobileTabInFromLeft { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
-  @keyframes tpMobileTabInFromRight { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+  /* 100% statt eines festen Pixel-Versatzes: die Seite startet komplett außerhalb des
+     sichtbaren Bereichs (relativ zur eigenen Breite, funktioniert dadurch auf jeder
+     Bildschirmgröße gleich) und gleitet als GANZES herein -- wirkt wie eine echte Karte, die
+     hereingeschoben wird, statt wie ein kurzes Zucken mit gleichzeitigem Verblassen. Kein
+     Opacity-Fade mehr: reine Bewegung liest sich klarer/moderner als Bewegung+Fade zusammen. */
+  @keyframes tpMobileTabInFromLeft { from { transform: translate3d(-100%,0,0); } to { transform: translate3d(0,0,0); } }
+  @keyframes tpMobileTabInFromRight { from { transform: translate3d(100%,0,0); } to { transform: translate3d(0,0,0); } }
   /* Preiszeile jetzt immer oben (über den Tabs) sichtbar -- unabhängig von Bildschirmbreite
      und davon, ob gerade der Chart- oder der Details-Tab aktiv ist. Die Sidebar-Variante
      bleibt dauerhaft ausgeblendet, damit die Preise nicht verschwinden, wenn man in den
@@ -116,7 +174,11 @@
      darunter leerer Raum blieb -- die per height-Prop gesetzte Chart-Höhe war dann wirkungslos.
      Die Karte soll bündig mit dem 24h-Volumen-Kärtchen der Seitenspalte abschließen (~235px);
      die exakte Feinjustierung übernimmt zur Laufzeit matchedCardHeight in app.js. */
-  .tp-chart-card { min-height: 235px; }
+  /* Untergrenze niedriger als die frühere 235px: seit die Swap-Karte in derselben Spalte
+     sitzt, muss die Chart-Karte weiter schrumpfen können, damit beide Spalten gleich hoch
+     enden (die Feinjustierung übernimmt matchedChartHeight in app.js). Der Wert dient nur
+     noch als reservierter Platz VOR dem Laden der Chart-Daten (CLS-Schutz). */
+  .tp-chart-card { min-height: 160px; }
   @media (max-width: 640px) {
     .tp-chart-card { min-height: 230px; }
   }
@@ -135,10 +197,25 @@
   @media (max-width: 640px) {
     .tp-mobile-tabs { display: flex; }
     .tp-swap-inline { display: none !important; }
+    /* Bewährte Umsetzung: es ist immer nur EINE Seite im Layout, die anderen sind ausgeblendet.
+       Ein zwischenzeitlicher Versuch, alle drei nebeneinander in einer verschiebbaren Bahn zu
+       halten, brachte mehrere Folgefehler mit sich: das dafür nötige overflow-x am Container
+       beschnitt aufklappende Menüs, und die Seitenhöhe richtete sich immer nach der höchsten
+       (auch unsichtbaren) Seite. Der Richtungswechsel läuft jetzt über die Gesten-Erkennung
+       in app.js, die Bewegung selbst über die Einblende-Animation unten. */
     .tp-chart-panel, .tp-details-panel, .tp-swap-panel { display: none !important; }
-    .tp-chart-panel.tp-panel-active { display: block !important; animation: tpMobileTabInFromLeft 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
-    .tp-details-panel.tp-panel-active { display: flex !important; animation: tpMobileTabInFromRight 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
-    .tp-swap-panel.tp-panel-active { display: block !important; animation: tpMobileTabInFromRight 0.32s cubic-bezier(0.22, 1, 0.36, 1); }
+    .tp-chart-panel.tp-panel-active { display: block !important; }
+    .tp-details-panel.tp-panel-active { display: flex !important; }
+    .tp-swap-panel.tp-panel-active { display: block !important; }
+    /* Einblend-Richtung hängt jetzt NICHT mehr an der Tab-Identität (vorher: Chart kam immer
+       von links, Details/Swap immer von rechts), sondern an der tatsächlichen Wisch- bzw.
+       Klickrichtung -- app.js setzt dafür bei jedem Wechsel zusätzlich zu "tp-panel-active"
+       entweder "tp-enter-right" oder "tp-enter-left". Vorher lief die Animation beim Rundlauf
+       über die Swap-Seite (bzw. bei Swap<->Details rückwärts) der tatsächlichen Fingerbewegung
+       entgegen -- jetzt passt die Richtung IMMER, unabhängig davon, welche der drei Seiten
+       gerade ein-/ausblendet. Etwas schneller als zuvor (0.24s statt 0.32s).*/
+    .tp-panel-active.tp-enter-right { animation: tpMobileTabInFromRight 0.24s cubic-bezier(0, 0, 0.2, 1); }
+    .tp-panel-active.tp-enter-left { animation: tpMobileTabInFromLeft 0.24s cubic-bezier(0, 0, 0.2, 1); }
     .tp-chart-panel, .tp-details-panel, .tp-swap-panel { max-width: none !important; min-width: 0 !important; width: 100% !important; }
   }
   /* Swap-Fenster: dezente, schlanke Scrollbalken statt der dicken System-Scrollbalken --
@@ -157,6 +234,19 @@
   .tp-swap-list::-webkit-scrollbar-track { background: transparent; }
   .tp-swap-list::-webkit-scrollbar-thumb { background: #1E3A3C; border-radius: 999px; }
   .tp-swap-list { scrollbar-width: thin; scrollbar-color: #1E3A3C transparent; }
+
+  .tp-apy-history-scroll::-webkit-scrollbar { width: 6px; }
+  .tp-apy-history-scroll::-webkit-scrollbar-track { background: transparent; }
+  .tp-apy-history-scroll::-webkit-scrollbar-thumb { background: #1E3A3C; border-radius: 999px; }
+  .tp-apy-history-scroll::-webkit-scrollbar-thumb:hover { background: #2A5052; }
+  .tp-apy-history-scroll { scrollbar-width: thin; scrollbar-color: #1E3A3C transparent; }
+
+  .tp-calc-scroll::-webkit-scrollbar { display: none; }
+  .tp-calc-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+  .tp-calc-input { color-scheme: dark; transition: border-color 0.15s ease, background 0.15s ease; }
+  .tp-calc-input:focus { outline: none; border-color: rgba(0,222,225,0.55) !important; background: #0F2628 !important; }
+  .tp-calc-input::-webkit-outer-spin-button, .tp-calc-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .tp-calc-input[type=number] { -moz-appearance: textfield; }
   .tp-swap-row { transition: background 0.12s, border-color 0.12s; }
   .tp-swap-row:hover { background: rgba(0,222,225,0.06) !important; }
 
@@ -206,5 +296,146 @@
 <script defer src="react.production.min.js"></script>
 <script defer src="react-dom.production.min.js"></script>
 <script defer src="app.js"></script>
+<script>
+// Selbst-erkennender Mausrad-Scroll-Fallback. Hintergrund: in einer Nutzerumgebung
+// funktionierte natives Mausrad-Scrollen trotz mehrerer CSS-Korrekturen (overscroll-behavior
+// etc.) weiterhin nicht -- die genaue Ursache ließ sich remote nicht abschließend finden (kein
+// Zugriff auf Browser/OS/Treiber des Nutzers). Statt weiter auf Verdacht CSS zu ändern, prüft
+// dieses Skript beim ERSTEN Wheel-Ereignis, ob sich die Scroll-Position tatsächlich bewegt hat.
+// Falls nicht, übernimmt es das Scrollen ab dann manuell per JS (window.scrollBy). Für alle
+// Nutzer, bei denen natives Scrollen normal funktioniert, greift der Fallback NIE ein --
+// dadurch kein Risiko, bei bereits funktionierenden Umgebungen ein doppeltes/zu schnelles
+// Scrollen zu erzeugen.
+(function () {
+  var checked = false;
+  var nativeWorks = true;
+  var checking = false;
+  function scrollableAncestor(node, deltaY) {
+    while (node && node !== document.body && node !== document.documentElement) {
+      var cs = window.getComputedStyle(node);
+      if (/(auto|scroll)/.test(cs.overflowY) && node.scrollHeight > node.clientHeight) {
+        var atTop = node.scrollTop <= 0;
+        var atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 1;
+        if ((deltaY < 0 && !atTop) || (deltaY > 0 && !atBottom)) return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function onWheel(e) {
+    if (e.defaultPrevented) return;
+    if (!checked) {
+      if (!checking) {
+        checking = true;
+        var startY = window.scrollY;
+        var delta = e.deltaY;
+        setTimeout(function () {
+          checked = true;
+          checking = false;
+          if (Math.abs(delta) > 2 && Math.abs(window.scrollY - startY) < 1) {
+            nativeWorks = false;
+            console.warn('[RUNE Portfolio] Natives Mausrad-Scrollen scheint in dieser Umgebung blockiert zu sein -- manueller JS-Fallback aktiv.');
+          }
+        }, 80);
+      }
+      return;
+    }
+    if (nativeWorks) return;
+    var inner = scrollableAncestor(e.target, e.deltaY);
+    if (inner) {
+      inner.scrollTop += e.deltaY;
+    } else {
+      window.scrollBy(0, e.deltaY);
+    }
+  }
+  window.addEventListener('wheel', onWheel, { passive: true });
+})();
+// Paralleler, selbst-erkennender Fallback für TOUCH-Scrollen (derselbe Grundgedanke wie beim
+// Mausrad-Fallback oben). Hintergrund: bei einem Android-Nutzer funktionierte vertikales
+// Wischen auf der Hauptseite weiterhin nicht, obwohl mehrere gezielte Korrekturen an
+// touch-action/preventDefault-Stellen im Code bereits vorgenommen wurden -- die genaue Ursache
+// ließ sich remote nicht abschließend finden (kein Zugriff auf das Gerät/den Browser/eventuell
+// aktive DNS-/Privacy-Filter des Nutzers). Dieses Skript prüft beim ersten erkennbar
+// VERTIKALEN Wisch-Versuch, ob sich die Scroll-Position tatsächlich bewegt hat. Falls nicht,
+// übernimmt es das Scrollen ab dann manuell per JS. Für alle Nutzer, bei denen natives
+// Touch-Scrollen normal funktioniert, greift der Fallback NIE ein -- dadurch kein Risiko für
+// bereits funktionierende Geräte (iPhones eingeschlossen).
+(function () {
+  var checked = false;
+  var nativeWorks = true;
+  var checking = false;
+  var startX = null;
+  var startY = null;
+  var lastY = null;
+  function scrollableAncestor(node, deltaY) {
+    while (node && node !== document.body && node !== document.documentElement) {
+      var cs = window.getComputedStyle(node);
+      if (/(auto|scroll)/.test(cs.overflowY) && node.scrollHeight > node.clientHeight) {
+        var atTop = node.scrollTop <= 0;
+        var atBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 1;
+        if ((deltaY < 0 && !atTop) || (deltaY > 0 && !atBottom)) return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function onTouchStart(e) {
+    if (e.touches.length !== 1) {
+      startX = startY = lastY = null;
+      return;
+    }
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    lastY = startY;
+  }
+  function onTouchMove(e) {
+    if (e.defaultPrevented) return; // z.B. Tab-Wisch-Geste oder Chart-Interaktion beansprucht das bereits selbst
+    if (e.touches.length !== 1 || startY == null) return;
+    var y = e.touches[0].clientY;
+    var x = e.touches[0].clientX;
+    var dy = y - startY;
+    var dx = x - startX;
+    if (!checked) {
+      // Nur bei eindeutig VERTIKALER Bewegung prüfen -- eine horizontale Geste (Tab-Wechsel)
+      // soll hier nichts über natives Scrollen aussagen.
+      if (!checking && Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) {
+        checking = true;
+        var beforeY = window.scrollY;
+        var delta = dy;
+        setTimeout(function () {
+          checked = true;
+          checking = false;
+          if (Math.abs(delta) > 8 && Math.abs(window.scrollY - beforeY) < 1) {
+            nativeWorks = false;
+            console.warn('[RUNE Portfolio] Natives Touch-Scrollen scheint in dieser Umgebung blockiert zu sein -- manueller JS-Fallback aktiv.');
+          }
+        }, 80);
+      }
+      lastY = y;
+      return;
+    }
+    if (nativeWorks) {
+      lastY = y;
+      return;
+    }
+    if (Math.abs(dy) < Math.abs(dx)) {
+      // Horizontal dominant -- das gehört der Tab-Wisch-Geste, hier nicht eingreifen.
+      lastY = y;
+      return;
+    }
+    var stepDelta = lastY - y; // Finger nach oben (y sinkt) -> Seite soll nach unten scrollen
+    var inner = scrollableAncestor(e.target, stepDelta);
+    if (inner) {
+      inner.scrollTop += stepDelta;
+    } else {
+      window.scrollBy(0, stepDelta);
+    }
+    lastY = y;
+    e.preventDefault();
+  }
+  window.addEventListener('touchstart', onTouchStart, { passive: true });
+  window.addEventListener('touchmove', onTouchMove, { passive: false });
+})();
+</script>
 </body>
 </html>

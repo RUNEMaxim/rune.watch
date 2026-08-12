@@ -59,6 +59,74 @@ const RANGES = [{
 // monatlich). Nutzt bewusst dieselbe rangeLabel()-Funktion wie RANGES oben, damit die
 // Beschriftung exakt im gleichen Stil erscheint wie beim Portfolio-Wert-Chart.
 const RUNE_PRICE_CHART_RANGES = [1, 7, 30, 90, 365, 1095];
+// Zeitraum-Optionen für die Bond-APY-Historie (Live-APY-Badge -> Klick -> Modal). Bewusst
+// eigene, feste Liste statt RANGES/RUNE_PRICE_CHART_RANGES -- dort geht es um Preis-Charts
+// (Tage/Jahre-Label), hier sollen explizit "1 Monat / 3 Monate / 1 Jahr / Volle Zeit" zur
+// Auswahl stehen. days: null steht für "volle Zeit" (kein Cutoff).
+const APY_HISTORY_RANGES = [{
+  days: 30,
+  key: 'networkApyHistoryRange1m'
+}, {
+  days: 90,
+  key: 'networkApyHistoryRange3m'
+}, {
+  days: 365,
+  key: 'networkApyHistoryRange1y'
+}, {
+  days: null,
+  key: 'networkApyHistoryRangeAll'
+}];
+// Zeitraum-Optionen für die Swap-Volumen-Historie (Volumen-Karte -> Klick -> Modal). Je Range
+// eine passende Midgard-Intervallgröße, damit Anfragen für lange Zeiträume nicht Tausende von
+// Tages-Datenpunkten zurückgeben (unnötig groß, unübersichtlich im Chart) -- ab 1 Jahr wird auf
+// Wochen-, ab 3 Jahren auf Monats-Intervalle gewechselt.
+const VOLUME_HISTORY_RANGES = [{
+  days: 30,
+  key: 'volumeHistoryRange1m',
+  interval: 'day',
+  count: 30
+}, {
+  days: 90,
+  key: 'volumeHistoryRange3m',
+  interval: 'day',
+  count: 90
+}, {
+  days: 365,
+  key: 'volumeHistoryRange1y',
+  interval: 'week',
+  count: 52
+}, {
+  days: 730,
+  key: 'volumeHistoryRange2y',
+  interval: 'week',
+  count: 104
+}, {
+  days: 1095,
+  key: 'volumeHistoryRange3y',
+  interval: 'month',
+  count: 36
+}];
+
+// Zeitraum-Optionen für den Bond-Wachstumsrechner.
+const APY_CALCULATOR_PERIODS = [{
+  days: 30,
+  key: 'apyCalcPeriod1m'
+}, {
+  days: 90,
+  key: 'apyCalcPeriod3m'
+}, {
+  days: 180,
+  key: 'apyCalcPeriod6m'
+}, {
+  days: 365,
+  key: 'apyCalcPeriod1y'
+}, {
+  days: 730,
+  key: 'apyCalcPeriod2y'
+}, {
+  days: 1095,
+  key: 'apyCalcPeriod3y'
+}];
 
 // Auswählbare Kaufquellen im Kaufpreis-Tracker. "csv" wird nicht im Dropdown angeboten,
 // sondern automatisch für per CSV-Import erfasste Einträge gesetzt.
@@ -796,6 +864,18 @@ const TR = {
     ru: 'Не удалось загрузить историю наград.',
     ko: '보상 내역을 불러올 수 없습니다.'
   },
+  couldNotLoadVolume: {
+    en: 'Could not load swap volume.',
+    de: 'Swap-Volumen konnte nicht geladen werden.',
+    es: 'No se pudo cargar el volumen de swaps.',
+    fr: "Impossible de charger le volume d'échanges.",
+    it: 'Impossibile caricare il volume degli swap.',
+    pt: 'Não foi possível carregar o volume de swaps.',
+    ja: 'スワップ出来高を読み込めませんでした。',
+    zh: '无法加载兑换交易量。',
+    ru: 'Не удалось загрузить объём свопов.',
+    ko: '스왑 거래량을 불러올 수 없습니다.'
+  },
   calculating: {
     en: 'Calculating…',
     de: 'Wird berechnet…',
@@ -1000,6 +1080,90 @@ const TR = {
     ru: 'Рассчитано с капитализацией на основе реальных исторических наград и движений бонда — не оценка.',
     ko: '실제 과거 리워드와 본드 이동을 복리로 계산 — 추정치가 아닙니다.'
   },
+  networkApyHistoryHint: {
+    en: 'Click to view APY history',
+    de: 'Klicken für APY-Historie'
+  },
+  networkApyHistoryTitle: {
+    en: 'Bond APY History',
+    de: 'Bond-APY-Historie'
+  },
+  networkApyHistoryDesc: {
+    en: 'Realized APY per past churn period, calculated from your actual reward payouts and your bond balance as it actually stood at that time (reconstructed from your bond/unbond transactions plus compounding rewards). The current, still-running churn is shown as a separate "Live" row at the top. A churn where your node earned nothing (churned out) is marked separately below and excluded from the calculation. Churns with an anomalously near-zero APY are hidden entirely (not a plausible real yield).',
+    de: 'Realisierte APY je vergangenem Churn-Zeitraum, berechnet aus deinen tatsächlichen Reward-Auszahlungen und deinem Bond-Stand, wie er zu diesem Zeitpunkt tatsächlich war (rekonstruiert aus deinen Bond-/Unbond-Transaktionen plus compoundenden Rewards). Der aktuell laufende Churn wird als eigene "Live"-Zeile ganz oben angezeigt. Ein Churn, bei dem dein Node nichts verdient hat (gechurnt), ist unten separat markiert und fließt nicht in die Berechnung ein. Churns mit einer auffällig nahe-null APY werden komplett ausgeblendet (kein plausibler realer Ertrag).'
+  },
+  networkApyHistoryEmpty: {
+    en: 'Not enough reward history yet to calculate past APY.',
+    de: 'Noch nicht genug Reward-Historie, um vergangene APY zu berechnen.'
+  },
+  networkApyHistoryToggleList: {
+    en: 'Show detailed history',
+    de: 'Detaillierten Verlauf anzeigen'
+  },
+  networkApyHistoryDate: {
+    en: 'Churn date',
+    de: 'Churn-Datum'
+  },
+  networkApyHistoryReward: {
+    en: 'Reward',
+    de: 'Reward'
+  },
+  networkApyHistoryBond: {
+    en: 'Bond',
+    de: 'Bond'
+  },
+  networkApyHistoryChurnOut: {
+    en: 'Churned out — not counted',
+    de: 'Gechurnt — nicht mitgezählt'
+  },
+  networkApyHistoryChurnOutShort: {
+    en: 'Churned out',
+    de: 'Gechurnt'
+  },
+  networkApyHistoryLive: {
+    en: 'Live',
+    de: 'Live'
+  },
+  networkApyHistoryChurnOutHint: {
+    en: 'Your node earned nothing at this churn (e.g. it was churned out / inactive). Excluded from the APY calculation, shown here only so the gap is traceable.',
+    de: 'Dein Node hat bei diesem Churn nichts verdient (z.B. gechurnt/inaktiv). Fließt nicht in die APY-Berechnung ein, wird nur zur Nachvollziehbarkeit der Lücke angezeigt.'
+  },
+  networkApyHistoryRange1m: {
+    en: '1M',
+    de: '1M'
+  },
+  networkApyHistoryRange3m: {
+    en: '3M',
+    de: '3M'
+  },
+  networkApyHistoryRange1y: {
+    en: '1Y',
+    de: '1J'
+  },
+  networkApyHistoryRangeAll: {
+    en: 'All',
+    de: 'Alle'
+  },
+  networkApyHistorySyncing: {
+    en: 'Reward history is still syncing in the background ({progress}) — some churns, including possible churn-outs, may not be listed yet.',
+    de: 'Die Reward-Historie wird noch im Hintergrund synchronisiert ({progress}) — einige Churns, auch mögliche Churn-outs, fehlen hier eventuell noch.'
+  },
+  networkApyHistoryPeriod: {
+    en: 'Period',
+    de: 'Zeitraum'
+  },
+  networkApyHistoryApy: {
+    en: 'APY',
+    de: 'APY'
+  },
+  networkApyHistoryAvg: {
+    en: 'Average APY',
+    de: 'Durchschnittliche APY'
+  },
+  networkApyHistoryDays: {
+    en: '{n}d',
+    de: '{n}T'
+  },
   atWord: {
     en: '@',
     de: 'zu',
@@ -1084,6 +1248,30 @@ const TR = {
     ru: 'Удалить кошелёк',
     ko: '지갑 제거'
   },
+  renameWallet: {
+    en: 'Rename wallet',
+    de: 'Wallet umbenennen',
+    es: 'Renombrar cartera',
+    fr: 'Renommer le portefeuille',
+    it: 'Rinomina portafoglio',
+    pt: 'Renomear carteira',
+    ja: 'ウォレット名を変更',
+    zh: '重命名钱包',
+    ru: 'Переименовать кошелёк',
+    ko: '지갑 이름 변경'
+  },
+  walletDefaultName: {
+    en: 'Wallet',
+    de: 'Wallet',
+    es: 'Cartera',
+    fr: 'Portefeuille',
+    it: 'Portafoglio',
+    pt: 'Carteira',
+    ja: 'ウォレット',
+    zh: '钱包',
+    ru: 'Кошелёк',
+    ko: '지갑'
+  },
   walletsWord: {
     en: 'Wallets',
     de: 'Wallets',
@@ -1143,18 +1331,6 @@ const TR = {
     zh: '投资组合',
     ru: 'Портфель',
     ko: '포트폴리오'
-  },
-  detailsTab: {
-    en: 'Additional details',
-    de: 'Zusätzliche Details',
-    es: 'Detalles adicionales',
-    fr: 'Détails supplémentaires',
-    it: 'Dettagli aggiuntivi',
-    pt: 'Detalhes adicionais',
-    ja: '追加情報',
-    zh: '更多详情',
-    ru: 'Дополнительные сведения',
-    ko: '추가 세부정보'
   },
   portfolioValue: {
     en: 'Portfolio Value',
@@ -1252,6 +1428,138 @@ const TR = {
     ru: 'По нодам',
     ko: '노드별'
   },
+  walletNodeOverview: {
+    en: 'Overview',
+    de: 'Übersicht'
+  },
+  exportCsv: {
+    en: 'CSV',
+    de: 'CSV'
+  },
+  apyCalculatorHint: {
+    en: 'Click to open the growth calculator',
+    de: 'Klicken für den Wachstumsrechner'
+  },
+  apyCalculatorTitle: {
+    en: 'Bond Growth Calculator',
+    de: 'Bond-Wachstumsrechner'
+  },
+  apyCalculatorStartAmount: {
+    en: 'Starting amount (RUNE)',
+    de: 'Startbetrag (RUNE)'
+  },
+  apyCalculatorPeriod: {
+    en: 'Period',
+    de: 'Zeitraum'
+  },
+  apyCalculatorScenario: {
+    en: 'Scenario',
+    de: 'Szenario'
+  },
+  apyCalculatorApy: {
+    en: 'APY',
+    de: 'APY'
+  },
+  apyCalculatorTotal: {
+    en: 'Total RUNE',
+    de: 'RUNE gesamt'
+  },
+  apyCalculatorGained: {
+    en: 'Gained',
+    de: 'Zugewinn'
+  },
+  apyCalculatorLiveApy: {
+    en: 'Live APY',
+    de: 'Live-APY'
+  },
+  apyCalculatorHistoricalAvg: {
+    en: 'Your historical avg.',
+    de: 'Dein historischer Ø'
+  },
+  apyCalculatorCustom: {
+    en: 'Custom',
+    de: 'Eigenes'
+  },
+  apyCalculatorAddScenario: {
+    en: 'Add scenario',
+    de: 'Szenario hinzufügen'
+  },
+  apyCalculatorRemoveScenario: {
+    en: 'Remove scenario',
+    de: 'Szenario entfernen'
+  },
+  deTaxHint: {
+    en: 'Tax-free status (Germany)',
+    de: 'Steuerfrei-Status (Deutschland)'
+  },
+  deTaxTitle: {
+    en: 'Tax-Free Status (Germany)',
+    de: 'Steuerfrei-Status (Deutschland)'
+  },
+  deTaxDisclaimer: {
+    en: 'Not tax advice. Assumes FIFO and a 1-year holding period per §23 EStG (private disposal transactions) — the standard assumption German tax offices generally accept without documented specific-lot identification. Your actual situation may differ; please consult a tax advisor.',
+    de: 'Keine Steuerberatung. Es wird FIFO und die einjährige Haltefrist nach §23 EStG (private Veräußerungsgeschäfte) angenommen — die Standardannahme, die deutsche Finanzämter i.d.R. akzeptieren, wenn keine dokumentierte Einzel-Zuordnung vorliegt. Dein tatsächlicher Fall kann abweichen; wende dich an einen Steuerberater.'
+  },
+  deTaxFreeNow: {
+    en: 'Tax-free now',
+    de: 'Jetzt steuerfrei'
+  },
+  deTaxStillTaxable: {
+    en: 'Still within 1-year period',
+    de: 'Noch in der Spekulationsfrist'
+  },
+  deTaxUpcoming: {
+    en: 'Becomes tax-free',
+    de: 'Wird steuerfrei'
+  },
+  deTaxEmpty: {
+    en: 'No purchase or reward history yet to calculate this.',
+    de: 'Noch keine Kauf-/Reward-Historie vorhanden, um das zu berechnen.'
+  },
+  purchaseSettingsShow: {
+    en: 'Settings',
+    de: 'Einstellungen'
+  },
+  purchaseSettingsHide: {
+    en: 'Settings',
+    de: 'Einstellungen'
+  },
+  apyCalcPeriod1m: {
+    en: '1M',
+    de: '1M'
+  },
+  apyCalcPeriod3m: {
+    en: '3M',
+    de: '3M'
+  },
+  apyCalcPeriod6m: {
+    en: '6M',
+    de: '6M'
+  },
+  apyCalcPeriod1y: {
+    en: '1Y',
+    de: '1J'
+  },
+  apyCalcPeriod2y: {
+    en: '2Y',
+    de: '2J'
+  },
+  apyCalcPeriod3y: {
+    en: '3Y',
+    de: '3J'
+  },
+  apyCalculatorCustomDate: {
+    en: 'or pick a date',
+    de: 'oder Datum wählen'
+  },
+  apyCalculatorPickDate: {
+    en: 'Select date',
+    de: 'Datum wählen'
+  },
+  apyCalculatorDays: {
+    en: 'days',
+    de: 'Tage'
+  },
   lastUpdated: {
     en: 'Last updated: ',
     de: 'Zuletzt aktualisiert: ',
@@ -1299,6 +1607,66 @@ const TR = {
     zh: 'THORChain 兑换量',
     ru: 'Объём свопов THORChain',
     ko: 'THORChain 스왑 거래량'
+  },
+  volumeHistoryHint: {
+    en: 'Click to view volume history',
+    de: 'Klicken für Volumen-Historie'
+  },
+  volumeHistoryTitle: {
+    en: 'Swap Volume History',
+    de: 'Swap-Volumen-Historie'
+  },
+  volumeHistoryDesc: {
+    en: 'THORChain network-wide swap volume over time, from Midgard.',
+    de: 'THORChain-weites Swap-Volumen über die Zeit, von Midgard.'
+  },
+  volumeHistoryAvg: {
+    en: 'Average per period',
+    de: 'Durchschnitt pro Periode'
+  },
+  volumeHistoryTotal: {
+    en: 'Total in range',
+    de: 'Summe im Zeitraum'
+  },
+  volumeHistoryEmpty: {
+    en: 'No volume data available for this range.',
+    de: 'Keine Volumen-Daten für diesen Zeitraum verfügbar.'
+  },
+  volumeHistoryRange1m: {
+    en: '1M',
+    de: '1M'
+  },
+  volumeHistoryRange3m: {
+    en: '3M',
+    de: '3M'
+  },
+  volumeHistoryRange1y: {
+    en: '1Y',
+    de: '1J'
+  },
+  volumeHistoryRange2y: {
+    en: '2Y',
+    de: '2J'
+  },
+  volumeHistoryRange3y: {
+    en: '3Y',
+    de: '3J'
+  },
+  volumeSparklineLive: {
+    en: 'Live',
+    de: 'Live'
+  },
+  volumeSparklineLiveWindow: {
+    en: 'Live · last few min',
+    de: 'Live · letzte Minuten'
+  },
+  volumeSparklineLiveCollecting: {
+    en: 'Collecting live data…',
+    de: 'Live-Daten werden gesammelt…'
+  },
+  volumeSparklineLiveFees: {
+    en: 'Swap fees generated (live)',
+    de: 'Erzeugte Swap-Gebühren (live)'
   },
   tradingVolumeLabel: {
     en: 'RUNE trading volume (exchanges & DEXs)',
@@ -1615,6 +1983,26 @@ const TR = {
   swapToggleDirection: {
     en: 'Swap direction',
     de: 'Richtung tauschen'
+  },
+  swapSendAssetsNote: {
+    en: 'Wallet-free swaps only work with native coins — tokens like USDC or USDT cannot be sent this way. You can still receive them.',
+    de: 'Swaps ohne Wallet-Verbindung funktionieren nur mit nativen Coins — Token wie USDC oder USDT können so nicht gesendet werden. Empfangen geht weiterhin.'
+  },
+  swapPausedBadge: {
+    en: 'Paused',
+    de: 'Pausiert'
+  },
+  swapChainPaused: {
+    en: 'This chain is currently paused',
+    de: 'Diese Chain ist derzeit pausiert'
+  },
+  swapChainPausedDetail: {
+    en: '{chain} is currently paused on THORChain (maintenance or an upgrade). Pick another asset or try again later.',
+    de: '{chain} ist auf THORChain derzeit pausiert (Wartung oder Update). Bitte ein anderes Asset wählen oder später erneut versuchen.'
+  },
+  swapGlobalPaused: {
+    en: 'Trading is currently paused network-wide on THORChain. Please try again later.',
+    de: 'Der Handel ist auf THORChain derzeit netzwerkweit pausiert. Bitte später erneut versuchen.'
   },
   swapBelowMinimum: {
     en: 'Amount is below the minimum of {min} for wallet-free swaps. Enter at least this amount to continue.',
@@ -2315,6 +2703,33 @@ const fmtApyPercent = (apy, lang) => apy == null ? '—' : `${(apy * 100).toLoca
   minimumFractionDigits: 1,
   maximumFractionDigits: 1
 })}%`;
+// Wie fmtRune, aber zeigt bei sehr kleinen (aber echten, von 0 verschiedenen) Beträgen mehr
+// Nachkommastellen -- nur für die Bond-APY-Historie gedacht: ein winziger, aber TATSÄCHLICHER
+// Reward (z.B. 0.0004 RUNE) würde mit nur 2 Nachkommastellen als "+0" erscheinen und wäre damit
+// vom Nutzer nicht mehr von einem echten Churn-out (kein Reward) zu unterscheiden.
+const fmtRunePrecise = (n, lang) => {
+  if (n == null) return '—';
+  const abs = Math.abs(n);
+  const digits = abs > 0 && abs < 0.01 ? 6 : abs < 1 ? 4 : 2;
+  return n.toLocaleString(localeFor(lang), {
+    maximumFractionDigits: digits
+  });
+};
+// Wie fmtApyPercent, aber mit mehr Nachkommastellen für sehr kleine (aber echte, von 0
+// verschiedene) Werte -- nur für die Bond-APY-Historie gedacht: dort muss ein winziger, aber
+// TATSÄCHLICHER Reward (z.B. 0.03% oder sogar 0.0004%) optisch von einem echten Churn-out (0
+// Reward, eigener Marker, siehe apyHistoryChurnOuts) unterscheidbar bleiben. Mit nur 1
+// Nachkommastelle würden beide fälschlich gleich als "0.0%" erscheinen.
+const fmtApyPercentPrecise = (apy, lang) => {
+  if (apy == null) return '—';
+  const pct = apy * 100;
+  const abs = Math.abs(pct);
+  const digits = abs > 0 && abs < 0.001 ? 6 : abs < 0.01 ? 5 : abs < 0.1 ? 4 : abs < 1 ? 2 : 1;
+  return `${pct.toLocaleString(localeFor(lang), {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  })}%`;
+};
 
 // ----------------------------------------------------------------------------------------------
 // Live-APY für den GERADE LAUFENDEN Churn -- 1:1 aus boonetools (src/lib/bond-tracker/apy.js)
@@ -3012,274 +3427,6 @@ const IconWallet = p => /*#__PURE__*/React.createElement("svg", {
 // Einfache, klar erkennbare Glyphen (keine exakten Marken-Logos) für die Coins, die THORChain
 // als native Gas-Assets unterstützt — im gleichen kräftigen Strich-Stil wie RUNE/BTC, damit sie
 // bei kleiner Größe neben dem RUNE-Preis nicht "verschwinden".
-const IconCoinGlyph = p => {
-  const size = p.size || 17;
-  const sw = 2.6;
-  const inner = (() => {
-    switch (p.symbol) {
-      case 'BTC':
-        return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw,
-          strokeLinecap: "round",
-          strokeLinejoin: "round"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M8 4.5v15"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M7.5 6.2h6.7a3 3 0 0 1 0 6H7.5"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M7.5 12.2h7.2a3 3 0 0 1 0 6H7.5"
-        })), /*#__PURE__*/React.createElement("g", {
-          stroke: "currentColor",
-          strokeWidth: sw * 0.85,
-          strokeLinecap: "round"
-        }, /*#__PURE__*/React.createElement("line", {
-          x1: "10.6",
-          y1: "3",
-          x2: "10.6",
-          y2: "5.4"
-        }), /*#__PURE__*/React.createElement("line", {
-          x1: "10.6",
-          y1: "18.6",
-          x2: "10.6",
-          y2: "21"
-        })));
-      case 'ETH':
-        // Diamant/Raute, angelehnt an Ethereums Form
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw,
-          strokeLinejoin: "round"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M12 2.5 L18.5 12.5 L12 16 L5.5 12.5 Z"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M5.5 13.8 L12 21.5 L18.5 13.8 L12 17.7 Z"
-        }));
-      case 'BNB':
-        // vier kleine Rauten im Kreuz, wie BNBs Logo
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "currentColor"
-        }, /*#__PURE__*/React.createElement("rect", {
-          x: "10.5",
-          y: "2",
-          width: "3",
-          height: "3",
-          transform: "rotate(45 12 3.5)"
-        }), /*#__PURE__*/React.createElement("rect", {
-          x: "10.5",
-          y: "19",
-          width: "3",
-          height: "3",
-          transform: "rotate(45 12 20.5)"
-        }), /*#__PURE__*/React.createElement("rect", {
-          x: "2",
-          y: "10.5",
-          width: "3",
-          height: "3",
-          transform: "rotate(45 3.5 12)"
-        }), /*#__PURE__*/React.createElement("rect", {
-          x: "19",
-          y: "10.5",
-          width: "3",
-          height: "3",
-          transform: "rotate(45 20.5 12)"
-        }), /*#__PURE__*/React.createElement("rect", {
-          x: "10.5",
-          y: "10.5",
-          width: "3",
-          height: "3",
-          transform: "rotate(45 12 12)"
-        }));
-      case 'XRP':
-        // gefüllte Sanduhr-/Schleifenform, angelehnt an XRPs Markenzeichen
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "currentColor"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M4 4.2c3.6 2.6 5.6 4.6 8 7.8 2.4-3.2 4.4-5.2 8-7.8l1.2 1.6c-3.4 2.5-5.3 4.4-7.5 7.2h-3.4c-2.2-2.8-4.1-4.7-7.5-7.2z"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M4 19.8c3.6-2.6 5.6-4.6 8-7.8 2.4 3.2 4.4 5.2 8 7.8l1.2-1.6c-3.4-2.5-5.3-4.4-7.5-7.2h-3.4c-2.2 2.8-4.1 4.7-7.5 7.2z"
-        }));
-      case 'SOL':
-        // drei parallele, versetzte Balken (Solana-Motiv)
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "currentColor"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M4.5 6.5h14l-2.3 2.4h-14z"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M4.5 15.1h14l-2.3 2.4h-14z"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M6.8 10.8h14l-2.3 2.4h-14z"
-        }));
-      case 'TRX':
-        // T-förmiges Segelsymbol
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw,
-          strokeLinecap: "round",
-          strokeLinejoin: "round"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M4 5h16"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M12 5v15"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M12 5 L19 9 L12 12Z",
-          fill: "currentColor",
-          stroke: "none"
-        }));
-      case 'DOGE':
-        // Ð mit Querstrich, angelehnt an Dogecoins Symbol
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw,
-          strokeLinecap: "round",
-          strokeLinejoin: "round"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M8 4.5v15"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M8 5h3.5a7 7 0 0 1 0 14H8"
-        }), /*#__PURE__*/React.createElement("line", {
-          x1: "4.5",
-          y1: "10",
-          x2: "8",
-          y2: "10"
-        }), /*#__PURE__*/React.createElement("line", {
-          x1: "4.5",
-          y1: "14",
-          x2: "8",
-          y2: "14"
-        }));
-      case 'BCH':
-        // Gefülltes ₿-ähnliches Symbol (Bitcoin-Cash-Optik, eigene Akzentfarbe)
-        return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw,
-          strokeLinecap: "round",
-          strokeLinejoin: "round"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M8 4.5v15"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M7.5 6.2h6a3 3 0 0 1 0 6h-6"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M7.5 12.2h6.5a3 3 0 0 1 0 6h-6.5"
-        })), /*#__PURE__*/React.createElement("g", {
-          stroke: "currentColor",
-          strokeWidth: sw * 0.85,
-          strokeLinecap: "round"
-        }, /*#__PURE__*/React.createElement("line", {
-          x1: "11.5",
-          y1: "2.6",
-          x2: "10.3",
-          y2: "5.2"
-        }), /*#__PURE__*/React.createElement("line", {
-          x1: "11.7",
-          y1: "18.8",
-          x2: "10.5",
-          y2: "21.4"
-        })));
-      case 'LTC':
-        // Gefülltes Ł (Litecoin-Wortmarke)
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "currentColor"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M8.3 3.8h3.4l-2.1 8h2.9l-.6 2.1h-2.9l-1 3.6h9v2.5H4.5l1.6-5.7H3.9l.6-2.1h2.2z"
-        }));
-      case 'AVAX':
-        // Berg-/Dreieck-Silhouette
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "currentColor"
-        }, /*#__PURE__*/React.createElement("path", {
-          d: "M12 3 L20 19 H4 Z"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M9.3 19 L12.7 12.5 L16 19 H13.2 L12.7 18 L12.2 19 Z",
-          fill: "#0A0A0A"
-        }));
-      case 'ATOM':
-        // Atomkern mit zwei sich kreuzenden Umlaufbahnen
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw * 0.75
-        }, /*#__PURE__*/React.createElement("circle", {
-          cx: "12",
-          cy: "12",
-          r: "2.3",
-          fill: "currentColor",
-          stroke: "none"
-        }), /*#__PURE__*/React.createElement("ellipse", {
-          cx: "12",
-          cy: "12",
-          rx: "9.5",
-          ry: "4"
-        }), /*#__PURE__*/React.createElement("ellipse", {
-          cx: "12",
-          cy: "12",
-          rx: "9.5",
-          ry: "4",
-          transform: "rotate(60 12 12)"
-        }), /*#__PURE__*/React.createElement("ellipse", {
-          cx: "12",
-          cy: "12",
-          rx: "9.5",
-          ry: "4",
-          transform: "rotate(120 12 12)"
-        }));
-      case 'TCY':
-        // Kein etabliertes Markenzeichen -- Kreis mit "T"-Monogramm, im gleichen kräftigen Strich-Stil
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw * 0.8,
-          strokeLinecap: "round"
-        }, /*#__PURE__*/React.createElement("circle", {
-          cx: "12",
-          cy: "12",
-          r: "9.2"
-        }), /*#__PURE__*/React.createElement("line", {
-          x1: "7.8",
-          y1: "8.2",
-          x2: "16.2",
-          y2: "8.2"
-        }), /*#__PURE__*/React.createElement("line", {
-          x1: "12",
-          y1: "8.2",
-          x2: "12",
-          y2: "16.4"
-        }));
-      case 'RUJI':
-        // Kein etabliertes Markenzeichen -- Kreis mit "R"-Monogramm, im gleichen kräftigen Strich-Stil
-        return /*#__PURE__*/React.createElement("g", {
-          fill: "none",
-          stroke: "currentColor",
-          strokeWidth: sw * 0.8,
-          strokeLinecap: "round",
-          strokeLinejoin: "round"
-        }, /*#__PURE__*/React.createElement("circle", {
-          cx: "12",
-          cy: "12",
-          r: "9.2"
-        }), /*#__PURE__*/React.createElement("path", {
-          d: "M9,8 L9,16 M9,8 L13.2,8 A2.4,2.4 0 0 1 13.2,12.8 L9,12.8 M11.8,12.8 L14.5,16"
-        }));
-      default:
-        return null;
-    }
-  })();
-  return /*#__PURE__*/React.createElement("svg", {
-    width: size,
-    height: size,
-    viewBox: "0 0 24 24",
-    xmlns: "http://www.w3.org/2000/svg"
-  }, inner);
-};
-
-// Breite Auswahl an Fiat-Währungen, die CoinGecko direkt unterstützt (vs_currencies) — deckt
-// die allermeisten Nutzer weltweit ab. USD/EUR laufen zusätzlich über Binance (schneller,
-// großzügigeres Rate-Limit); alle anderen über CoinGecko.
 const CURRENCY_OPTIONS = [{
   code: 'usd',
   symbol: '$',
@@ -3511,67 +3658,26 @@ const ALT_COIN_OPTIONS = [{
 // alle unterstützten Coins, modulweit gecacht, damit jede Kachel/jeder Picker-Eintrag densel-
 // ben Abruf wiederverwendet. Schlägt das Laden fehl (z.B. offline), fällt automatisch auf die
 // handgezeichnete Glyphe zurück, damit nie ein leerer/kaputter Platzhalter zu sehen ist.
-let coinImageCache = null; // { [geckoId]: imageUrl }
-let coinImageCachePromise = null;
-const loadCoinImages = () => {
-  if (coinImageCache) return Promise.resolve(coinImageCache);
-  if (coinImageCachePromise) return coinImageCachePromise;
-  const ids = ['thorchain', ...ALT_COIN_OPTIONS.map(c => c.geckoId)].join(',');
-  coinImageCachePromise = fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${ids}`).then(res => res.ok ? res.json() : []).then(list => {
-    const map = {};
-    (list || []).forEach(c => {
-      if (c && c.id && c.image) map[c.id] = c.image;
-    });
-    coinImageCache = map;
-    return map;
-  }).catch(() => {
-    coinImageCache = {};
-    return {};
-  });
-  return coinImageCachePromise;
+// Kleines Coin-Logo für die Preis-Kacheln und Chart-Überschriften -- verwendet dieselben
+// eingebetteten Original-SVGs wie das Swap-Interface. Fehlt für ein Kürzel ein Logo, wird
+// einfach nichts gezeichnet (der Ticker-Text steht ohnehin daneben).
+const CHART_TICKER_TO_CHAIN = {
+  BNB: 'BSC', ATOM: 'GAIA', TRX: 'TRON', TCY: 'THOR', RUNE: 'THOR', RUJI: 'THOR'
 };
-const CoinLogo = ({
-  code,
-  geckoId,
-  size = 15,
-  glyph
-}) => {
-  const [imgUrl, setImgUrl] = useState(null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    loadCoinImages().then(map => {
-      if (cancelled) return;
-      if (map[geckoId]) setImgUrl(map[geckoId]);else setFailed(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [geckoId]);
-  if (failed || !imgUrl) {
-    if (glyph === 'RUNE') {
-      return /*#__PURE__*/React.createElement(IconRuneR, {
-        size: size * 0.55,
-        solid: "#0A0A0A"
-      });
-    }
-    return /*#__PURE__*/React.createElement(IconCoinGlyph, {
-      symbol: glyph,
-      size: size
-    });
-  }
+
+const TickerLogo = ({ code, size = 15 }) => {
+  const key = CHART_TICKER_TO_CHAIN[String(code || '').toUpperCase()] || code;
+  const src = chainLogoFor(key);
+  if (!src) return null;
   return /*#__PURE__*/React.createElement("img", {
-    src: imgUrl,
+    src,
     width: size,
     height: size,
-    style: {
-      display: 'block',
-      borderRadius: '50%'
-    },
-    onError: () => setFailed(true),
-    alt: code
+    alt: code,
+    style: { display: 'block', borderRadius: '50%', flexShrink: 0 }
   });
 };
+
 const IconSwapArrows = p => /*#__PURE__*/React.createElement("svg", {
   width: p.size || 15,
   height: p.size || 15,
@@ -3869,6 +3975,89 @@ function PortfolioChartInner({
   const svgRef = useRef(null);
   const [width, setWidth] = useState(600);
   const [hover, setHover] = useState(null);
+  // Siehe ausführlicher Kommentar bei VolumeHistoryChart/ApyHistoryChart: React registriert
+  // Touch-Listener standardmäßig passiv (e.preventDefault() wirkungslos), und
+  // "touch-action: none" allein reicht auf iOS Safari nicht immer zuverlässig, um zu
+  // verhindern, dass beim Ziehen/Zoomen auf dem Chart gleichzeitig die Seite dahinter
+  // mitwischt. Deshalb hier zusätzlich ein echter (nicht-passiver) nativer Listener direkt
+  // auf dem SVG-Element.
+  //
+  // WICHTIG (Android-Scroll-Bug): hier stand früher ein BEDINGUNGSLOSES preventDefault() für
+  // JEDE Fingerbewegung auf dem Chart -- das blockierte auf einfachen Linien-Charts OHNE Zoom
+  // (z.B. dem großen Portfolio-Wert-Chart, der viel Bildschirmfläche einnimmt) jeden Versuch,
+  // die Seite durch ein vertikales Wischen über den Chart zu scrollen, komplett. Kerzen-Charts
+  // MIT Zoom nutzen vertikale Fingerbewegung dagegen bewusst selbst (Y-Achsen-Verschieben, siehe
+  // panDrag weiter unten reagiert auf BEIDE Achsen) -- dort bleibt das alte, immer blockierende
+  // Verhalten weiterhin richtig. Die Unterscheidung: sobald die erste spürbare Bewegung nach
+  // Touchstart eindeutig VERTIKAL ist UND der Chart keinen Zoom/Verschieben unterstützt
+  // (zoomEnabled === false), wird die Seite normal weiterscrollen gelassen, statt das
+  // eventuell schon angezeigte Fadenkreuz stur festzuhalten.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    let startX = null;
+    let startY = null;
+    let decided = null; // 'x' | 'y' | null
+    const onTouchStartLocal = e => {
+      if (e.touches.length !== 1) {
+        startX = startY = null;
+        decided = null;
+        return;
+      }
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      decided = null;
+    };
+    const preventScroll = e => {
+      if (e.touches.length >= 2) {
+        e.preventDefault(); // Pinch gehört immer dem Chart.
+        return;
+      }
+      const s = chartStateRef.current;
+      if (s.zoomEnabled) {
+        // Kerzen-Chart: unverändertes altes Verhalten -- jede Fingerbewegung gehört dem Chart.
+        e.preventDefault();
+        return;
+      }
+      if (startX == null) {
+        e.preventDefault(); // Sicherheitsnetz ohne sauber erfassten Start: wie bisher blockieren.
+        return;
+      }
+      const t = e.touches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (decided === null) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+          // Noch zu wenig Bewegung, um die Richtung zu kennen -- ein ruhiges Halten (Fadenkreuz-
+          // Vorschau) blockiert hier vorsorglich, damit die Seite dabei nicht "wackelt".
+          e.preventDefault();
+          return;
+        }
+        decided = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        if (decided === 'y') {
+          // Eindeutig ein Scroll-Versuch -- ein durch den sofortigen Touchstart-Handler
+          // (siehe onPointerDown weiter unten) eventuell schon aktiviertes Fadenkreuz wieder
+          // ausblenden, sonst bliebe es während des Scrollens irrelevant sichtbar hängen.
+          setCrosshairActive(false);
+          setHover(null);
+        }
+      }
+      if (decided === 'x') {
+        e.preventDefault();
+      }
+      // decided === 'y': bewusst KEIN preventDefault -- die Seite scrollt normal weiter.
+    };
+    el.addEventListener('touchstart', onTouchStartLocal, {
+      passive: true
+    });
+    el.addEventListener('touchmove', preventScroll, {
+      passive: false
+    });
+    return () => {
+      el.removeEventListener('touchstart', onTouchStartLocal);
+      el.removeEventListener('touchmove', preventScroll);
+    };
+  }, []);
 
   // Zeichenwerkzeuge
   const [mode, setMode] = useState('pointer'); // 'pointer' | 'horizontal' | 'trend'
@@ -4789,14 +4978,18 @@ function PortfolioChartInner({
     };
     const onTouchStart = e => {
       activeTouchCountRef.current = e.touches.length;
-      // Unterdrückt zuverlässig das native "Kopieren / Nachschlagen"-Kontextmenü bei längerem
-      // Drücken (iOS/Android) -- touchAction:'none' auf dem SVG allein reicht dafür NICHT, das
-      // steuert nur Scroll-/Zoom-Gesten, nicht das Auswahl-Kontextmenü. Bewusst UNBEDINGT ganz
-      // oben, bevor der frühere return unten greift -- sonst blieb genau der Fall ungeschützt,
-      // in dem es am ehesten auftritt: längeres Drücken beim Zeichnen einer Trendlinie
-      // (mode 'trend'/'horizontal'), wo der Handler vorher sofort zurückkehrte, ohne
-      // preventDefault() je aufzurufen.
-      e.preventDefault();
+      // WICHTIG (Android-Scroll-Bug): hier stand früher ein BEDINGUNGSLOSES e.preventDefault()
+      // ganz am Anfang, noch bevor überhaupt bekannt war, ob der Finger scrollen oder mit dem
+      // Chart interagieren will. Laut Touch-Event-Spezifikation storniert preventDefault() auf
+      // touchstart das native Scroll-Verhalten für die GESAMTE Geste von Anfang an -- jeder
+      // Scroll-Versuch, der zufällig mit einem Fingerdruck auf dem Chart begann (der Chart nimmt
+      // viel Bildschirmfläche ein), lief dadurch ins Leere. Android-Chrome hält sich strikt an
+      // diese Regel (iOS teils nachsichtiger), weshalb der gemeldete Bug dort besonders
+      // zuverlässig auftrat. Die ursprüngliche Absicht -- das native "Kopieren/Nachschlagen"-
+      // Kontextmenü bei längerem Drücken unterdrücken -- wird bereits vollständig und
+      // eigenständig über CSS abgedeckt (-webkit-touch-callout:none/user-select:none auf dem
+      // Chart-SVG, siehe .tp-chart-card svg-Regel in index.html), das JS-seitige
+      // preventDefault() war insofern redundant und zugleich die Ursache des Scroll-Bugs.
       const s = chartStateRef.current;
       if (s.mode !== 'pointer' || !s.zoomEnabled) return;
       if (e.touches.length === 2) {
@@ -5217,7 +5410,7 @@ function PortfolioChartInner({
     onContextMenu: e => e.preventDefault()
   }, isCandles && /*#__PURE__*/React.createElement("div", {
     style: {
-      background: '#FF3B30',
+      background: '#F5A623',
       color: '#fff',
       fontFamily: 'Consolas, monospace',
       fontSize: 13,
@@ -5350,9 +5543,9 @@ function PortfolioChartInner({
       gap: 5,
       width: selectedId ? 'auto' : 30,
       padding: selectedId ? '0 10px 0 8px' : 0,
-      background: selectedId ? 'rgba(240,120,120,0.14)' : toolBtnStyle(false).background,
-      border: selectedId ? '1px solid rgba(240,120,120,0.4)' : toolBtnStyle(false).border,
-      color: selectedId ? '#F0A0A0' : toolBtnStyle(false).color,
+      background: selectedId ? 'rgba(245,195,107,0.14)' : toolBtnStyle(false).background,
+      border: selectedId ? '1px solid rgba(245,195,107,0.4)' : toolBtnStyle(false).border,
+      color: selectedId ? '#F5C36B' : toolBtnStyle(false).color,
       opacity: selectedId ? 1 : 0.4,
       cursor: selectedId ? 'pointer' : 'default'
     }
@@ -5984,13 +6177,13 @@ function PortfolioChartInner({
     y: 0,
     width: innerW,
     height: Math.max(0, rsiYScale(70)),
-    fill: "rgba(240,160,160,0.07)"
+    fill: "rgba(245,195,107,0.07)"
   }), /*#__PURE__*/React.createElement("rect", {
     x: padding.left,
     y: rsiYScale(30),
     width: innerW,
     height: Math.max(0, RSI_HEIGHT - rsiYScale(30)),
-    fill: "rgba(143,224,172,0.07)"
+    fill: "rgba(111,227,229,0.07)"
   }), /*#__PURE__*/React.createElement("line", {
     x1: padding.left,
     x2: padding.left + innerW,
@@ -6336,41 +6529,196 @@ function PurchaseForm({
   }, t('purchaseCancel', lang))));
 }
 
+// Baut aus einer Punktreihe eine WEICHE SVG-Pfadkurve statt harter Geraden zwischen den
+// Punkten. Wird u.a. vom Live-Volumen-Sparkline gebraucht: mit wenigen, unregelmäßig
+// eintreffenden Messpunkten (alle paar Sekunden ein Herzschlag-Tick, dazwischen Sprünge bei
+// echten Swaps) sah eine reine Geraden-Verbindung ("L"-Befehle) an jedem Punkt wie ein scharfer
+// Knick aus -- "eckig und abgehackt" statt eines fließenden Live-Graphen.
+//
+// Monotone kubische Hermite-Spline (Fritsch-Carlson-Verfahren) statt der vorherigen
+// Mittelpunkt-Glättung: die lief bewusst NICHT exakt durch jeden Punkt, sondern knapp daran
+// vorbei, um nicht zu überschwingen -- das erzeugte zwei sichtbare Folgefehler: (1) der
+// Hover-/Crosshair-Punkt (der die ECHTEN Koordinaten nutzt) saß dadurch neben statt auf der
+// sichtbaren Linie, "streute" beim Drüberstreichen mit der Maus; (2) bei wenigen Datenpunkten
+// (7D/30D-Tages-Chart) wirkten Spitzen dadurch systematisch gekappt/"gepresst", weil die Kurve
+// dort planmäßig UNTER dem tatsächlichen Höchstwert vorbeilief. Monotone Interpolation löst
+// beides: sie läuft GARANTIERT exakt durch jeden Messpunkt (kein Versatz mehr möglich) UND
+// überschwingt zwischen den Punkten trotzdem nicht (im Gegensatz zu einem einfachen
+// Catmull-Rom-Spline) -- genau die Kombination, die ein Finanz-/Live-Chart braucht.
+function smoothLinePath(points) {
+  const n = points.length;
+  if (!n) return '';
+  if (n === 1) return `M ${points[0][0]} ${points[0][1]}`;
+  if (n === 2) {
+    return `M ${points[0][0]} ${points[0][1]} L ${points[1][0]} ${points[1][1]}`;
+  }
+  // Sekanten-Steigung jedes Segments.
+  const dx = [];
+  const dy = [];
+  const slope = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = points[i + 1][0] - points[i][0];
+    dy[i] = points[i + 1][1] - points[i][1];
+    slope[i] = dx[i] !== 0 ? dy[i] / dx[i] : 0;
+  }
+  // Tangente an jedem Punkt: an den Rändern die Randsteigung, innen der Mittelwert der
+  // beiden angrenzenden Sekanten-Steigungen (vor der Monotonie-Korrektur unten).
+  const m = new Array(n);
+  m[0] = slope[0];
+  m[n - 1] = slope[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    m[i] = (slope[i - 1] + slope[i]) / 2;
+  }
+  // Fritsch-Carlson-Korrektur: verhindert Überschwingen, indem die Tangenten an jedem Punkt so
+  // begrenzt werden, dass die Kurve nie über den lokalen Trend der beiden angrenzenden Segmente
+  // hinausschießt (u.a. auf 0 gesetzt an lokalen Extrempunkten, wo sich das Vorzeichen der
+  // Steigung ändert -- genau dort würde sonst am ehesten überschwungen).
+  for (let i = 0; i < n - 1; i++) {
+    if (slope[i] === 0) {
+      m[i] = 0;
+      m[i + 1] = 0;
+      continue;
+    }
+    const a = m[i] / slope[i];
+    const b = m[i + 1] / slope[i];
+    if (a < 0) m[i] = 0;
+    if (b < 0) m[i + 1] = 0;
+    const s = a * a + b * b;
+    if (s > 9) {
+      const tau = 3 / Math.sqrt(s);
+      m[i] = tau * a * slope[i];
+      m[i + 1] = tau * b * slope[i];
+    }
+  }
+  // Tangenten in kubische Bezier-Kontrollpunkte je Segment umrechnen (Standardumrechnung
+  // Hermite -> Bezier: Kontrollpunkt bei einem Drittel der Segmentbreite, entlang der
+  // jeweiligen Tangente).
+  let d = `M ${points[0][0]} ${points[0][1]}`;
+  for (let i = 0; i < n - 1; i++) {
+    const x0 = points[i][0];
+    const y0 = points[i][1];
+    const x1 = points[i + 1][0];
+    const y1 = points[i + 1][1];
+    const cp1x = x0 + dx[i] / 3;
+    const cp1y = y0 + m[i] * dx[i] / 3;
+    const cp2x = x1 - dx[i] / 3;
+    const cp2y = y1 - m[i + 1] * dx[i] / 3;
+    d += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${x1} ${y1}`;
+  }
+  return d;
+}
+
 // Kleiner Sparkline-Graph für das Tages-Handelsvolumen der letzten 30 Tage.
 // Zeigt zusätzlich die letzte Woche (7 Tage) farblich hervorgehoben.
 function VolumeSparkline({
   data,
+  liveData,
+  liveFeeRune,
+  onOpenHistory,
   activePrice,
   lang,
-  currency
+  currency,
+  hideValue
 }) {
   const width = 240;
-  const height = 56;
+  // Nochmal größer (war zuletzt 72px, davor 56px) -- die Live/7D/30D-Zeile ist jetzt absolut
+  // oben rechts an der Karte positioniert und beansprucht keinen Fluss-Platz mehr, der frei
+  // gewordene Raum kommt jetzt komplett dem Chart zugute. Wirkte vorher bei stärkeren
+  // Ausschlägen gequetscht.
+  const height = 96;
   const padding = {
     top: 4,
     right: 2,
     bottom: 2,
     left: 2
   };
-  const [volRange, setVolRange] = useState(7); // 7 oder 30 Tage — nur eine Periode wird angezeigt
+  // Default jetzt 'live' statt fest 7 Tage -- die feinkörnige Live-Ansicht ist der ganze Punkt
+  // dieser Erweiterung (siehe liveVolumeSeries/Heartbeat-Effekt weiter unten in
+  // ThorchainPortfolio), 7D/30D bleiben als Umschalt-Optionen für den groben historischen
+  // Überblick erhalten.
+  const [volRange, setVolRange] = useState('live'); // 'live', 7 oder 30 Tage
   const containerRef = useRef(null);
   // Genau der gleiche Antippen-Mechanismus wie beim Portfolio-Chart: ein einzelner Tap zeigt
   // sofort (ohne Verzögerung) den Wert des am nächsten liegenden Balkens + dessen Datum,
   // folgt beim Ziehen der Fingerbewegung und verschwindet wieder beim Loslassen.
   const [hoverIdx, setHoverIdx] = useState(null);
-  if (!data || data.length < 2) return null;
-  const shown = data.slice(-volRange);
-  const values = shown.map(d => d.volumeRune);
-  const maxV = Math.max(...values, 1);
-  const minV = 0;
+  const clearHover = () => setHoverIdx(null);
+  // WICHTIG: dieser Effekt muss VOR dem early return unten stehen (auch wenn er erst mit
+  // hoverPoint/den Chart-Daten weiter unten inhaltlich zusammenhängt). React verlangt, dass in
+  // JEDEM Render exakt dieselbe Zahl/Reihenfolge an Hooks aufgerufen wird -- stand dieser
+  // Effekt hinter dem early return (der greift, solange z.B. im Live-Modus noch keine 2
+  // Messpunkte vorliegen), wurde er in manchen Renders übersprungen und in anderen nicht. Genau
+  // das löste den "Minified React error #310" (Rendered fewer hooks than expected) aus, sobald
+  // die Live-Ansicht kurz nach dem Laden zwischen "noch keine Daten" und "genug Daten" wechselte.
+  //
+  // Sicherheitsnetz: falls das Loslassen den Finger von der Fläche wegträgt (z.B. leicht
+  // daneben endet), trotzdem zuverlässig aufräumen -- genau wie beim Portfolio-Chart.
+  useEffect(() => {
+    if (hoverIdx == null) return;
+    window.addEventListener('pointerup', clearHover);
+    window.addEventListener('touchend', clearHover);
+    window.addEventListener('touchcancel', clearHover);
+    return () => {
+      window.removeEventListener('pointerup', clearHover);
+      window.removeEventListener('touchend', clearHover);
+      window.removeEventListener('touchcancel', clearHover);
+    };
+  }, [hoverIdx]);
+  const isLive = volRange === 'live';
+  // Im Live-Modus kommt die Quelle aus liveVolumeSeries (Zeitstempel-Momentaufnahmen alle paar
+  // Sekunden), sonst aus den Tages-Buckets wie bisher.
+  const shownSource = isLive ? liveData : data;
+  if (!shownSource || shownSource.length < 2) {
+    // Live-Modus: statt komplett leerer Fläche eine kurze "wird gesammelt"-Meldung, während
+    // die ersten paar Messpunkte hereinkommen (die ersten zwei stehen dank der Seed-Logik im
+    // Elternteil aber praktisch sofort bereit, das greift nur für einen sehr kurzen Moment).
+    // Für den Tages-Modus wie bisher: einfach nichts zeigen, solange die Historie noch lädt.
+    return isLive ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 14,
+        color: '#5C7274',
+        fontSize: 11,
+        textAlign: 'center',
+        padding: '18px 0'
+      }
+    }, t('volumeSparklineLiveCollecting', lang)) : null;
+  }
+  const shown = isLive ? shownSource : shownSource.slice(-volRange);
+  // WICHTIG (Live-Modus): geplottet wird NICHT der rohe, riesige rollierende 24h-Wert selbst,
+  // sondern die Differenz JEDES Punkts zum ERSTEN Punkt des sichtbaren Fensters. Der rohe Wert
+  // (z.B. $16,6 Mio.) bewegt sich innerhalb weniger Minuten nur um einen verschwindend kleinen
+  // Bruchteil seiner selbst -- selbst mit der 0,1%-Untergrenze von vorher blieb davon auf dem
+  // Chart praktisch nichts sichtbar, weil die tatsächliche Schwankung meist deutlich UNTER
+  // dieser künstlichen Marge lag. Die Differenz zum Fensterstart dagegen beginnt bei 0 und
+  // wächst mit jedem neuen Swap sichtbar an -- genau das, was man bei "live" auch erwartet: wie
+  // viel Volumen ist SEIT GERADE EBEN neu reingekommen. Der Tages-Modus bleibt unverändert beim
+  // absoluten Tageswert (dort sind die Unterschiede zwischen den Tagen groß genug).
+  const values = isLive ? shown.map(d => d.volumeRune - shown[0].volumeRune) : shown.map(d => d.volumeRune);
+  const maxV = isLive ? Math.max(...values, 0.0001) : Math.max(...values, 1);
+  const minV = isLive ? Math.min(0, ...values) : 0;
   const innerW = width - padding.left - padding.right;
   const innerH = height - padding.top - padding.bottom;
-  const xScale = i => padding.left + (shown.length > 1 ? i / (shown.length - 1) * innerW : innerW / 2);
+  // Zeit-proportionale statt gleichmäßig-index-basierte Skala: im Live-Modus liegen die
+  // Messpunkte unregelmäßig auseinander (Herzschlag alle 5s, plus Sofort-Pushs bei echten
+  // Swaps dazwischen) -- eine reine Index-Skala würde diese unterschiedlichen Abstände
+  // ignorieren und den zeitlichen Verlauf verzerrt darstellen. Für den Tages-Modus macht das
+  // praktisch keinen Unterschied (die Tage liegen ohnehin gleichmäßig auseinander).
+  const tMin = shown[0].t;
+  const tMax = shown[shown.length - 1].t;
+  const xScale = i => padding.left + (tMax > tMin ? (shown[i].t - tMin) / (tMax - tMin) * innerW : innerW / 2);
   const yScale = v => padding.top + innerH - (v - minV) / (maxV - minV || 1) * innerH;
-  const linePath = shown.map((d, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i)} ${yScale(d.volumeRune)}`).join(' ');
+  // Weiche Kurve statt harter "L"-Geradensegmente (siehe smoothLinePath weiter oben) -- läuft
+  // weiterhin exakt durch jeden Messpunkt, rundet nur die Übergänge dazwischen ab.
+  const linePath = smoothLinePath(values.map((v, i) => [xScale(i), yScale(v)]));
   const areaPath = `${linePath} L ${xScale(shown.length - 1)} ${height - padding.bottom} L ${xScale(0)} ${height - padding.bottom} Z`;
   const totalRune = shown.reduce((s, d) => s + d.volumeRune, 0);
   const totalUsd = activePrice != null ? totalRune * activePrice : null;
+  // Live-spezifische Zusatzgröße: wie stark ist die rollierende 24h-Zahl SEIT BEGINN des
+  // sichtbaren Live-Fensters gewachsen -- dieselbe Größe, die jetzt auch die Chart-Linie
+  // zeichnet (values[values.length-1]), hier nur nochmal explizit für die Zusammenfassungszeile
+  // unter dem Chart benannt.
+  const liveDeltaRune = isLive ? Math.max(0, values[values.length - 1]) : 0;
+  const liveDeltaUsd = activePrice != null ? liveDeltaRune * activePrice : null;
   const getLocalX = e => {
     const rect = containerRef.current.getBoundingClientRect();
     const clientX = e.touches && e.touches.length ? e.touches[0].clientX : e.changedTouches && e.changedTouches.length ? e.changedTouches[0].clientX : e.clientX;
@@ -6394,34 +6742,99 @@ function VolumeSparkline({
   const handleMove = e => {
     if (hoverIdx != null || e.pointerType !== 'touch') updateHoverAt(getLocalX(e));
   };
-  const clearHover = () => setHoverIdx(null);
-  // Sicherheitsnetz: falls das Loslassen den Finger von der Fläche wegträgt (z.B. leicht
-  // daneben endet), trotzdem zuverlässig aufräumen -- genau wie beim Portfolio-Chart.
-  useEffect(() => {
-    if (hoverIdx == null) return;
-    window.addEventListener('pointerup', clearHover);
-    window.addEventListener('touchend', clearHover);
-    window.addEventListener('touchcancel', clearHover);
-    return () => {
-      window.removeEventListener('pointerup', clearHover);
-      window.removeEventListener('touchend', clearHover);
-      window.removeEventListener('touchcancel', clearHover);
-    };
-  }, [hoverIdx]);
   const hoverPoint = hoverIdx != null ? shown[hoverIdx] : null;
-  const hoverUsd = hoverPoint != null && activePrice != null ? hoverPoint.volumeRune * activePrice : null;
+  // Im Live-Modus muss der beim Hover angezeigte/verwendete Wert derselbe sein, den auch die
+  // Linie zeichnet (die Differenz zum Fensterstart, siehe values oben) -- sonst würde der
+  // Crosshair-Punkt nicht auf der sichtbaren Linie sitzen, sondern irgendwo daneben, weil
+  // hoverPoint.volumeRune der ROHE (riesige) Wert wäre, die Linie aber nach Delta skaliert ist.
+  const hoverValue = hoverIdx != null ? values[hoverIdx] : null;
+  const hoverUsd = hoverPoint != null && activePrice != null ? (isLive ? hoverValue : hoverPoint.volumeRune) * activePrice : null;
   return /*#__PURE__*/React.createElement("div", {
     style: {
-      marginTop: 14
+      marginTop: 4
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
+      // Absolut statt im normalen Fluss -- rastet oben rechts an der KARTE ein (siehe
+      // position:'relative' auf dem Karten-Wrapper weiter oben in ThorchainPortfolio).
+      // top/right EXAKT auf das Innenpolster der Karte (18px 20px) abgestimmt, nicht auf 0 --
+      // sonst klebt die Zeile in der nackten Ecke statt sauber mit dem restlichen
+      // Karteninhalt (Titel, Zahl, Untertitel) auf einer gemeinsamen Flucht zu stehen, was
+      // "gedrängt" statt symmetrisch wirkte. Verlaufs-Button UND Live/7D/30D jetzt in EINER
+      // gemeinsamen Zeile (vorher unabhängig voneinander positioniert, dadurch schwer
+      // aufeinander abzustimmen) -- gruppiert alle "Chart-Ansicht"-Kontrollen sauber
+      // zusammen, statt sie über die Karte zu verteilen.
+      position: 'absolute',
+      top: 18,
+      right: 20,
       display: 'flex',
-      justifyContent: 'flex-end',
-      gap: 6,
-      marginBottom: 8
+      alignItems: 'center',
+      gap: 6
     }
-  }, [7, 30].map(r => /*#__PURE__*/React.createElement("button", {
+  }, onOpenHistory && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: onOpenHistory,
+    title: t('volumeHistoryHint', lang),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'rgba(0,222,225,0.1)',
+      border: '1px solid rgba(0,222,225,0.28)',
+      borderRadius: 999,
+      width: 24,
+      height: 24,
+      padding: 0,
+      flexShrink: 0,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 13,
+    height: 13,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "#6FE3E5",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    style: {
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M3 3v5h5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3.05 13A9 9 0 1 0 6 5.3L3 8"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 7v5l4 2"
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setVolRange('live');
+      setHoverIdx(null);
+    },
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      background: isLive ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: isLive ? '#00DEE1' : '#7C9698',
+      border: `1px solid ${isLive ? 'rgba(0,222,225,0.5)' : '#1A3436'}`,
+      borderRadius: 6,
+      padding: '2px 8px',
+      fontSize: 10,
+      fontWeight: 700,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 5,
+      height: 5,
+      borderRadius: '50%',
+      background: '#00DEE1',
+      display: 'inline-block',
+      animation: isLive ? 'pulse 1.6s ease-in-out infinite' : 'none'
+    }
+  }), t('volumeSparklineLive', lang)), [7, 30].map(r => /*#__PURE__*/React.createElement("button", {
     key: r,
     onClick: () => {
       setVolRange(r);
@@ -6442,6 +6855,10 @@ function VolumeSparkline({
     ref: containerRef,
     style: {
       position: 'relative',
+      // Kleiner Abstand nach oben -- die Buttons-Zeile davor ist jetzt absolut positioniert
+      // und beansprucht keinen Fluss-Platz mehr, ohne diesen Abstand säße der Chart zu dicht
+      // am Karten-Header.
+      marginTop: 6,
       userSelect: 'none',
       WebkitUserSelect: 'none',
       WebkitTouchCallout: 'none'
@@ -6481,14 +6898,24 @@ function VolumeSparkline({
   }))), /*#__PURE__*/React.createElement("path", {
     d: areaPath,
     fill: "url(#volSparkFill)",
-    stroke: "none"
+    stroke: "none",
+    // Sanfter Übergang statt hartem Sprung, wenn sich (z.B. durch den Live-Volumen-Bump aus
+    // echten Swaps, siehe patchLastVolumeWithLive) nur der letzte Punkt ändert -- die Zahl der
+    // Stützpunkte bleibt dabei gleich, nur deren y-Position, wodurch der Browser den d-Pfad
+    // sauber dazwischen interpolieren kann.
+    style: {
+      transition: 'd 0.5s ease-out'
+    }
   }), /*#__PURE__*/React.createElement("path", {
     d: linePath,
     fill: "none",
     stroke: "#00DEE1",
     strokeWidth: "1.5",
     strokeLinejoin: "round",
-    strokeLinecap: "round"
+    strokeLinecap: "round",
+    style: {
+      transition: 'd 0.5s ease-out'
+    }
   }), hoverPoint && /*#__PURE__*/React.createElement("g", {
     pointerEvents: "none"
   }, /*#__PURE__*/React.createElement("line", {
@@ -6501,13 +6928,13 @@ function VolumeSparkline({
   }), /*#__PURE__*/React.createElement("line", {
     x1: padding.left,
     x2: width - padding.right,
-    y1: yScale(hoverPoint.volumeRune),
-    y2: yScale(hoverPoint.volumeRune),
+    y1: yScale(hoverValue),
+    y2: yScale(hoverValue),
     stroke: "#2A5254",
     strokeWidth: "1"
   }), /*#__PURE__*/React.createElement("circle", {
     cx: xScale(hoverIdx),
-    cy: yScale(hoverPoint.volumeRune),
+    cy: yScale(hoverValue),
     r: "3.5",
     fill: "#00DEE1",
     stroke: "#000000",
@@ -6516,7 +6943,7 @@ function VolumeSparkline({
     style: {
       position: 'absolute',
       left: 2,
-      top: Math.min(height - 16, Math.max(0, yScale(hoverPoint.volumeRune) - 8)),
+      top: Math.min(height - 16, Math.max(0, yScale(hoverValue) - 8)),
       background: '#00DEE1',
       color: '#0A0A0A',
       fontSize: 9,
@@ -6527,7 +6954,7 @@ function VolumeSparkline({
       whiteSpace: 'nowrap',
       pointerEvents: 'none'
     }
-  }, hoverUsd != null ? fmtUSDCompact(hoverUsd, lang, currency) : `${hoverPoint.volumeRune.toFixed(0)} RUNE`), /*#__PURE__*/React.createElement("div", {
+  }, hideValue ? '••••' : hoverUsd != null ? fmtUSDCompact(hoverUsd, lang, currency) : `${(isLive ? hoverValue : hoverPoint.volumeRune).toFixed(0)} RUNE`), /*#__PURE__*/React.createElement("div", {
     style: {
       position: 'absolute',
       left: Math.min(width - 60, Math.max(0, xScale(hoverIdx) - 30)),
@@ -6544,7 +6971,12 @@ function VolumeSparkline({
     }
   }, fmtDate(hoverPoint.t, lang)))), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginTop: hoverPoint ? 18 : 8
+      // WICHTIG: konstant, NICHT abhängig vom Hover-Status -- sonst ändert sich beim Hovern die
+      // Gesamthöhe dieser Karte, was benachbarte Karten im Layout mitverschiebt/neu anordnet.
+      // Der Datums-Tooltip direkt unter dem Chart ist absolut positioniert und braucht etwas
+      // Platz, bevor die Statistik-Zeile darunter beginnt -- dieser Platz wird deshalb immer
+      // (nicht nur beim Hovern) freigehalten.
+      marginTop: 18
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6554,14 +6986,938 @@ function VolumeSparkline({
       letterSpacing: '0.03em',
       marginBottom: 2
     }
-  }, volRange === 7 ? t('last7d', lang) : t('last30d', lang)), /*#__PURE__*/React.createElement("div", {
+  }, isLive ? t('volumeSparklineLiveFees', lang) : volRange === 7 ? t('last7d', lang) : t('last30d', lang)), /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#F5F5F5',
+      color: isLive ? '#F5C36B' : '#F5F5F5',
       fontSize: 13,
       fontWeight: 600,
       fontFamily: "'Space Grotesk', sans-serif"
     }
-  }, totalUsd != null ? fmtUSDRounded(totalUsd, lang, currency) : '—')));
+    // Zeigt im Live-Modus NUR NOCH die tatsächliche Swap-Gebühr (RUNE) -- die zuvor zusätzlich
+    // gezeigte Swap-VOLUMEN-Zeile (RUNE-Menge + USD-Gegenwert) wurde entfernt, um Verwechslung
+    // zwischen "wie viel wurde gehandelt" und "wie viel Gebühr ist dabei angefallen" zu
+    // vermeiden -- hier zählt nur Letzteres.
+  }, hideValue ? '••••' : isLive ? `+${fmtRune(liveFeeRune || 0, lang)} RUNE` : totalUsd != null ? fmtUSDRounded(totalUsd, lang, currency) : '—')));
+}
+
+// Größerer Balken-Chart für die Swap-Volumen-Historie im Modal (1M/3M/1J/2J/3J) -- ähnliches
+// Antipp-/Hover-Verhalten wie VolumeSparkline oben, nur größer und mit einer gestrichelten
+// Durchschnitts-Referenzlinie, damit Ausreißer sofort auffallen.
+function VolumeHistoryChart({
+  data,
+  activePrice,
+  lang,
+  currency,
+  hideValue
+}) {
+  const width = 640;
+  const height = 300;
+  const padding = {
+    top: 20,
+    right: 8,
+    bottom: 26,
+    left: 8
+  };
+  const containerRef = useRef(null);
+  const [hoverIdx, setHoverIdx] = useState(null);
+  if (!data || data.length < 2) return null;
+  const values = data.map(d => d.volumeRune);
+  const maxV = Math.max(...values, 1);
+  const minV = 0;
+  const innerW = width - padding.left - padding.right;
+  const innerH = height - padding.top - padding.bottom;
+  const barGap = 2;
+  const barW = Math.max(1, innerW / data.length - barGap);
+  const xScale = i => padding.left + i / data.length * innerW;
+  const yScale = v => padding.top + innerH - (v - minV) / (maxV - minV || 1) * innerH;
+  const avg = values.reduce((s, v) => s + v, 0) / values.length;
+  const avgY = yScale(avg);
+  const getLocalX = e => {
+    const rect = containerRef.current.getBoundingClientRect();
+    const clientX = e.touches && e.touches.length ? e.touches[0].clientX : e.changedTouches && e.changedTouches.length ? e.changedTouches[0].clientX : e.clientX;
+    return (clientX - rect.left) / rect.width * width;
+  };
+  const updateHoverAt = localX => {
+    let idx = 0,
+      minDiff = Infinity;
+    for (let i = 0; i < data.length; i++) {
+      const barCenter = xScale(i) + barW / 2;
+      const diff = Math.abs(barCenter - localX);
+      if (diff < minDiff) {
+        minDiff = diff;
+        idx = i;
+      }
+    }
+    // Bail-out, wenn sich der Balken-Index nicht geändert hat -- verhindert unnötige
+    // Re-Renders (jeder Re-Render zeichnet alle Balken + Labels neu), während sich die Maus
+    // innerhalb desselben Balkens bewegt.
+    setHoverIdx(prev => prev === idx ? prev : idx);
+  };
+  // Auf höchstens ein Update pro Animationsframe drosseln -- pointermove/mousemove kann deutlich
+  // öfter als 60x/Sekunde feuern; ohne Drosselung löst jede einzelne dieser Positionen ein
+  // eigenes Re-Rendering aller Balken aus, was beim schnellen Wischen über den Chart spürbar
+  // ruckelt.
+  const rafIdRef = useRef(null);
+  const scheduleHoverUpdate = localX => {
+    if (rafIdRef.current != null) return;
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      updateHoverAt(localX);
+    });
+  };
+  const handleDown = e => scheduleHoverUpdate(getLocalX(e));
+  const handleMove = e => {
+    if (hoverIdx != null || e.pointerType !== 'touch') scheduleHoverUpdate(getLocalX(e));
+  };
+  const clearHover = () => {
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    setHoverIdx(null);
+  };
+  useEffect(() => {
+    if (hoverIdx == null) return;
+    window.addEventListener('pointerup', clearHover);
+    window.addEventListener('touchend', clearHover);
+    window.addEventListener('touchcancel', clearHover);
+    return () => {
+      window.removeEventListener('pointerup', clearHover);
+      window.removeEventListener('touchend', clearHover);
+      window.removeEventListener('touchcancel', clearHover);
+    };
+  }, [hoverIdx]);
+  // WICHTIG: React registriert onTouchMove standardmäßig als "passiven" Listener -- bei einem
+  // passiven Listener hat e.preventDefault() KEINE Wirkung, selbst wenn man es aufruft. Nur
+  // "touch-action: none" per CSS reicht auf iOS Safari in der Praxis nicht immer zuverlässig
+  // aus, um zu verhindern, dass gleichzeitig die Seite dahinter mitwischt. Deshalb hier
+  // zusätzlich ein ECHTER (nicht-passiver) natives Event-Listener direkt auf dem SVG-Element,
+  // der das Scrollen der Seite aktiv unterbindet, während auf dem Chart gezogen wird.
+  //
+  // WICHTIG (Android-Scroll-Bug): hier stand früher ein BEDINGUNGSLOSES preventDefault() für
+  // JEDE Fingerbewegung -- dieser Chart unterstützt gar kein Verschieben/Zoomen (reine
+  // Werte-Vorschau beim Berühren eines Balkens), es gibt also keinen Grund, vertikale
+  // Wischgesten zu blockieren. Sobald die erste spürbare Bewegung nach Touchstart eindeutig
+  // VERTIKAL ist, wird die Seite normal weiterscrollen gelassen (und die Balken-Vorschau
+  // ausgeblendet, statt sie während des Scrollens irrelevant hängen zu lassen).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let startX = null;
+    let startY = null;
+    let decided = null; // 'x' | 'y' | null
+    const onTouchStartLocal = e => {
+      if (e.touches.length !== 1) {
+        startX = startY = null;
+        decided = null;
+        return;
+      }
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      decided = null;
+    };
+    const preventScroll = e => {
+      if (e.touches.length !== 1 || startX == null) {
+        e.preventDefault();
+        return;
+      }
+      const t = e.touches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (decided === null) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+          e.preventDefault();
+          return;
+        }
+        decided = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        if (decided === 'y') clearHover();
+      }
+      if (decided === 'x') e.preventDefault();
+    };
+    el.addEventListener('touchstart', onTouchStartLocal, {
+      passive: true
+    });
+    el.addEventListener('touchmove', preventScroll, {
+      passive: false
+    });
+    return () => {
+      el.removeEventListener('touchstart', onTouchStartLocal);
+      el.removeEventListener('touchmove', preventScroll);
+    };
+  }, []);
+  const hoverPoint = hoverIdx != null ? data[hoverIdx] : null;
+  const hoverUsd = hoverPoint != null && activePrice != null ? hoverPoint.volumeRune * activePrice : null;
+  // Nur eine Teilmenge der X-Achsen-Labels zeigen, sonst überlappen sie sich bei langen
+  // Zeiträumen (z.B. 3 Jahre = 36 Monatsbalken) hoffnungslos.
+  const labelEvery = Math.max(1, Math.ceil(data.length / 6));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    ref: containerRef,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      width: '100%',
+      height: 'auto',
+      display: 'block',
+      touchAction: 'none'
+    },
+    onPointerDown: handleDown,
+    onPointerMove: handleMove,
+    onPointerUp: clearHover,
+    onPointerLeave: clearHover,
+    onTouchStart: handleDown,
+    onTouchMove: handleMove
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: padding.left,
+    x2: width - padding.right,
+    y1: avgY,
+    y2: avgY,
+    stroke: "#3A5052",
+    strokeWidth: 1,
+    strokeDasharray: "4 3"
+  }), data.map((d, i) => /*#__PURE__*/React.createElement("rect", {
+    key: i,
+    x: xScale(i),
+    y: yScale(d.volumeRune),
+    width: barW,
+    height: Math.max(0.5, height - padding.bottom - yScale(d.volumeRune)),
+    fill: hoverIdx === i ? '#00DEE1' : 'rgba(0,222,225,0.35)',
+    rx: barW > 3 ? 1.5 : 0
+  })), data.map((d, i) => i % labelEvery !== 0 ? null : /*#__PURE__*/React.createElement("text", {
+    key: `lbl-${i}`,
+    x: xScale(i) + barW / 2,
+    y: height - 6,
+    fontSize: 9,
+    fill: "#5C7274",
+    textAnchor: "middle"
+  }, fmtDate(d.t, lang))), hoverPoint && /*#__PURE__*/React.createElement("line", {
+    x1: xScale(hoverIdx) + barW / 2,
+    x2: xScale(hoverIdx) + barW / 2,
+    y1: padding.top,
+    y2: height - padding.bottom,
+    stroke: "rgba(0,222,225,0.4)",
+    strokeWidth: 1
+  })), hoverPoint && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 4,
+      left: 0,
+      right: 0,
+      display: 'flex',
+      justifyContent: 'center',
+      pointerEvents: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0D2224',
+      border: '1px solid #1E3A3C',
+      borderRadius: 7,
+      padding: '5px 10px',
+      textAlign: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#5C7274',
+      fontSize: 9.5
+    }
+  }, fmtDate(hoverPoint.t, lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 12.5,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, hideValue ? '••••' : hoverUsd != null ? fmtUSDRounded(hoverUsd, lang, currency) : `${fmtRune(hoverPoint.volumeRune, lang)} RUNE`))));
+}
+
+// Größerer Kurven-Chart (Linie + Flächenfüllung, wie die kleine Sparkline) für die
+// Bond-APY-Historie im Modal -- selbes Antipp-/Hover-Verhalten wie VolumeHistoryChart (inkl.
+// rAF-Drosselung gegen Ruckeln), nur als Linienverlauf statt Balken, mit gestrichelter
+// Durchschnitts-Referenzlinie.
+// Eigener, ins App-Design passender Datums-Dropdown -- ersetzt das native <input type="date">,
+// dessen Browser-Standarddarstellung (graue Kästchen/Leisten für Tag/Monat/Jahr) nicht zum
+// dunklen App-Design passt und sich per CSS kaum konsistent umstylen lässt.
+function SimpleDatePicker({
+  value,
+  onChange,
+  min,
+  lang,
+  placeholder
+}) {
+  const [open, setOpen] = useState(false);
+  const initial = value ? new Date(`${value}T00:00:00`) : new Date();
+  const [viewYear, setViewYear] = useState(initial.getFullYear());
+  const [viewMonth, setViewMonth] = useState(initial.getMonth());
+  const containerRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = e => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const minDate = min ? new Date(`${min}T00:00:00`) : null;
+  const toIso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const firstWeekday = (new Date(viewYear, viewMonth, 1).getDay() + 6) % 7; // Montag = 0
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  const todayIso = toIso(new Date());
+  const monthLabel = new Date(viewYear, viewMonth, 1).toLocaleDateString(localeFor(lang), {
+    month: 'long',
+    year: 'numeric'
+  });
+  const weekdayLabels = (() => {
+    const base = new Date(2024, 0, 1); // ein Montag
+    return Array.from({
+      length: 7
+    }, (_, i) => {
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      return d.toLocaleDateString(localeFor(lang), {
+        weekday: 'narrow'
+      });
+    });
+  })();
+  const goMonth = delta => {
+    let m = viewMonth + delta;
+    let y = viewYear;
+    if (m < 0) {
+      m = 11;
+      y -= 1;
+    } else if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    setViewMonth(m);
+    setViewYear(y);
+  };
+  const displayLabel = value ? new Date(`${value}T00:00:00`).toLocaleDateString(localeFor(lang), {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }) : placeholder;
+  return /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: {
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setOpen(v => !v),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 7,
+      background: open ? '#0F2628' : '#0D2022',
+      border: `1px solid ${open || value ? 'rgba(0,222,225,0.4)' : '#1A3436'}`,
+      borderRadius: 8,
+      padding: '6px 11px',
+      color: value ? '#F5F5F5' : '#5C7274',
+      fontSize: 12.5,
+      fontFamily: "'Inter', sans-serif",
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 13,
+    height: 13,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "#6FE3E5",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: 3,
+    y: 4,
+    width: 18,
+    height: 18,
+    rx: 3
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 3,
+    y1: 10,
+    x2: 21,
+    y2: 10
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 8,
+    y1: 2,
+    x2: 8,
+    y2: 6
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 16,
+    y1: 2,
+    x2: 16,
+    y2: 6
+  })), displayLabel), open && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: '100%',
+      left: 0,
+      marginTop: 6,
+      zIndex: 40,
+      width: 260,
+      background: '#0A1516',
+      border: '1px solid #1A3436',
+      borderRadius: 12,
+      padding: 12,
+      boxShadow: '0 12px 32px rgba(0,0,0,0.5)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => goMonth(-1),
+    style: {
+      background: 'transparent',
+      border: 'none',
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 14,
+      padding: 4,
+      lineHeight: 1
+    }
+  }, "‹"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 12.5,
+      fontWeight: 600,
+      textTransform: 'capitalize'
+    }
+  }, monthLabel), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => goMonth(1),
+    style: {
+      background: 'transparent',
+      border: 'none',
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 14,
+      padding: 4,
+      lineHeight: 1
+    }
+  }, "›")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(7, 1fr)',
+      gap: 2,
+      marginBottom: 4
+    }
+  }, weekdayLabels.map((wd, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      textAlign: 'center',
+      fontSize: 9.5,
+      color: '#5C7274',
+      padding: '2px 0'
+    }
+  }, wd))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(7, 1fr)',
+      gap: 2
+    }
+  }, cells.map((d, i) => {
+    if (d == null) return /*#__PURE__*/React.createElement("div", {
+      key: i
+    });
+    const cellDate = new Date(viewYear, viewMonth, d);
+    const iso = toIso(cellDate);
+    const isDisabled = minDate && cellDate < minDate;
+    const isSelected = iso === value;
+    const isToday = iso === todayIso;
+    return /*#__PURE__*/React.createElement("button", {
+      key: i,
+      type: "button",
+      disabled: isDisabled,
+      onClick: () => {
+        onChange(iso);
+        setOpen(false);
+      },
+      style: {
+        aspectRatio: '1',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: isSelected ? '#00DEE1' : 'transparent',
+        color: isDisabled ? '#2E4244' : isSelected ? '#0A0A0A' : isToday ? '#00DEE1' : '#C7DBDC',
+        border: isToday && !isSelected ? '1px solid rgba(0,222,225,0.4)' : '1px solid transparent',
+        borderRadius: 6,
+        fontSize: 11,
+        fontWeight: isSelected || isToday ? 700 : 500,
+        cursor: isDisabled ? 'default' : 'pointer',
+        fontFamily: "'Inter', sans-serif"
+      }
+    }, d);
+  }))));
+}
+
+function SimpleDatePicker({
+  value,
+  onChange,
+  min,
+  lang,
+  placeholder
+}) {
+  const [open, setOpen] = useState(false);
+  const initial = value ? new Date(`${value}T00:00:00`) : new Date();
+  const [viewYear, setViewYear] = useState(initial.getFullYear());
+  const [viewMonth, setViewMonth] = useState(initial.getMonth());
+  const containerRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = e => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const minDate = min ? new Date(`${min}T00:00:00`) : null;
+  const toIso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const firstWeekday = (new Date(viewYear, viewMonth, 1).getDay() + 6) % 7; // Montag = 0
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  const todayIso = toIso(new Date());
+  const monthLabel = new Date(viewYear, viewMonth, 1).toLocaleDateString(localeFor(lang), {
+    month: 'long',
+    year: 'numeric'
+  });
+  const weekdayLabels = (() => {
+    const base = new Date(2024, 0, 1); // ein Montag
+    return Array.from({
+      length: 7
+    }, (_, i) => {
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      return d.toLocaleDateString(localeFor(lang), {
+        weekday: 'narrow'
+      });
+    });
+  })();
+  const goMonth = delta => {
+    let m = viewMonth + delta;
+    let y = viewYear;
+    if (m < 0) {
+      m = 11;
+      y -= 1;
+    } else if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    setViewMonth(m);
+    setViewYear(y);
+  };
+  const displayLabel = value ? new Date(`${value}T00:00:00`).toLocaleDateString(localeFor(lang), {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }) : placeholder;
+  return /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: {
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setOpen(v => !v),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 7,
+      background: open ? '#0F2628' : '#0D2022',
+      border: `1px solid ${open || value ? 'rgba(0,222,225,0.4)' : '#1A3436'}`,
+      borderRadius: 8,
+      padding: '6px 11px',
+      color: value ? '#F5F5F5' : '#5C7274',
+      fontSize: 12.5,
+      fontFamily: "'Inter', sans-serif",
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 13,
+    height: 13,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "#6FE3E5",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: 3,
+    y: 4,
+    width: 18,
+    height: 18,
+    rx: 3
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 3,
+    y1: 10,
+    x2: 21,
+    y2: 10
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 8,
+    y1: 2,
+    x2: 8,
+    y2: 6
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 16,
+    y1: 2,
+    x2: 16,
+    y2: 6
+  })), displayLabel), open && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: '100%',
+      left: 0,
+      marginTop: 6,
+      zIndex: 40,
+      width: 260,
+      background: '#0A1516',
+      border: '1px solid #1A3436',
+      borderRadius: 12,
+      padding: 12,
+      boxShadow: '0 12px 32px rgba(0,0,0,0.5)'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => goMonth(-1),
+    style: {
+      background: 'transparent',
+      border: 'none',
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 14,
+      padding: 4,
+      lineHeight: 1
+    }
+  }, "‹"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 12.5,
+      fontWeight: 600,
+      textTransform: 'capitalize'
+    }
+  }, monthLabel), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => goMonth(1),
+    style: {
+      background: 'transparent',
+      border: 'none',
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 14,
+      padding: 4,
+      lineHeight: 1
+    }
+  }, "›")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(7, 1fr)',
+      gap: 2,
+      marginBottom: 4
+    }
+  }, weekdayLabels.map((wd, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      textAlign: 'center',
+      fontSize: 9.5,
+      color: '#5C7274',
+      padding: '2px 0'
+    }
+  }, wd))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(7, 1fr)',
+      gap: 2
+    }
+  }, cells.map((d, i) => {
+    if (d == null) return /*#__PURE__*/React.createElement("div", {
+      key: i
+    });
+    const cellDate = new Date(viewYear, viewMonth, d);
+    const iso = toIso(cellDate);
+    const isDisabled = minDate && cellDate < minDate;
+    const isSelected = iso === value;
+    const isToday = iso === todayIso;
+    return /*#__PURE__*/React.createElement("button", {
+      key: i,
+      type: "button",
+      disabled: isDisabled,
+      onClick: () => {
+        onChange(iso);
+        setOpen(false);
+      },
+      style: {
+        aspectRatio: '1',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: isSelected ? '#00DEE1' : 'transparent',
+        color: isDisabled ? '#2E4244' : isSelected ? '#0A0A0A' : isToday ? '#00DEE1' : '#C7DBDC',
+        border: isToday && !isSelected ? '1px solid rgba(0,222,225,0.4)' : '1px solid transparent',
+        borderRadius: 6,
+        fontSize: 11,
+        fontWeight: isSelected || isToday ? 700 : 500,
+        cursor: isDisabled ? 'default' : 'pointer',
+        fontFamily: "'Inter', sans-serif"
+      }
+    }, d);
+  }))));
+}
+
+function ApyHistoryChart({
+  data,
+  avgApy,
+  lang
+}) {
+  const width = 640;
+  const height = 220;
+  const padding = {
+    top: 20,
+    right: 10,
+    bottom: 26,
+    left: 10
+  };
+  const containerRef = useRef(null);
+  const [hoverIdx, setHoverIdx] = useState(null);
+  if (!data || data.length < 2) return null;
+  // Chronologisch aufsteigend fürs Chart (die Tabelle daneben zeigt neueste zuerst, hier aber
+  // von links/alt nach rechts/neu, wie man einen Zeitverlauf natürlicherweise liest).
+  const asc = [...data].sort((a, b) => a.dateMs - b.dateMs);
+  const values = asc.map(d => d.apy * 100);
+  const maxV = Math.max(...values, 0.0001);
+  const minV = Math.min(0, ...values);
+  const innerW = width - padding.left - padding.right;
+  const innerH = height - padding.top - padding.bottom;
+  const xScale = i => padding.left + (asc.length > 1 ? i / (asc.length - 1) * innerW : innerW / 2);
+  const yScale = v => padding.top + innerH - (v - minV) / (maxV - minV || 1) * innerH;
+  const avgY = avgApy != null ? yScale(avgApy * 100) : null;
+  const linePath = asc.map((d, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i)} ${yScale(d.apy * 100)}`).join(' ');
+  const areaPath = `${linePath} L ${xScale(asc.length - 1)} ${height - padding.bottom} L ${xScale(0)} ${height - padding.bottom} Z`;
+  const getLocalX = e => {
+    const rect = containerRef.current.getBoundingClientRect();
+    const clientX = e.touches && e.touches.length ? e.touches[0].clientX : e.changedTouches && e.changedTouches.length ? e.changedTouches[0].clientX : e.clientX;
+    return (clientX - rect.left) / rect.width * width;
+  };
+  const updateHoverAt = localX => {
+    let idx = 0,
+      minDiff = Infinity;
+    for (let i = 0; i < asc.length; i++) {
+      const diff = Math.abs(xScale(i) - localX);
+      if (diff < minDiff) {
+        minDiff = diff;
+        idx = i;
+      }
+    }
+    setHoverIdx(prev => prev === idx ? prev : idx);
+  };
+  const rafIdRef = useRef(null);
+  const scheduleHoverUpdate = localX => {
+    if (rafIdRef.current != null) return;
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      updateHoverAt(localX);
+    });
+  };
+  const handleDown = e => scheduleHoverUpdate(getLocalX(e));
+  const handleMove = e => {
+    if (hoverIdx != null || e.pointerType !== 'touch') scheduleHoverUpdate(getLocalX(e));
+  };
+  const clearHover = () => {
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    setHoverIdx(null);
+  };
+  useEffect(() => {
+    if (hoverIdx == null) return;
+    window.addEventListener('pointerup', clearHover);
+    window.addEventListener('touchend', clearHover);
+    window.addEventListener('touchcancel', clearHover);
+    return () => {
+      window.removeEventListener('pointerup', clearHover);
+      window.removeEventListener('touchend', clearHover);
+      window.removeEventListener('touchcancel', clearHover);
+    };
+  }, [hoverIdx]);
+  // Siehe ausführlicher Kommentar in VolumeHistoryChart weiter oben: React registriert
+  // onTouchMove standardmäßig passiv, wodurch e.preventDefault() wirkungslos bleibt --
+  // "touch-action: none" allein reicht auf iOS Safari nicht immer zuverlässig, deshalb hier
+  // zusätzlich ein echter (nicht-passiver) nativer Listener direkt auf dem SVG-Element.
+  //
+  // WICHTIG (Android-Scroll-Bug): siehe ausführliche Erklärung in VolumeHistoryChart weiter
+  // oben -- auch dieser Chart unterstützt kein Verschieben/Zoomen, vertikale Wischgesten
+  // werden also für normales Seiten-/Modal-Scrollen freigegeben.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let startX = null;
+    let startY = null;
+    let decided = null; // 'x' | 'y' | null
+    const onTouchStartLocal = e => {
+      if (e.touches.length !== 1) {
+        startX = startY = null;
+        decided = null;
+        return;
+      }
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      decided = null;
+    };
+    const preventScroll = e => {
+      if (e.touches.length !== 1 || startX == null) {
+        e.preventDefault();
+        return;
+      }
+      const t = e.touches[0];
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (decided === null) {
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+          e.preventDefault();
+          return;
+        }
+        decided = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+        if (decided === 'y') clearHover();
+      }
+      if (decided === 'x') e.preventDefault();
+    };
+    el.addEventListener('touchstart', onTouchStartLocal, {
+      passive: true
+    });
+    el.addEventListener('touchmove', preventScroll, {
+      passive: false
+    });
+    return () => {
+      el.removeEventListener('touchstart', onTouchStartLocal);
+      el.removeEventListener('touchmove', preventScroll);
+    };
+  }, []);
+  const hoverPoint = hoverIdx != null ? asc[hoverIdx] : null;
+  const labelEvery = Math.max(1, Math.ceil(asc.length / 6));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    ref: containerRef,
+    viewBox: `0 0 ${width} ${height}`,
+    style: {
+      width: '100%',
+      height: 'auto',
+      display: 'block',
+      touchAction: 'none'
+    },
+    onPointerDown: handleDown,
+    onPointerMove: handleMove,
+    onPointerUp: clearHover,
+    onPointerLeave: clearHover,
+    onTouchStart: handleDown,
+    onTouchMove: handleMove
+  }, /*#__PURE__*/React.createElement("defs", null, /*#__PURE__*/React.createElement("linearGradient", {
+    id: "apyHistFill",
+    x1: "0",
+    y1: "0",
+    x2: "0",
+    y2: "1"
+  }, /*#__PURE__*/React.createElement("stop", {
+    offset: "0%",
+    stopColor: "#00DEE1",
+    stopOpacity: "0.3"
+  }), /*#__PURE__*/React.createElement("stop", {
+    offset: "100%",
+    stopColor: "#00DEE1",
+    stopOpacity: "0"
+  }))), avgY != null && /*#__PURE__*/React.createElement("line", {
+    x1: padding.left,
+    x2: width - padding.right,
+    y1: avgY,
+    y2: avgY,
+    stroke: "#3A5052",
+    strokeWidth: 1,
+    strokeDasharray: "4 3"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: areaPath,
+    fill: "url(#apyHistFill)",
+    stroke: "none"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: linePath,
+    fill: "none",
+    stroke: "#00DEE1",
+    strokeWidth: "1.75",
+    strokeLinejoin: "round",
+    strokeLinecap: "round"
+  }), hoverPoint && /*#__PURE__*/React.createElement("g", {
+    pointerEvents: "none"
+  }, /*#__PURE__*/React.createElement("line", {
+    x1: xScale(hoverIdx),
+    x2: xScale(hoverIdx),
+    y1: padding.top,
+    y2: height - padding.bottom,
+    stroke: "rgba(0,222,225,0.4)",
+    strokeWidth: 1
+  }), /*#__PURE__*/React.createElement("circle", {
+    cx: xScale(hoverIdx),
+    cy: yScale(hoverPoint.apy * 100),
+    r: 3.5,
+    fill: "#00DEE1",
+    stroke: "#000000",
+    strokeWidth: 1.5
+  })), asc.map((d, i) => i % labelEvery !== 0 ? null : /*#__PURE__*/React.createElement("text", {
+    key: `lbl-${i}`,
+    x: xScale(i),
+    y: height - 6,
+    fontSize: 9,
+    fill: "#5C7274",
+    textAnchor: "middle"
+  }, fmtDate(d.dateMs, lang)))), hoverPoint && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'absolute',
+      top: 4,
+      left: 0,
+      right: 0,
+      display: 'flex',
+      justifyContent: 'center',
+      pointerEvents: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: '#0D2224',
+      border: '1px solid #1E3A3C',
+      borderRadius: 7,
+      padding: '5px 10px',
+      textAlign: 'center'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#5C7274',
+      fontSize: 9.5
+    }
+  }, fmtDate(hoverPoint.dateMs, lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#00DEE1',
+      fontSize: 12.5,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, fmtApyPercentPrecise(hoverPoint.apy, lang)))));
 }
 
 // Schlanker Zwei-Linien-Vergleichs-Chart (RUNE vs. gewählter Coin), jeweils normiert auf
@@ -6760,6 +8116,64 @@ const fetchWithTimeout = async (url, options = {}, timeoutMs = 6000) => {
     clearTimeout(timer);
   }
 };
+// Gehedgte Parallelabfrage mehrerer Fallback-Basis-URLs -- exakt dasselbe Muster wie im
+// rune-rewards-backend (dort FIX 8): Quelle 1 startet sofort; antwortet sie nicht innerhalb von
+// HEDGE_STAGGER_MS, startet ZUSÄTZLICH (nicht ANSTATT) die nächste Quelle parallel dazu, usw. Es
+// gewinnt schlicht die erste erfolgreiche Antwort. Läuft bewusst über das rohe fetchWithTimeout
+// und NICHT über die globale thorchainFetch-Warteschlange (die serialisiert app-weit alle
+// Anfragen strikt nacheinander) und mit kürzerem Timeout pro Quelle als der thorchainFetch-
+// Standard -- die alte, rein sequenzielle Variante mit vollem 8s-Timeout + automatischem Retry
+// PRO Quelle konnte im schlimmsten Fall über 30s brauchen, bevor die 24h-Volumen-Karte
+// überhaupt eine Antwort (oder auch nur einen Fehler) bekam.
+const HEDGE_PER_BASE_TIMEOUT_MS = 6000;
+const HEDGE_STAGGER_MS = 2500;
+const fetchJsonHedged = (bases, pathForBase, options = {}) => new Promise((resolve, reject) => {
+  let settled = false;
+  let pending = bases.length;
+  const errors = [];
+  let timers = [];
+  const clearAllTimers = () => {
+    for (const t of timers) clearTimeout(t);
+    timers = [];
+  };
+  const attempt = async (base, index) => {
+    try {
+      const res = await fetchWithTimeout(pathForBase(base), {
+        headers: {
+          'x-client-id': 'rune-portfolio-app',
+          ...(options.headers || {})
+        },
+        ...options
+      }, HEDGE_PER_BASE_TIMEOUT_MS);
+      if (!res.ok) throw new Error(`HTTP_${res.status} (${base})`);
+      const data = await res.json();
+      if (!settled) {
+        settled = true;
+        clearAllTimers();
+        resolve(data);
+      }
+    } catch (e) {
+      errors[index] = e;
+      pending -= 1;
+      if (!settled && pending === 0) {
+        settled = true;
+        clearAllTimers();
+        reject(errors.find(Boolean) || new Error('ALL_BASES_FAILED'));
+      }
+    }
+  };
+  // Erste Quelle startet sofort, jede weitere erst HEDGE_STAGGER_MS später -- außer die
+  // vorherige(n) sind zu diesem Zeitpunkt schon fehlgeschlagen, dann sofort (kein Grund zu
+  // warten, wenn ohnehin schon feststeht, dass wir sie brauchen). Timer werden nicht mehr
+  // ausgelöst, sobald irgendeine Quelle bereits erfolgreich geantwortet hat.
+  bases.forEach((base, index) => {
+    const timer = setTimeout(() => {
+      if (!settled) attempt(base, index);
+    }, index * HEDGE_STAGGER_MS);
+    timers.push(timer);
+  });
+});
+
 const thorchainFetch = (url, options = {}, {
   timeoutMs = 8000,
   retries = 1
@@ -7085,6 +8499,67 @@ const fetchThorchainDenomSupply = async denom => {
 // Weitere danach alphabetisch. Ohne das steht z.B. eine exotische Chain vor BTC/ETH.
 const SWAP_FEATURED_ASSETS = ['BTC.BTC', 'ETH.ETH', 'THOR.RUNE', 'AVAX.AVAX', 'BSC.BNB', 'BCH.BCH', 'DOGE.DOGE', 'GAIA.ATOM', 'LTC.LTC', 'XRP.XRP', 'BASE.ETH', 'ARB.ETH', 'OP.ETH', 'SOL.SOL', 'TRON.TRX', 'POL.POL', 'ZEC.ZEC', 'NEAR.NEAR', 'BERA.BERA', 'GNO.xDAI'];
 
+// ============================================================================
+// Chain-Logos (Original-SVGs aus dem offiziellen swap.thorchain.org-Projekt,
+// MIT-Lizenz, Copyright (c) 2026 Horizontal Systems). Optimiert und als data-URI direkt
+// eingebettet -- so bleibt es bei den vier Dateien im Deploy und es wird nichts von fremden
+// Servern nachgeladen (kein zusätzlicher Verbindungsaufbau, kein Ausfallrisiko).
+// ============================================================================
+const CHAIN_LOGOS = {
+  "AVAX": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%23d74f49%22%20d%3D%22M28%200a4%204%200%200%201%204%204v24a4%204%200%200%201-4%204H4a4%204%200%200%201-4-4V4a4%204%200%200%201%204-4zM17%205.4a1%201%200%200%200-1.9%200l-9.6%2017a1%201%200%200%200%20.9%201.6h4.7a3%203%200%200%200%202.6-1.5l5.6-9.8q.9-1.5%200-3zm6.3%2011.2a1%201%200%200%200-1.9%200L18%2022.3a1%201%200%200%200%20.9%201.6h6.7a1%201%200%200%200%201-1.6z%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "BASE": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%232759f6%22%20d%3D%22M0%200h32v32H0z%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22M16%2028A12%2012%200%201%200%204%2015h15.9v2H4a12%2012%200%200%200%2012%2011%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "BCH": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%230ac18e%22%20d%3D%22M28%200a4%204%200%200%201%204%204v24a4%204%200%200%201-4%204H4a4%204%200%200%201-4-4V4a4%204%200%200%201%204-4zM15%206.7l.5%202.3-1.5.2-.5-2.2-2.3.4.4%202.3-3.5.6.3%202%20.6-.1h.7l.3.1.3.8%201.4%207.7v.8l-.2.3-.7.2-.5.1.3%202%203.6-.7.4%202.3%202.4-.5-.5-2.3%201.4-.2h.1l.5%202.2%202.3-.4-.5-2.5%201-.4a4%204%200%200%200%201.6-1.8%203%203%200%200%200-.4-3.7q-.6-.7-1.4-1l-1.6-.2%201.3-1%20.6-1.3a3%203%200%200%200-.8-3q-.7-.7-1.8-1h-1l-.4-2.4zm1.3%2010q1.2-.2%201.8-.1.6%200%201%20.5.3.3.5%201l-.2%201.3-.9.8-1.4.5-1%20.1-.6.1q-.2%200-.2-.2L15%2020l-.6-3zM15%2011.3l1.9-.1q.6%200%20.9.4.3.3.4.8v1l-.8.8q-.6.3-1.7.5L14%2015l-.6-3.4z%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "BSC": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%23f3ba2f%22%20d%3D%22M28%200a4%204%200%200%201%204%204v24a4%204%200%200%201-4%204H4a4%204%200%200%201-4-4V4a4%204%200%200%201%204-4zM16%2025.3%2013.9%2024v2.7l2.3%201.4%202.2-1.4V24zM6%2022l6.1%203.7V23l-3.9-2.4V16L6%2014.6zm17.9-6v4.6L20%2023v2.7l6.1-3.7v-7.4zm-7.8-2.7L12.2%2011l-2.3%201.3V15l4%202.4V22l2.2%201.3%202.1-1.3v-4.7l4-2.4v-2.7L20%2011zm-6.2%206.3L12%2021v-2.7L10%2017zM20%2018.3V21l2.3-1.4V17zM6%2010v2.7L8.2%2014v-2.7l2.4-1.4-2.4-1.4zm15.6%200%202.3%201.4V14l2.2-1.4V10L24%208.6zm-7.8%200%202.3%201.4%202.2-1.4-2.2-1.4zM10%207.7%2012.2%209%2016%206.7%2020%209l2.2-1.3L16.1%204z%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "BTC": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%23f7931a%22%20d%3D%22M28%200a4%204%200%200%201%204%204v24a4%204%200%200%201-4%204H4a4%204%200%200%201-4-4V4a4%204%200%200%201%204-4zM14.2%208.6%2010.7%208l-.4%202h.6l.7.3.2.3v.8L10.2%2019l-.2.8-.4.2H9l-.6-.2-.3%202%203.6.6-.5%202.3%202.4.4.4-2.3%201.3.3h.2l-.4%202.3%202.3.4.5-2.4%201-.1a4%204%200%200%200%202.2-1%203.4%203.4%200%200%200%201-3.7q-.4-.9-1-1.4l-1.4-.8%201.6-.5%201-1a3%203%200%200%200%20.3-3q-.4-.9-1.3-1.6l-1-.4.5-2.4-2.3-.5-.4%202.3-1.5-.3.4-2.2-2.3-.5zm1.9%208.2%201.7.6q.5.3.7.8.3.5.1%201%200%20.9-.6%201.2l-1.1.5h-1.5l-1-.3-.6-.1-.2-.3.1-.7.6-3zm.7-5.4%201.8.5q.5.3.7.7t.1%201-.5.8q-.3.4-1%20.5l-1.7-.1-1.5-.3.6-3.4z%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "DOGE": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%23ba9f33%22%20d%3D%22M0%200h32v32H0z%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m7%2014.3-.3-.3-.2-.2-.3-.3H6v-.2l-1.2-1%201.1%201%20.2.1v.1l.4.3zm-4.7%200%204.3.5zm0%200h1l.6.1h.5l1.1.2.6.1.5.1h-.5l-.6-.1-1-.2h-.6l-.6-.1zm4.2.9-1.9.5c-.4%200-1.8.5-1.8.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m6.5%2015.2-1%20.2-.9.3-.9.2-.5.2-.4.1.4-.1.5-.2%201-.3.9-.2zM3%2017l2.3-1%20.8-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m3%2017%20.4-.1.3-.2.8-.4q.4%200%20.8-.3l.4-.2h.2l.2-.1-.8.3-.8.4-.8.3zm.1.8%202.2-1.3%201.2-.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m3.1%2017.8.9-.5.4-.3.4-.2.4-.3h.2l.2-.2.9-.4-.8.5-.5.2-.4.3-.4.2-.4.2zM6.5%2016l-1.3%201-1.3%201z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e2cc85%22%20fill-rule%3D%22evenodd%22%20d%3D%22m12.2%2022.3-.5-1%20.3-1.2%202-.8-.8-1.8.4-1.9.8-1.7%202.6-.4%201.9-1.8%204%20.3.9%204.4-1.6%205.5-.8%202.8-3.6.2-1.7-1.2-1.9-.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f1d789%22%20fill-rule%3D%22evenodd%22%20d%3D%22M18.4%2022.2q0%20.2-1.3.2c-.3-.3-2-.5-2-.5l-.5.1-1.1.2c-.4.1-.7-.3-1-.4l-.5-.3-.8-.1-1.4-.6-2.3-2.3-.6%201-.2%201.2.7%201.4%201.9%201.7%203.6%201L15%2024l2.7-1.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f4ecb4%22%20fill-rule%3D%22evenodd%22%20d%3D%22m5.5%2014.2.5-1.4.5-1h1.8l-.5%201.5-1.5%202.6.6%202.4-1%20.5-.4-.5-.3-1.2v-1.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f3e19d%22%20fill-rule%3D%22evenodd%22%20d%3D%22m7.5%2022.1-.3-.4V21l-.3-.6.2-.5v-.5l.3.2h.1s0-.7.2-.9c.1-.1.4.7.4.7L8%2018.2%207.5%2017l-.9-1.2v-1.3l-.5%201v1.8q.4.4.4.9H6l-.1.3-.1-.2-.2-.3-.2-1-.1.5v.6l.2.8.2.5.2.6.2.5.1.3.2.7.6.6.3.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f2e8b0%22%20fill-rule%3D%22evenodd%22%20d%3D%22M5.8%2013s-.4.8-.5%201.5a10%2010%200%200%200%20.2%204.5l.7%201.7L6%2020l-.1-.7-.2-.5-.2-.6-.2-.5v-2.1l.4-1.6c.2-.4%200-.7.3-1l.4-.9z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f5eec0%22%20fill-rule%3D%22evenodd%22%20d%3D%22m7.8%2012.8-.3.1-.3.4-.2.6-.4.7-.2%201v.5h.2l.2.3c.1.1.1-.4.1-.4l.6-1.9.8-.5.1-.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e6db9d%22%20fill-rule%3D%22evenodd%22%20d%3D%22m8.2%2013.6-.6.2-.1.1-.4.4-.3%201v1l.3.7.5-.3.5-2%201-.6-.6-.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e5cb7a%22%20fill-rule%3D%22evenodd%22%20d%3D%22m5.4%2026.9.2-1.6.1-.8V24l.3-1-.2-.4-.1-.2s.5-.3.5-1.8l.3.8.2.2.7%201.3.9.8%201.3.9.8.9v2.4l-1%201.3-.2.4q-2.1-1-3.8-2.7%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d8c173%22%20fill-rule%3D%22evenodd%22%20d%3D%22m8.7%2029.1.3-.4v.1q0-.2%201-.7c.8-.1%201-.6%201-.6l1.4-1.4%201.7-1.5%202-.7%201-.3v.3l1-.3h.4l.1.5.6-.2.9.4q.5%200%20.9-.4l.5-.4%203.7-1.3%201.2.1.2%201.3-.1%203.3-5.5%203-7.5%201a15%2015%200%200%201-4.8-1.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f1d789%22%20fill-rule%3D%22evenodd%22%20d%3D%22m5.9%2027.3.2-.5v.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e0cd81%22%20fill-rule%3D%22evenodd%22%20d%3D%22m11.4%2030.4%201-.2v.1h.4l.2.3.6-.2.6-.5.1.4c.2-.2.6-.9%201.1-.9l.8-.9q.7-.4%201.2-.3.2-.3.6-.5h.4c.3%200%20.5-.5.8-.5h.6s1-.9%201.6-1.2q-.2%200%20.7-1v.1l.5-.2.9-.6q.7%200%20.8.2l.1-.1h.3v.5l.2.1q0%20.3-.3.5l.4.2-.3.4-.3.8-.3.6-.5.5%201-.3-.8%201.3a15%2015%200%200%201-12.4%201.4%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23dfc57c%22%20fill-rule%3D%22evenodd%22%20d%3D%22M8.3%2013.5H8l.3.2.3.3%201.7.7h1l.5-.6-.8-.6.5-1.5H11l-1.7%201-.8.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e5cc7c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.7%2014%20.2.1q.3%200%20.5.2l.6.8%201%20.3v-1.1l-1-.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d2c281%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.5%2014.5.5-.1q.3-.2.7-.2.2.1.4.7l.6.3q.5.2.7.1l.2%201-.8%201.1-.3%201.3h-1l-1-.4L10%2017l.2-1.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e2c270%22%20fill-rule%3D%22evenodd%22%20d%3D%22M12.6%2014.5v.7l.1.2q-.1.2.4.3H13l.3.4h.4l.2-.1v-.3l.1-.3V15l.1-.5v-.9l-.5-.3-.4-.3-.3.6-.3.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23ccb360%22%20fill-rule%3D%22evenodd%22%20d%3D%22M13.8%2013.8v.4-.1l.2.5v.5l.5-.5.4-.1.5.1%201.5-.5q.5-.1.7-.4l.4-.4.5-.6h-.2l.1-.1.4-.2h.9l.5.1h2l.4.1-.7-1.8-2.2-2-1.4%201-2%202-2.1.8-.4.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d5b457%22%20fill-rule%3D%22evenodd%22%20d%3D%22m18.3%2012.7.1-.1.4-.2h.9l.6.1h1.9l.4.1-.3-.8-.4-.7-.9-1-1.2-.7h-.4l-1%20.5-1%202.5v.5l.7.3q.2-.5.4-.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d2b257%22%20fill-rule%3D%22evenodd%22%20d%3D%22m18.3%2012.9-.2-.1q0-.3-.2-.3l-.2.2-.1-.2-.7.5-.8.8-1%20.1-.4.2.1.1h-.2v.3h.3l.5.1%201.5-.5q.5-.1.7-.4l.4-.4q0-.3.3-.4%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d2b159%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10%2025.7-.5-.7-.3-.3q-.3-.4-.5-.4-.7-.3-1-.6l-1-1.6-.2-.8.1-.1.1.2.2.2q.2.1.3.5v-.4l.8.6.7.5.5.9%201.9.7.8.6.4%201-.3.4-.6.2-1-.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c2a44d%22%20fill-rule%3D%22evenodd%22%20d%3D%22m7.8%2022.5.7.7a7%207%200%200%200%203%20.9q1.2-.1%202.3-.4l1.5-.2%201.6-.6%201-.5%201.2-.6q0%20.2-.5.6h.5l-.7.4-1%20.8-.7.3-.8.7h.1l-.6.1h-.3l-.4.2h-.3v.1H14l-.2.1h-.1l.2.4-.7.4v.1l.1.2h.1l-.2.1-.4.1h-.2q.2.2%200%20.6l-.4.4q-.2%200-.3-.2v.3l-.2.4-.4-.2q-.3.1-.4.4s-.1.6-.7%201v-.4l-.5.3-.3.3.2-.5.3-.4v-.2l.2-.4q0-.4-.2-.5l.1-.2-.2-.2v-.5h.1l-.1-.2v-.5h.2l-.2-.2h.4l.2.2.2.2.7.4h.5v-.6l-.1-.1.1-.1-.2-.2h.1l-.2-.1-.3-.2-.2-.1h.3l.2-.1-.2-.1-.3-.2h-.4L9.5%2024l-1-.7-.1-.1q-.5-.2-.6-.8%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23caa13e%22%20fill-rule%3D%22evenodd%22%20d%3D%22m17.3%207%20.2.1q.2.2-.1.7h.2l-.3.6V9l.2-.2.6-.4h.6q.2.1.1.2h.3l.4.6.2.3.4.8q-.1-.4.4-.3.6.3%201.2%201l.6%201.4.4.8.3%202.1c.2-.4.3-1.4.3-1.4l.1-.9.1-2.6-2.7-2.3-2.2-1.5-1.4.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23b59544%22%20fill-rule%3D%22evenodd%22%20d%3D%22M22.4%2011q.2%200-.7-.8l-1.6-.8c-.3-.3-.7-1-1-1.1-.2-.2-.2-.9-.2-.9l.8-.6L20.8%205l1-1.1.5.6.7.8.4%201.6v2.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c89d3a%22%20fill-rule%3D%22evenodd%22%20d%3D%22m23.2%2013.7-.1-1-.7-1.9v-.5q.3%200%20.5-.7.5-.7.7-.6l.3-.2.4%201.1.4%201%20.1.8.1.6-.2%201.4-1%201z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23ceb052%22%20fill-rule%3D%22evenodd%22%20d%3D%22M8.6%2029.2V29H10q.6.1%201%20.6h1.4a.3.3%200%200%201%200%20.5l-.3.4h.1a15%2015%200%200%201-3.6-1.4%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cca847%22%20fill-rule%3D%22evenodd%22%20d%3D%22m22.4%2024%20.5-.8-.4-3.7%201.1-3.8v-1.3s0-1.1.2-1.6l.8.8.2-2%20.3%201.7.2%201%20.3%201%20.4%201.2.2.8v.2l.2.3v.3l.3.9.2.6.1%201.3v1l-.1.5c-.2.2-.3%201-.3%201l-.3-.2v-.5l-.6-.2-.5.2-.6.4-.8.2q-.4%200-.8.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c39d3c%22%20fill-rule%3D%22evenodd%22%20d%3D%22M22.4%2029.7q2.8-1.2%204.9-3.6V25l-.1-1.1-.2-1.5-.3-.4v.6l-.1.5-.1.1v-.3l-.2.4v.3l-.2.2.1.2v.5l-.1.5q0%20.3-.2.3h.1v.8q-.2%200-.3.2l-.3.6v-.2l-.4.5q-.3.4-.4.3v.3q-.2%200-.3.2l-.2.3h-.4l.2.1-.5.3-.3.4-.2.2.1.1-.3.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d2ba6b%22%20fill-rule%3D%22evenodd%22%20d%3D%22M18.8%2031q0-.2.3-.3l1-.2.5-.2v.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c0993a%22%20fill-rule%3D%22evenodd%22%20d%3D%22m26.2%2020.3-.2.7-.3.7v-.3l-.8.5-.3.4.2-.8-1.5%201.3L22%2024l-.5.3-.7.3.2-.5c.2%200%20.6-.5.6-.7v-.5h-.3l-.2.2.2-1H21q0-.2.8-.8l-.5.1-.9.5c.2-.2%201.2-1.7%201.8-3.1s.9-1.7%201-2.5V15l.1-1.2c.2.2.8.7.8%202%200%201.2-.6%203-1.2%203.8.1%200%20.5.1%201-.6l.5-1.2v.2s.6-.7.9-1.6q.2.5%200%201.4-.5%201-.6.8l.4-.1v.2l.2.2.2-.3.1%201.5q.3.1.5-.4v.9z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a88f33%22%20fill-rule%3D%22evenodd%22%20d%3D%22m19.5%206-.6.1-.6-.1-3.6.4%201%20.1h3.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e3c571%22%20fill-rule%3D%22evenodd%22%20d%3D%22m11.3%2012.2-.6.5-.4.6h.1l.1.1q-.1%200%200%20.4l.2.1.2.1%201-.1q.3%200%20.5.3.2.4.3.3V14l.1-.5v-1l-.7-.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d8b65b%22%20fill-rule%3D%22evenodd%22%20d%3D%22m12%2012%20.3.2v.4h.1l.2.3.1.7v.3h.2l.3-.4v-.4l.1.2h.1V13l.2-.6.2-.4.6-1%201.3-1%201%20.3%201-1.3-1.6-.9-1.5.2-1.3%201.8-1%201.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d3ae4d%22%20fill-rule%3D%22evenodd%22%20d%3D%22m19.7%209.4-.4.1-.5.4-.1.4.3-.1h.2l.1.2v.2l-.3.2v.2q.1.1-.4.7l-.4.5-.2-.5-.3.2-.7-2.2v-.2l.1-.2-.2-.1-.4-.4-.3-.2H16l.1-.1h-.7l-.3-.1-.3.2-.4.3V9l-.3.4-.5.8c-.3.3%200-.7%200-.7l.6-1.2L15.6%207l2.1-.1L18%208l1.1.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23caa13e%22%20fill-rule%3D%22evenodd%22%20d%3D%22m20%209.6-.9-1.3-.6-.5L18%207l-.8-.1.1.1.2.1q.2.2-.1.7h.2l-.3.6v.7l.2-.2.6-.4q.1-.2.6%200%20.2.1.1.2h.3l.4.6.2.3.4.8q0-.2.2-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f4efc8%22%20fill-rule%3D%22evenodd%22%20d%3D%22M6.3%2013.4v-.5l.2-1c0-.4.4-1%20.4-1l.8-.3.6.1.1.8-.7.4-.2.3-.6.4-.1.3-.3.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23ebcc73%22%20fill-rule%3D%22evenodd%22%20d%3D%22m8%2013.2-.2-1v-.7q.5-.2.5-.6t-.6-.3l-.5.7-.4.2v.4l-.3.3q-.5.5-.6%201.3V13l.2-1%20.2-.7.4-1.1.6-1.2.7-.7h.6l.1%201%20.4%201.9.8%201-1.3.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e5c66b%22%20fill-rule%3D%22evenodd%22%20d%3D%22M8.4%2013.5h-.2v-.2H8h.1l-.2-.1.2-.2h.2l-.2-.2v-.4l.1-.2h.1l.2-.2h.2l.4.1.5.1.2.3-1%20.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e6bd62%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.7%2012.2-.4.3h.1l-.3.3-.3.4-.4.3.8-.2.1.1.7-.1q.4-.3.4-.5l.6-.5h.2V12h.1l.6-.2.1.1.2-.2.3-.8v-.7h-.2l-1.6.7-1%201z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23b6933f%22%20fill-rule%3D%22evenodd%22%20d%3D%22m14.1%208.9.2-.1-.1.3-.3.5-.2.6h.1l-.1.2-.3.4-.7.5-.7.7.2-.5V11l.3-.7.6-1.6.8-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c49937%22%20fill-rule%3D%22evenodd%22%20d%3D%22m13.5%208.4-.3.6v.7l.3-.3.5-.3q.1-.3.5-.5h-.3l.7-.5.7-.5h-.3l.4-.4q.1-.3-.1-.4l-1.4.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23dfc068%22%20fill-rule%3D%22evenodd%22%20d%3D%22M9.8%207.8v-.3l.5-.6.4-1.1V2.7l.1-.1.3.2.5.6v1.2l-.4%202-1.3%201.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a88f33%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.8%202.5s-.2%200-.2.9L10.5%205l-.1%201-.2.7-.4.7-.8.4L8%208l-.3.2q-.5.5-1%201.4c-.5%201-1%203.5-1%203.5l.1-.2.3-.6c.2-.4.1-.8.5-1.6q0-.5.4-1%20.5-.9%201-1.3c.6-.4%201.3-.5%201.3-.5l.7-.4.2-.5q.5-.6.6-1.4l-.1-2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c99e3d%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.8%206.6s.4-.8.5-1.4v-.4q.3-.8%200-1.2%200-.4-.4-.7l-.1-.3.2-.1.6.3c.2.2.3%201%20.3%201l.2%201%20.4%201.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23b58634%22%20fill-rule%3D%22evenodd%22%20d%3D%22m13.7%205.8-.1.2h-1.2q-.2.2-.6-.6V4l-.2-.8v-.4h-.2v-.2l.5.3.2.3q.2%200%20.5.6L13%205l.1.3q.3.4.6.5%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a88f33%22%20fill-rule%3D%22evenodd%22%20d%3D%22m12%203.2.5.8.4.8q-.1-.6-.4-1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e6c367%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.3%207.5-.8.3-1.5.6v.3s-.5.4-.3%201.5h.2l.4-.2s0%20.8.3%201.3l.3-.4v-.1L9%2010l.4-.5%201-1.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23dcba5a%22%20fill-rule%3D%22evenodd%22%20d%3D%22M9.3%209.8H9l.1-.4.7-1q-.1-.1.6-1l1-.8%201-.5%201.1.5L13%209l-.4%201-2-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e9ce77%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10%209.1.2-.3v-.2l.6-.3c.2-.3.6-.9%201-.8.3%200%20.4.7.4%201l.1.8c0%20.2-.8%201.2-.8%201.2l-.7.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cdae50%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.7%2011.6q.2-.1%200-.4l.3-.4.5-.6.6-.7V9l.2.1q.2%200%20.3.7-.1.6-.3.6l-.2.3-.4.2h-.3l-.4.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d2a83e%22%20fill-rule%3D%22evenodd%22%20d%3D%22m19.3%206.5-1-.1h-2L13.6%206c-.2%200-.6-.5-2%20.4%200%200%201-.2%201.3.2s.3%201.1.2%201.3l-.5%201.2-.1.8-.2.7q.2.1.5-.6.1-.7.5-1.3l1.2-1.2c.3-.1%202-1%204-.1.5%200%20.8-.9.8-.9%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c29637%22%20fill-rule%3D%22evenodd%22%20d%3D%22m12.4%206.2-.1-.2h-.7q-.7.2-1%20.8l-.5.8q-.1%200%200%200v.1l.8-.6%201.1-.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23ac8132%22%20fill-rule%3D%22evenodd%22%20d%3D%22m21.2%204.2-.2.3-.8.8-.8.8-.7.9-.2.4v-.1.1l.2.3.1.3q.1.1.5-.4l.6-.9.5-.7.3-.7.5-.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a88f33%22%20fill-rule%3D%22evenodd%22%20d%3D%22m21.7%203.7-.4.4-.4.6h.1l.5-.5.2-.4%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a67a2e%22%20fill-rule%3D%22evenodd%22%20d%3D%22M21.7%2024.3V24q.3-.2.8-1l.3-1s-.5.6-.8.7l.1-.4-.2-.1q0-.2.3-.5l1.2-.9c.4-.3%201.1-1%201.2-1.3v.2l-.5.8-.2.4.4-.1q.2%200-.4%201l.4-.2-.7.8q-.3.7-1%201.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%238c6228%22%20fill-rule%3D%22evenodd%22%20d%3D%22m20.2%206.8-.2.8v1.1l-.1-.2-.2.6V7.9l-.2.3-.1-.2-.1.2v-.6l.3-.6c.3-.3.6-.9.6-1l.5-1h.3l-.4%201-.4.6-.5.9.2-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cba94c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m21.8%203.7-.3.4-.6.6q-.5.4-.3%201.4l.4-.7.6-1%20.2-.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a88f33%22%20fill-rule%3D%22evenodd%22%20d%3D%22m27%2020.9-.1-.6v-.6l-.3-.2v-.8l-.2-.3v-.3l-.2-.2v-.5l-.1.1-.1-.5-.1-.4-.6-2v-.3l-.1.1-.1-.5-.2-.5v-.9l-.1-.5v-.6l-.3-1-.7-1.8%201.2%203%20.2%201.8.1.7.3.8.3.8v.7l.3.7q0%20.6.4%201l.3%201.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23be9c44%22%20fill-rule%3D%22evenodd%22%20d%3D%22M21.8%203.7v.5l-.2.6-.1.2-.2.3.6-.3-.4.4h.3l1-.1c.2%200%20.1-.4.1-.4l-.4-.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23a17c34%22%20fill-rule%3D%22evenodd%22%20d%3D%22M23.5%209.5q-.1.1-.4-1.3L23%205.6l-.2-.6-.2-.5L22%204l-.3-.3q0-.3.8-.5%201%20.2%201%20.5.2.2.5%201.8c0%201.2.1%201.2%200%201.6v1.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%238c6228%22%20fill-rule%3D%22evenodd%22%20d%3D%22M22.6%2010.4h.3q.1.1.7-.4v.5-.1q.3.1-.2%201.1l.3-.1v.8q-.3.2-.4.1V12l-.3-.2q-.4-.3-.5-.8l.2-.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%2392723a%22%20fill-rule%3D%22evenodd%22%20d%3D%22m20.6%207.1-.1.1V7l.2-.2-.1.1.2-.3.3-.1v-.1l.4-.4.3-.2.4-.2q.4%200%20.4-.2l.2-.4q.2%200%20.7%201%20.1.9-.2%201.6%200%20.5-.2.8l-.8.6-.4.7.2.3h.4l-.6.3v-.1h-.3l.2-.2-.3.1-.2.2v-.6l.2-.4.8-1.4.1-1.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23b18e3e%22%20fill-rule%3D%22evenodd%22%20d%3D%22m20.5%207.2-.1.1v.2l-.2.5-.1.2-.1.3V9h-.1.1l1-.7h-.3s.6-.7%201-.8l-.3-.1-.5.1-.1-.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23543e26%22%20fill-rule%3D%22evenodd%22%20d%3D%22m21.4%209.5-.2.3v-.2q-.2-.4-.7-.2V9l.4-.3.4-.5.2-.2q.3-.2.4-.5l-.5.1q.3%200%20.2-.3h.1-.3l-.2.2v-.1H21l-.6.3h.1v-.1l.2-.4.1-.3.4-.2%201.1-.2h.8L23%207l-.5.9-.3.8-.4.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23806031%22%20fill-rule%3D%22evenodd%22%20d%3D%22m23.2%207.4-.6.6.8-1.4V6l-.2.4h-.8l-1%20.2-.4.1-.2.2h-.2v.2l.2-.1.4-.2.7-.2H23V7l-.4.8-.3.5-.3.7-.3.3s-.4.3-.3.4l.6-.5.6-.6.4-.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23b6903c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m13.8%2011.4-.2.3-.4.4.3.3-.2.4v.4l.1.3.3.2.2-.4.2-.5.3-.8.2-.4-.3-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23685026%22%20fill-rule%3D%22evenodd%22%20d%3D%22m14.4%2011.8-.2.2-.3.3-.1.2.1.2q.2%200%20.1.3l.2-.2.5-1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d4b968%22%20fill-rule%3D%22evenodd%22%20d%3D%22m16.2%209.8-.4-.2q-.2-.2-.4-.1v-.2l-.3.1-.2.2h-.1l-.4.3-.4.6q-.4.3-.3.5h.2v.6h.3l.2.4h.3l.7-.4.7-.4.3-.6-.2-.6%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cca849%22%20fill-rule%3D%22evenodd%22%20d%3D%22M15.5%2011.4v-.3l.5-.3.2-.3h-.6l.1-.1v-.1l.4-.2v-.3h.5v.2l.5-.5h.3q.2-.1.4.5v1.6l.2.1-.1.2v.3l-.1.3h-.5v-.1c0-.2-.7-.6-.7-.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23585136%22%20fill-rule%3D%22evenodd%22%20d%3D%22M14.3%2013s.2.4%201.2.4l.7-.1%201-.6.2-.6h-.9l-2%20.9z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23252211%22%20fill-rule%3D%22evenodd%22%20d%3D%22M15%2013.1s-.8.2-.8-.3.5-1%20.6-1.2l.5-.2h.8l.1.4v.9z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c3b378%22%20fill-rule%3D%22evenodd%22%20d%3D%22M15.8%2011.6q0-.2-.5%200-.7.4-.7%201t.7.6h.7l-.2-.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e6d89c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m15.6%2011.7-.4.3-.1.1q-.3.3-.2.7t1%20.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23252211%22%20fill-rule%3D%22evenodd%22%20d%3D%22M15.4%2012v.4q-.2.6.6.7c.4%200%20.7-.6%201-.8l.4-.2-.9-.6q-.9-.6-1.7.1l.8-.1h.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%236f674d%22%20fill-rule%3D%22evenodd%22%20d%3D%22M16.2%2012.3h.2v.1zm0-.3v-.2q.2.1%200%20.2%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23ac924c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.1%2012.1.5.2q.4-.1.6-.4l.3-.3.1-.1.1-.2-.2.2-.3.1-.8.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%239f8e57%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.4%2010.2.4-.1.6-.1.4.2v.5l-.2.5-.3.2-.4-.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23eac970%22%20fill-rule%3D%22evenodd%22%20d%3D%22M9%2010.7h-.2zl.4-.9.2-.2a.1.1%200%200%200-.2%200l.4-.4h.4l.4.1.2-.1v.3l-.6.5-.7.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d7bc6b%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.5%2010.2.8-.1h.1v.1h.1v.1h-.1v.2l.3.1-.2.6-.2.2v.2s.5-.2.7-.7q.3-.8.2-1.4v-.3q-.3-.2-.5%200l-.6.6z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23585136%22%20fill-rule%3D%22evenodd%22%20d%3D%22m8.9%2010.9-.2.3.1.6q0%20.3.5.4h.2l.3-.2.2-.2-.8-.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23453a25%22%20fill-rule%3D%22evenodd%22%20d%3D%22M9.6%2011.9h.2c.1-.1-.5-.8-.5-.8v.7z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%2384754b%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9%2010.8-.2.2v.6q.2.4.5.4l.3-.1-.2-.2V11l.3-.4h-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23252211%22%20fill-rule%3D%22evenodd%22%20d%3D%22m8.8%2011%20.5-.5h.3l-.1.3-.2.3.2.6q.3.2.4.1l.4-.3q.3-.4%200-1l-.6-.3c-.1%200-.7%200-.9.8%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f7f7e7%22%20fill-rule%3D%22evenodd%22%20d%3D%22M15.4%2012.1v-.4l.5-.2.2.1-.3.3q-.3.3-.4.2%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23f8f6de%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.2%2010.6.2.2-.2.2-.2-.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d4c38b%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.2%2010.7-.3.3v.4l.1.2.2.1.1-.2V11q.1-.2-.1-.3%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e2d59d%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.2%2010.7.1.2v.2h.1l.2-.2h.3q0-.2-.2-.2v-.2h-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cbac5a%22%20fill-rule%3D%22evenodd%22%20d%3D%22M13.3%2016.1h.5l.2.2-.1.2s-.3.7.4%201.2l-.5.2q.2%200%20.3.2h.2v.2h-.8l-1%20.2-.1-.2-.5-.1-.2-.5.5-.1v-.4l.3-.2.3-.3.4-.1v-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23d6bc6f%22%20fill-rule%3D%22evenodd%22%20d%3D%22M12.2%2016.2h.2l1.2-.1a8%208%200%200%201%202.9.4h-.1l-1-.2-1.3-.2h-.8zq-.1%200%200%200%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23dfc677%22%20fill-rule%3D%22evenodd%22%20d%3D%22m14.3%2018.2.7.6q.2.4%200%20.4l.2.2q-.2.3-.9.5l-.4.2h-.7v.4h.2l-.5.1-.6.1h.3l.5.1-.3.2-.9.2.2.1-.2.1-.3.4c-.1%200-.9.4-1.1.3-.6-.1-.7-.8-.9-.9h-.5l.2-.2-.6-.3-.2-.4-.4-.6-.5-1h.2l2%20.6%203.3.1.8-1.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23c4a859%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.3%2020.1.2.2h.6v.1h.2l.3-.1h.2q0%20.2%201.1-.1l1-.3.3-.1-.2-.4-.9-.3h-.5l-1.5.3-.8.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23927d49%22%20fill-rule%3D%22evenodd%22%20d%3D%22m8.8%2019.6.3.3.2.2.1-.1.1-.1h.4v-.1h.4l.2-.3h.5l.2.1.3.2.1-.2.2-.2.1-.2.4.1-.1.1v.1l.2.2h.9q.3.2.1%200h.3q.2%200%20.2-.2l-.1-.1.2-.2.3-.5q-.2-.4-.3-.3l-1.6.5-2-.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%236e6342%22%20fill-rule%3D%22evenodd%22%20d%3D%22M7.4%2015v.2l-.1.3S6.9%2016.7%207%2017q.1.5.4.8v.2l.1.5.2.2.5.5.6.5.6-.2.4-.3h.3l.6-.1.8.2.6-.1%201.1-.4h.5l.5-.4q.1-.1-.7-.2-.9.1-1.6.4h-.8l-.4-.3q-.2.1-.5-1-.2-.9.4-1.6v-.2s.4-.4.3-.7c-.1-.4-.6-.3-.6-.3z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%2339331f%22%20fill-rule%3D%22evenodd%22%20d%3D%22M7.9%2016.2v.1l.2.4.1.3h.9l.5.2q.1.2.3.1l.1-.2V17l-.2-.3v-.4h-.4c-.3.1-1.5-.1-1.5-.1%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23292311%22%20fill-rule%3D%22evenodd%22%20d%3D%22M8.5%2017.3v-.8h.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23252211%22%20fill-rule%3D%22evenodd%22%20d%3D%22M7.5%2014.5v1q.2%201%201.2%201T10%2016l.4-.6q.3-.2.4-.5%200-.6-1.2-.8-1-.3-1.6%200-.4%200-.5.5%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%233f3824%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.7%2017.5.1-.2.2.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%232d2815%22%20fill-rule%3D%22evenodd%22%20d%3D%22M9.5%2016.7h.4l.1.1h-.4z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%2382764f%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.6%2016.7-.3-.1h-.1l.1.1v.1h.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%232d2816%22%20fill-rule%3D%22evenodd%22%20d%3D%22m9.3%2017.2.2-.2q.3.1.2.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23574f35%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.4%2016.4-.3.2v-.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%2382764f%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.8%2016.6.1-.1zm.5-.3v.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%236e6342%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.4%2016.6.1.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23585136%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.2%2016h.4v.2zm.4-.4v.3l.2.2h.1v-.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23574f35%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.4%2017h-.2l-.1.1h.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%2382764f%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.5%2017.2V17h.2zm1.1-.2h-.3zm.2-.8h-.1V16h.2m-.6%201.5h.2zm-.3.3v.1zm-.2-.4h.2v.1h-.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23585136%22%20fill-rule%3D%22evenodd%22%20d%3D%22M10.4%2017.5v.1z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23574f35%22%20fill-rule%3D%22evenodd%22%20d%3D%22m10.4%2017.5-.1.1-.2.2v.1q0%20.2.2.2h.2l-.1-.2v-.3%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23252211%22%20fill-rule%3D%22evenodd%22%20d%3D%22m7.4%2017.7%201-.1.9.2%201.6.5.3.2.5.1h.7l1.3-.2.4-.1-1.2.5-1.6-.1-.9-.3-.9-.2q-1.4-.2-2-.5%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m6.5%2016.1-.7.5-.6.5-.6.5.6-.5.6-.5zM5.4%2018l.5-.4.9-.9z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22M5.4%2018q0-.3.3-.4l.2-.2.2-.1.3-.4.3-.2h.1l-.2.1-.1.2q-.3%200-.4.3l-.4.3zm1.5-1.1-1%201zm0%200-.2.3-.3.2-.2.2-.3.3.2-.3.3-.2.2-.3zm0%20.5-.2.6-.7%201.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23cfb66c%22%20fill-rule%3D%22evenodd%22%20d%3D%22m7%2017.4-.1.2-.2.5-.2.2-.2.5-.3.4.2-.4.4-.7v-.3l.2-.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23dec270%22%20fill-rule%3D%22evenodd%22%20d%3D%22M7.9%2019.5q-.2%200-.3.7zm.2.3s0%201-.2%201.4c.1-.5.2-.5.2-1.4m1.7%201.4-.4%201.5z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23e3c677%22%20fill-rule%3D%22evenodd%22%20d%3D%22m12.4%2021%20.9%201.8q.1-.8-1-1.9%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23ecd592%22%20fill-rule%3D%22evenodd%22%20d%3D%22m17.3%2022.4.5-.5q.2%200%20.4-.3.1-.3.6-.4c.5-.2.1-.5.1-.5l.2-.1.3-.5q0-.6-.4-1.1l1.1-.2.6-.2q-.2-.1.1-.8.6-.4.9-1-.3-.1-1.6.2l.2.1-.8.4-.8.7-1.2.3-.5.4-.3.4.1.1-.4.1.7.6-.1.3q0%20.3.8.4h-2l.2.1s-.6%200-.7.2q-.3.4-.3.8l-.1.3q.1.2.4.3l.3.2.5-.2h.6v.2z%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20fill-opacity%3D%22.8%22%20fill-rule%3D%22evenodd%22%20d%3D%22M24.8%2012a8%208%200%200%200-5.6-4.9H7.8v4.3h2.3v9.5H7.8V25h11c2.7%200%204.9-2.7%204.9-2.7%203.4-4.8%201.1-10.3%201.1-10.3m-5.9%207.6s-.8%201.2-1.8%201.2h-1.9v-9.4h2.4s1.1.2%202%202.4c0%200%201%203.2-.7%205.8%22%20clip-rule%3D%22evenodd%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%228%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "ETH": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2231.5%22%20height%3D%2231.5%22%20x%3D%22.3%22%20y%3D%22.3%22%20fill%3D%22%23fff%22%20rx%3D%227.8%22%2F%3E%3Crect%20width%3D%2231.5%22%20height%3D%2231.5%22%20x%3D%22.3%22%20y%3D%22.3%22%20stroke%3D%22%23cecece%22%20stroke-width%3D%22.5%22%20rx%3D%227.8%22%2F%3E%3Cpath%20fill%3D%22%238a92b2%22%20d%3D%22M16%201.5%207%2016.4l9-4.1z%22%2F%3E%3Cpath%20fill%3D%22%2362688f%22%20d%3D%22m16%2012.3-9%204%209%205.4zm9%204.1-9-15v10.9z%22%2F%3E%3Cpath%20fill%3D%22%23454a75%22%20d%3D%22m16%2021.7%209-5.3-9-4.1z%22%2F%3E%3Cpath%20fill%3D%22%238a92b2%22%20d%3D%22m7%2018%209%2012.8v-7.4z%22%2F%3E%3Cpath%20fill%3D%22%2362688f%22%20d%3D%22M16%2023.4v7.4L25%2018z%22%2F%3E%3C%2Fsvg%3E',
+  "GAIA": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23474747%22%20rx%3D%226%22%2F%3E%3Cpath%20fill%3D%22%23000%22%20fill-rule%3D%22evenodd%22%20d%3D%22M16%206.8a9.2%209.2%200%201%201%200%2018.4%209.2%209.2%200%200%201%200-18.4%22%20clip-rule%3D%22evenodd%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20fill-rule%3D%22evenodd%22%20d%3D%22M16.2%202.7h-.4l-.5.7-.9%202.8q-.4%202.1-.7%205l2.3%201.2%202.3-1.1q-.3-3-.7-5a12%2012%200%200%200-1-3zm-.9%2010-1.7-.8v2zM13.1%2011c.4-5.3%201.6-9%202.9-9s2.5%203.7%203%209c4.7-2.3%208.5-3.2%209.1-2%20.7%201.1-2%204-6.3%207%204.3%203%207%205.9%206.3%207-.6%201.2-4.4.3-9.2-2-.4%205.3-1.6%209-2.9%209s-2.5-3.7-3-9c-4.7%202.3-8.5%203.2-9.1%202-.7-1.1%202-4%206.3-7-4.3-3-7-5.9-6.3-7%20.6-1.2%204.4-.3%209.2%202m-2.4%204.6q-2.3-1.5-4-3.1l-2-2.2-.3-.8v-.2l.2-.1h.8q1%200%203%20.5%202%20.7%204.6%202v2.5zm0%20.8q-2.3%201.6-4%203.1l-2%202.2-.3.8v.2l.2.1h.8q1%200%203-.5%202-.7%204.6-2v-2.5zm2.2.6-1.6-1%201.6-1zm.6.4v-2.8L16%2013l2.5%201.5v2.8L16%2019zm0%20.8.1%201.9%201.7-.9zm2.5%201.4-2.3%201.1q.3%203%20.7%205a12%2012%200%200%200%201%203l.4.6h.4l.5-.7.9-2.8q.4-2.1.7-5zm3%20.8q2.6%201.2%204.7%201.9l2.9.6h.8l.2-.2v-.2l-.3-.8-2-2.2q-1.7-1.5-4-3.1L19%2017.8zm2.3-4.8q2.3-1.5%204-3.1l2-2.2.3-.8v-.2l-.2-.1h-.8q-1%200-3%20.5-2%20.7-4.6%202v2.5zM19%2015l1.6%201-1.6%201zm-.6-1.2-.1-1.9-1.7.9zm-.1%206.3-1.7-.9%201.8-1z%22%20clip-rule%3D%22evenodd%22%20opacity%3D%22.7%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20fill-rule%3D%22evenodd%22%20d%3D%22M7%2012a1%201%200%201%201%200%202%201%201%200%200%201%200-2m15.7-3.3a1%201%200%201%201%200%202%201%201%200%200%201%200-2M14%2024.2a1%201%200%201%201%200%202%201%201%200%200%201%200-2m2-9.9a1.7%201.7%200%201%201%200%203.4%201.7%201.7%200%200%201%200-3.4%22%20clip-rule%3D%22evenodd%22%2F%3E%3C%2Fsvg%3E',
+  "LTC": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22%233d65ae%22%20d%3D%22M28%200a4%204%200%200%201%204%204v24a4%204%200%200%201-4%204H4a4%204%200%200%201-4-4V4a4%204%200%200%201%204-4zM11.2%2016l-2%20.7-.5%202.4%201.9-.7-.5%201.8-.8%203.2h13.2l.8-3.2h-8.2l1-3.8%202.4-.9.6-2.4-2.4.9%201.8-6.6h-5z%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "SOL": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2231.5%22%20height%3D%2231.5%22%20x%3D%22.3%22%20y%3D%22.3%22%20fill%3D%22%23fff%22%20rx%3D%227.8%22%2F%3E%3Crect%20width%3D%2231.5%22%20height%3D%2231.5%22%20x%3D%22.3%22%20y%3D%22.3%22%20stroke%3D%22%23cecece%22%20stroke-width%3D%22.5%22%20rx%3D%227.8%22%2F%3E%3Cpath%20fill%3D%22url(%23a)%22%20d%3D%22M26.5%2021.3%2023%2025l-.6.3H5.8l-.2-.1-.2-.2v-.4L9%2020.9l.6-.2h16.8l.2.2zM23%2014l-.6-.3H5.6l-.2.2v.5L9%2018l.6.3h16.8l.2-.2v-.5zM5.8%2011.3h16.6l.6-.2%203.5-3.7v-.6h-17L9%207l-3.5%203.7v.6z%22%2F%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22a%22%20x1%3D%227.2%22%20x2%3D%2224.1%22%20y1%3D%2225.7%22%20y2%3D%226.1%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20offset%3D%22.1%22%20stop-color%3D%22%239945ff%22%2F%3E%3Cstop%20offset%3D%22.3%22%20stop-color%3D%22%238752f3%22%2F%3E%3Cstop%20offset%3D%22.5%22%20stop-color%3D%22%235497d5%22%2F%3E%3Cstop%20offset%3D%22.6%22%20stop-color%3D%22%2343b4ca%22%2F%3E%3Cstop%20offset%3D%22.7%22%20stop-color%3D%22%2328e0b9%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%2319fb9b%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "THOR": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Cpath%20fill%3D%22url(%23b)%22%20d%3D%22M29.9%200H2C1%200%200%201%200%202.1V30c0%201%201%202%202.1%202H30c1.1%200%202.1-1%202.1-2.1V2C32%201%2031%200%2029.9%200%22%2F%3E%3Cpath%20fill%3D%22%23fff%22%20d%3D%22m6%2028%2016.7-7-5.3-5.4zm6.1-17.8%205.3%205.4L27%204z%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22b%22%20x1%3D%2232%22%20x2%3D%220%22%20y1%3D%2216%22%20y2%3D%2216%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20stop-color%3D%22%233f9%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%230cf%22%2F%3E%3C%2FlinearGradient%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%228%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "TRON": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23eb332a%22%20rx%3D%224%22%2F%3E%3Cpath%20fill%3D%22%23fefefe%22%20fill-rule%3D%22evenodd%22%20d%3D%22m5.3%204.3%209.5%2024L28%2012.1l-4.7-4.4zm3.4%202%2013%202.3-5%204.3zm-1%20.8%208.4%207-1.3%2010.7zm15.3%202%202.8%202.7-7.5%201.3zm-5.7%205.5%208.3-1.5L16%2024.8z%22%20clip-rule%3D%22evenodd%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E',
+  "XRP": 'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20fill%3D%22none%22%20viewBox%3D%220%200%2032%2032%22%3E%3Cg%20clip-path%3D%22url(%23a)%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23000%22%20rx%3D%224%22%2F%3E%3Cpath%20fill%3D%22%23ebebf0%22%20d%3D%22m18%2019.6%205.1%205h3.1L19.6%2018a5%205%200%200%200-7.2%200l-6.6%206.7h3l5.2-5c1-1.2%203-1.2%204%200m-2-4.2a5%205%200%200%200%203.6-1.5l6.6-6.7h-3l-5.2%205a3%203%200%200%201-4%200l-5.1-5H5.8l6.6%206.7a5%205%200%200%200%203.6%201.5%22%2F%3E%3C%2Fg%3E%3Cdefs%3E%3CclipPath%20id%3D%22a%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20fill%3D%22%23fff%22%20rx%3D%226%22%2F%3E%3C%2FclipPath%3E%3C%2Fdefs%3E%3C%2Fsvg%3E'
+};
+
+function chainLogoFor(chain) {
+  return CHAIN_LOGOS[String(chain || '').toUpperCase()] || null;
+}
+
+// Das Logo richtet sich AUSSCHLIESSLICH nach der Chain: BASE.ETH ist Ether auf Base und
+// bekommt deshalb das Base-Logo, nicht das Ethereum-Logo -- sonst wäre auf einen Blick nicht
+// unterscheidbar, über welche Chain das Asset läuft (BASE.ETH vs. ETH.ETH vs. ARB.ETH).
+// Welcher Coin es ist, steht als Ticker direkt daneben.
+
+// Zeigt das Chain-Logo. Bei Token (USDC, USDT, ...) zusätzlich klein in der Ecke, damit
+// erkennbar bleibt, ÜBER WELCHE CHAIN der Token läuft -- USDC auf Ethereum und USDC auf
+// Avalanche sind verschiedene Assets und dürfen nicht verwechselt werden.
+// Für Token selbst liegen keine Logos vor (die Token-Liste des Referenz-Projekts erfordert
+// einen API-Schlüssel); dort steht das Kürzel im Kreis, darüber das Chain-Abzeichen.
+function AssetLogo({ chain, ticker, size = 28 }) {
+  const logo = chainLogoFor(chain);
+
+  if (logo) {
+    return /*#__PURE__*/React.createElement("img", {
+      src: logo,
+      alt: chain,
+      width: size,
+      height: size,
+      style: { width: size, height: size, borderRadius: '50%', flexShrink: 0, display: 'block' }
+    });
+  }
+
+  // Kein Logo für diese Chain hinterlegt -> Kürzel im Kreis als neutraler Platzhalter.
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: size, height: size, borderRadius: '50%', flexShrink: 0, display: 'flex',
+      alignItems: 'center', justifyContent: 'center',
+      background: '#16292B', border: '1px solid #24484A',
+      color: '#B7C7C8', fontSize: size * 0.3, fontWeight: 800,
+      fontFamily: "'Inter', sans-serif", letterSpacing: '-0.02em'
+    }
+  }, String(ticker || '?').slice(0, 4));
+}
+
 // Anzeige-Nachkommastellen je Asset: ETH mit 4, alles Uebrige mit 2 Stellen.
 // Sicherheitsnetz: Betraege, die dabei auf 0 gerundet wuerden (z.B. kleine BTC-Mengen),
 // bekommen so viele Stellen wie noetig -- sonst stuende dort irrefuehrend "0.00".
@@ -7125,13 +8600,26 @@ function sortSwapAssets(list) {
 // ---------------------------------------------------------------------------
 // Kompaktes Trigger-Kärtchen -- fügt sich in die bestehende Kachel-Struktur ein
 // ---------------------------------------------------------------------------
-function SwapTriggerCard({ lang, onOpen }) {
+// Zeigt eine NICHT-interaktive Vorschau im selben Stil wie das echte Interface (siehe
+// fromBox/toBox in SwapModal weiter unten: gleiche Box-/Label-/Chip-Optik) -- "You send" /
+// "You receive" mit dem zuletzt gewählten Von/Nach-Asset und Betrag. Bewusst als reine <div>s
+// ohne Input-Felder/Buttons AUFGEBAUT (nichts darin ist einzeln anklickbar) -- die ganze Karte
+// selbst ist der Klick-Auslöser, der das vollständige Interface als zentriertes Popup öffnet
+// (siehe swapModal). Vorher gab es hier einen skalierten, aber echten interaktiven Mini-
+// Nachbau (ScaledBox) -- das ließ sich unangenehm bedienen (winzige Klickflächen) und wirkte
+// wie ein halbfertiges eigenständiges Interface statt einer klaren Vorschau.
+function SwapTriggerCard({ lang, onOpen, fromAsset, toAsset, amount, quote }) {
+  const fromInfo = parseSwapAsset(fromAsset);
+  const toInfo = parseSwapAsset(toAsset);
+  const expectedOutBase = quote ? Number(quote.expected_amount_out) : null;
+  const expectedOutHuman = Number.isFinite(expectedOutBase) ? formatSwapAmount(expectedOutBase / 1e8, toInfo.ticker, lang) : null;
+
   const headerRow = /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
-      gap: 10,
-      marginBottom: 10
+      justifyContent: 'space-between',
+      marginBottom: 11
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7141,58 +8629,112 @@ function SwapTriggerCard({ lang, onOpen }) {
       letterSpacing: '0.04em',
       textTransform: 'uppercase'
     }
-  }, t('swapTitle', lang)));
-
-  const teaser = /*#__PURE__*/React.createElement("div", {
+  }, t('swapTitle', lang)), /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#8FA9AB',
-      fontSize: 10.5,
-      lineHeight: 1.45,
-      marginBottom: 14
-    }
-  }, t('swapSubtitle', lang));
-
-  const openButton = /*#__PURE__*/React.createElement("button", {
-    onClick: onOpen,
-    style: {
-      width: '100%',
+      width: 22,
+      height: 22,
+      borderRadius: '50%',
+      background: 'rgba(0,222,225,0.14)',
+      border: '1px solid rgba(0,222,225,0.4)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 8,
-      background: 'linear-gradient(135deg, #14F1F4 0%, #00C2CC 100%)',
-      color: '#04191A',
-      border: 'none',
-      borderRadius: 10,
-      padding: '12px 16px',
-      fontSize: 12.5,
-      fontWeight: 800,
-      boxShadow: '0 6px 18px -8px rgba(0,222,225,0.7)',
-      cursor: 'pointer',
-      fontFamily: "'Inter', sans-serif"
+      color: '#00DEE1',
+      fontSize: 10,
+      flexShrink: 0
     }
-  }, /*#__PURE__*/React.createElement(IconSwapArrows, {
-    size: 14
-  }), t('swapHere', lang));
+  }, "\u25BE"));
+
+  const boxStyle = {
+    background: '#0D2426',
+    border: '1px solid #24484A',
+    borderRadius: 14,
+    padding: '12px 14px'
+  };
+  const labelStyle = {
+    fontSize: 10,
+    fontWeight: 700,
+    color: '#9FBDBF',
+    letterSpacing: '0.03em',
+    textTransform: 'uppercase',
+    marginBottom: 8
+  };
+  // Statischer Asset-Chip -- optisch identisch zum echten assetButton in SwapModal (gleiches
+  // AssetLogo, gleiche Maße), aber als <div> statt <button>: kein onClick, kein Chevron, keine
+  // Hover-Reaktion. Nichts hier soll für sich anklickbar wirken.
+  const staticChip = info => /*#__PURE__*/React.createElement("div", {
+    style: {
+      flexShrink: 0,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      background: '#173033',
+      border: '1px solid #2E5F62',
+      borderRadius: 999,
+      padding: '5px 11px'
+    }
+  }, /*#__PURE__*/React.createElement(AssetLogo, {
+    chain: info.chain,
+    ticker: info.ticker,
+    size: 20
+  }), /*#__PURE__*/React.createElement("span", {
+    style: { color: '#FFFFFF', fontSize: 12, fontWeight: 700, fontFamily: "'Inter', sans-serif" }
+  }, info.ticker));
+  const valueRow = (value, color) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      color,
+      fontSize: 20,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif",
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      flex: 1,
+      minWidth: 0
+    }
+  }, value);
+
+  const sendBox = /*#__PURE__*/React.createElement("div", {
+    style: boxStyle
+  }, /*#__PURE__*/React.createElement("div", { style: labelStyle }, t('swapFromLabel', lang)),
+  /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', alignItems: 'center', gap: 10 }
+  }, valueRow(amount || '0.0', '#FFFFFF'), staticChip(fromInfo)));
+
+  const receiveBox = /*#__PURE__*/React.createElement("div", {
+    style: boxStyle
+  }, /*#__PURE__*/React.createElement("div", { style: labelStyle }, t('swapToLabel', lang)),
+  /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', alignItems: 'center', gap: 10 }
+  }, valueRow(expectedOutHuman || '0.0', expectedOutHuman ? '#FFFFFF' : '#4C6062'), staticChip(toInfo)));
 
   return /*#__PURE__*/React.createElement("div", {
     className: "tp-side-card",
+    onClick: onOpen,
+    role: "button",
+    tabIndex: 0,
+    onKeyDown: e => {
+      if (e.key === 'Enter' || e.key === ' ') onOpen();
+    },
     style: {
       ...cardShellStyle,
-      padding: '18px 20px',
+      padding: '14px 16px',
+      cursor: 'pointer',
       // Kraeftiger als die reinen Daten-Karten: leichter Tuerkis-Schimmer im Verlauf und im
       // Rahmen, damit die Aktions-Karte sich klar abhebt statt blass mitzulaufen.
       background: 'linear-gradient(165deg, #0E2A2C 0%, #0A1618 100%)',
       border: '1px solid #24565A',
       boxShadow: '0 1px 0 rgba(255,255,255,0.06) inset, 0 14px 30px -18px rgba(0,0,0,0.8), 0 0 0 1px rgba(0,222,225,0.07)'
     }
-  }, headerRow, teaser, openButton);
+  }, headerRow, /*#__PURE__*/React.createElement("div", {
+    style: { display: 'flex', flexDirection: 'column', gap: 8 }
+  }, sendBox, receiveBox));
 }
 
 // ---------------------------------------------------------------------------
 // Asset-Auswahl: Suche + Chain-Filter + kompakte Liste
 // ---------------------------------------------------------------------------
-function AssetPickerView({ lang, assets, selected, onSelect }) {
+function AssetPickerView({ lang, assets, selected, onSelect, haltedChains, note }) {
   const [query, setQuery] = useState('');
   const [chainFilter, setChainFilter] = useState('ALL');
 
@@ -7266,19 +8808,27 @@ function AssetPickerView({ lang, assets, selected, onSelect }) {
 
   const rows = visible.map(a => {
     const isSel = a.identifier === selected;
+    const isHalted = haltedChains && haltedChains.has(String(a.chain).toUpperCase());
     return /*#__PURE__*/React.createElement("button", {
       key: a.identifier,
-      className: "tp-swap-row",
-      onClick: () => onSelect(a.identifier),
+      className: isHalted ? undefined : "tp-swap-row",
+      disabled: isHalted,
+      title: isHalted ? t('swapChainPaused', lang) : undefined,
+      onClick: isHalted ? undefined : () => onSelect(a.identifier),
       style: {
         width: '100%', display: 'flex', alignItems: 'center',
         justifyContent: 'space-between', gap: 10,
         background: isSel ? 'rgba(0,222,225,0.08)' : 'transparent',
         border: `1px solid ${isSel ? 'rgba(0,222,225,0.35)' : 'transparent'}`,
-        borderRadius: 10, padding: '10px 12px', cursor: 'pointer',
+        borderRadius: 10, padding: '10px 12px',
+        cursor: isHalted ? 'not-allowed' : 'pointer',
+        opacity: isHalted ? 0.45 : 1,
         textAlign: 'left', fontFamily: "'Inter', sans-serif"
       }
     }, /*#__PURE__*/React.createElement("span", {
+      style: { display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }
+    }, /*#__PURE__*/React.createElement(AssetLogo, { chain: a.chain, ticker: a.ticker, size: 28 }),
+    /*#__PURE__*/React.createElement("span", {
       style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, minWidth: 0 }
     }, /*#__PURE__*/React.createElement("span", {
       style: { color: '#FFFFFF', fontSize: 12.5, fontWeight: 700, lineHeight: 1.15 }
@@ -7287,7 +8837,14 @@ function AssetPickerView({ lang, assets, selected, onSelect }) {
         color: '#5C7274', fontSize: 9.5, lineHeight: 1.15,
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
       }
-    }, a.chain)), isSel && /*#__PURE__*/React.createElement("span", {
+    }, a.chain))), isHalted ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        flexShrink: 0, fontSize: 8.5, fontWeight: 700, color: '#D9A441',
+        background: 'rgba(217,164,65,0.14)', border: '1px solid rgba(217,164,65,0.35)',
+        borderRadius: 5, padding: '2px 6px', whiteSpace: 'nowrap',
+        textTransform: 'uppercase', letterSpacing: '0.03em'
+      }
+    }, t('swapPausedBadge', lang)) : isSel && /*#__PURE__*/React.createElement("span", {
       style: { flexShrink: 0, color: '#00DEE1' }
     }, /*#__PURE__*/React.createElement(IconCheck, { size: 12 })));
   });
@@ -7299,12 +8856,20 @@ function AssetPickerView({ lang, assets, selected, onSelect }) {
   const list = /*#__PURE__*/React.createElement("div", {
     className: "tp-swap-list",
     style: {
-      marginTop: 10, maxHeight: 320, overflowY: 'auto',
+      marginTop: 10, maxHeight: 320, overflowY: 'auto', overscrollBehavior: 'contain',
       display: 'flex', flexDirection: 'column', gap: 1
     }
   }, rows, emptyState);
 
-  return /*#__PURE__*/React.createElement("div", null, searchField, chainChips, list);
+  const noteBox = note && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10, fontSize: 10, color: '#7FA0A2', lineHeight: 1.45,
+      background: 'rgba(0,222,225,0.05)', border: '1px solid rgba(0,222,225,0.18)',
+      borderRadius: 8, padding: '7px 10px'
+    }
+  }, note);
+
+  return /*#__PURE__*/React.createElement("div", null, noteBox, searchField, chainChips, list);
 }
 
 // ---------------------------------------------------------------------------
@@ -7312,8 +8877,8 @@ function AssetPickerView({ lang, assets, selected, onSelect }) {
 // ---------------------------------------------------------------------------
 function SwapModal(props) {
   const {
-    isOpen, onClose, lang, step,
-    memolessAssets, memolessAssetsLoading, memolessAssetsError, pools,
+    isOpen, onClose, lang, step, inline,
+    memolessAssets, memolessAssetsLoading, memolessAssetsError, pools, haltedChains, globalHalt,
     fromAsset, setFromAsset, toAsset, setToAsset,
     amount, setAmount, destination, setDestination,
     quoteLoading, quoteError, quote, quoteAt, quoteTtlMs, onRefreshQuote, runePrice, assetUsd,
@@ -7323,7 +8888,37 @@ function SwapModal(props) {
 
   const [pickerFor, setPickerFor] = useState(null); // null | 'from' | 'to'
 
-  if (!isOpen) return null;
+  // Zwei Darstellungsarten aus einer Komponente:
+  //  - inline (Handy): die Karte füllt die ganze Tab-Seite, kein Overlay, kein Schließen
+  //  - Fenster (PC): mittig über der Seite, abgedunkelter Hintergrund, Klick daneben schließt
+  const renderShell = (...children) => {
+    const card = /*#__PURE__*/React.createElement("div", {
+      onClick: inline ? undefined : e => e.stopPropagation(),
+      className: "tp-swap-scroll",
+      style: {
+        ...cardShellStyle,
+        textAlign: 'left',
+        padding: '20px 20px 18px',
+        maxWidth: inline ? 'none' : 400,
+        width: '100%',
+        maxHeight: inline ? 'none' : '88vh',
+        overflowY: inline ? 'visible' : 'auto',
+        borderRadius: 22,
+        border: '1px solid #1E3A3C',
+        boxShadow: '0 1px 0 rgba(255,255,255,0.05) inset, 0 24px 60px -20px rgba(0,0,0,0.85), 0 0 0 1px rgba(0,222,225,0.05)'
+      }
+    }, ...children);
+    if (inline) return card;
+    return ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
+      onClick: onClose,
+      style: {
+        position: 'fixed', inset: 0, zIndex: 220, background: 'rgba(0,0,0,0.65)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, touchAction: 'none'
+      }
+    }, card), document.body);
+  };
+
+  if (!inline && !isOpen) return null;
 
   // USD-Kurs je Asset: RUNE aus der Preisanzeige, alles Übrige aus den Pool-Kursen.
   const usdPriceOf = assetId => {
@@ -7354,10 +8949,17 @@ function SwapModal(props) {
   const enteredAmountNum = parseFloat(amount);
   const belowMemolessMin = memolessMin != null && Number.isFinite(enteredAmountNum) && enteredAmountNum > 0 && enteredAmountNum < memolessMin;
 
+  // Auch bereits gewählte Assets prüfen: eine Chain kann mitten in der Sitzung pausiert werden
+  // (Wartung/Update). Dann darf nicht weiter bestätigt werden, egal was vorher ausgewählt war.
+  const fromChainHalted = haltedChains && haltedChains.has(parseSwapAsset(fromAsset).chain.toUpperCase());
+  const toChainHalted = haltedChains && haltedChains.has(parseSwapAsset(toAsset).chain.toUpperCase());
+  const haltBlocked = Boolean(globalHalt || fromChainHalted || toChainHalted);
+
   const fromInfo = parseSwapAsset(fromAsset);
   const toInfo = parseSwapAsset(toAsset);
 
-  const closeButton = /*#__PURE__*/React.createElement("button", {
+  // Im Inline-Modus (Handy-Seite) gibt es nichts zu schließen -- die Karte IST die Seite.
+  const closeButton = inline ? null : /*#__PURE__*/React.createElement("button", {
     onClick: onClose,
     "aria-label": t('closeWord', lang),
     style: {
@@ -7411,45 +9013,34 @@ function SwapModal(props) {
     // Pool-Liste verwendet -- sonst waere bei "Du sendest" gar nichts auswaehlbar. Beides sind
     // gueltige Quell-Assets; ob der konkrete Swap memoless moeglich ist, zeigt spaetestens die
     // Registrierung beim Bestaetigen (mit klarer Fehlermeldung statt leerer Liste).
+    // WICHTIG: Die Sende-Seite MUSS sich strikt an die Memoless-Liste halten. Dieses Verfahren
+    // erkennt einen Swap an einer Referenznummer, die an die letzten Stellen des Betrags
+    // angehängt wird -- das funktioniert nur bei den Assets, die der Dienst ausdrücklich
+    // meldet (Stand heute 15 Stück, ausnahmslos native Coins, KEINE Token wie USDC/USDT).
+    // Ein früherer Versuch, hier zusätzlich die Pool-Liste einzumischen, hätte Assets zur
+    // Auswahl gestellt, bei denen die Registrierung zwangsläufig fehlschlägt.
     const memolessIds = (memolessAssets || []).map(a => a.asset);
     const poolIds = (pools || []).map(p => p.asset);
     // WICHTIG: /thorchain/pools listet THOR.RUNE NICHT mit -- RUNE ist die Basis-Waehrung des
     // Netzwerks und hat keinen eigenen Pool gegen sich selbst. Ohne diese Ergaenzung fehlte
     // ausgerechnet RUNE komplett in der Auswahl.
     const withRune = ids => ids.includes('THOR.RUNE') ? ids : ['THOR.RUNE', ...ids];
-    const pickerAssets = pickerFor === 'from' ? withRune(memolessIds.length ? memolessIds : poolIds) : withRune(poolIds);
+    // Empfangen (to) geht an jedes Pool-Asset -- dort gilt die Memoless-Einschränkung nicht,
+    // weil nur die EINZAHLUNG über das Referenz-Verfahren läuft, die Auszahlung nicht.
+    const pickerAssets = pickerFor === 'from' ? (memolessIds.length ? memolessIds : withRune(poolIds)) : withRune(poolIds);
     const pickerView = /*#__PURE__*/React.createElement(AssetPickerView, {
       lang,
+      note: pickerFor === 'from' ? t('swapSendAssetsNote', lang) : null,
       assets: pickerAssets,
       selected: pickerFor === 'from' ? fromAsset : toAsset,
+      haltedChains,
       onSelect: id => {
         if (pickerFor === 'from') setFromAsset(id);
         else setToAsset(id);
         setPickerFor(null);
       },
     });
-    return ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
-      onClick: onClose,
-      style: {
-        position: 'fixed', inset: 0, zIndex: 220, background: 'rgba(0,0,0,0.65)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      onClick: e => e.stopPropagation(),
-      className: "tp-swap-scroll",
-      style: {
-        ...cardShellStyle,
-        textAlign: 'left',
-        padding: '20px 20px 18px',
-        maxWidth: 400,
-        width: '100%',
-        maxHeight: '88vh',
-        overflowY: 'auto',
-        borderRadius: 22,
-        border: '1px solid #1E3A3C',
-        boxShadow: '0 1px 0 rgba(255,255,255,0.05) inset, 0 24px 60px -20px rgba(0,0,0,0.85), 0 0 0 1px rgba(0,222,225,0.05)'
-      }
-    }, pickerHeader, pickerView)), document.body);
+    return renderShell(pickerHeader, pickerView);
   }
 
   // ---- Asset-Auswahl-Button (statt <select>, wie im Referenz-Interface) ----
@@ -7464,7 +9055,8 @@ function SwapModal(props) {
     },
     onMouseOver: e => { e.currentTarget.style.borderColor = 'rgba(0,222,225,0.5)'; },
     onMouseOut: e => { e.currentTarget.style.borderColor = '#24484A'; }
-  }, /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(AssetLogo, { chain: info.chain, ticker: info.ticker, size: 24 }),
+  /*#__PURE__*/React.createElement("span", {
     style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }
   }, /*#__PURE__*/React.createElement("span", {
     style: { color: '#FFFFFF', fontSize: 13, fontWeight: 700, lineHeight: 1.15 }
@@ -7621,8 +9213,8 @@ function SwapModal(props) {
   const errBox = (msg, key) => msg && /*#__PURE__*/React.createElement("div", {
     key,
     style: {
-      marginTop: 10, fontSize: 11.5, color: '#C97A7A',
-      background: 'rgba(201,122,122,0.1)', border: '1px solid rgba(201,122,122,0.3)',
+      marginTop: 10, fontSize: 11.5, color: '#E0B268',
+      background: 'rgba(224,178,104,0.1)', border: '1px solid rgba(224,178,104,0.3)',
       borderRadius: 8, padding: '8px 10px'
     }
   }, msg);
@@ -7682,7 +9274,16 @@ function SwapModal(props) {
   const busy = quoteLoading || registerLoading;
   // Unter dem Mindestbetrag darf gar nicht erst bestätigt werden -- sonst würde THORChain den
   // Betrag später eigenmächtig anheben (verwirrend) oder der Swap schlägt fehl.
-  const blocked = busy || belowMemolessMin;
+  const blocked = busy || belowMemolessMin || haltBlocked;
+  const haltNote = haltBlocked && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10, fontSize: 11, color: '#D9A441',
+      background: 'rgba(217,164,65,0.1)', border: '1px solid rgba(217,164,65,0.35)',
+      borderRadius: 9, padding: '9px 11px', lineHeight: 1.45
+    }
+  }, globalHalt ? t('swapGlobalPaused', lang) : t('swapChainPausedDetail', lang)
+    .replace('{chain}', [fromChainHalted ? parseSwapAsset(fromAsset).chain : null, toChainHalted ? parseSwapAsset(toAsset).chain : null].filter(Boolean).join(', ')));
+
   const minBlockNote = belowMemolessMin && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 10, fontSize: 11, color: '#D9A441',
@@ -7719,7 +9320,7 @@ function SwapModal(props) {
   const formContent = /*#__PURE__*/React.createElement(React.Fragment, null,
     stackedBoxes, destinationField,
     errBox(quoteError, 'qerr'),
-    detailsBox, minWarning, minBlockNote, errBox(registerError, 'rerr'),
+    detailsBox, minWarning, haltNote, minBlockNote, errBox(registerError, 'rerr'),
     mainButton, backLink);
 
   // ---- Deposit-Ansicht ----
@@ -7796,7 +9397,7 @@ function SwapModal(props) {
       }
     }, deposit.address), revealed && /*#__PURE__*/React.createElement(CopyIconButton, { value: deposit.address })),
     expired ? /*#__PURE__*/React.createElement("div", {
-      style: { fontSize: 11.5, color: '#C97A7A', fontWeight: 600 }
+      style: { fontSize: 11.5, color: '#E0B268', fontWeight: 600 }
     }, t('swapExpired', lang)) : countdown && /*#__PURE__*/React.createElement("div", {
       style: { fontSize: 10.5, color: '#7C9698' }
     }, t('swapExpiresIn', lang), ": ", /*#__PURE__*/React.createElement("span", {
@@ -7823,28 +9424,7 @@ function SwapModal(props) {
 
   const body = step === 'deposit' && deposit ? depositContent : formContent;
 
-  return ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
-    onClick: onClose,
-    style: {
-      position: 'fixed', inset: 0, zIndex: 220, background: 'rgba(0,0,0,0.65)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    onClick: e => e.stopPropagation(),
-    className: "tp-swap-scroll",
-    style: {
-      ...cardShellStyle,
-      textAlign: 'left',
-      padding: '20px 20px 18px',
-      maxWidth: 400,
-      width: '100%',
-      maxHeight: '88vh',
-      overflowY: 'auto',
-      borderRadius: 22,
-      border: '1px solid #1E3A3C',
-      boxShadow: '0 1px 0 rgba(255,255,255,0.05) inset, 0 24px 60px -20px rgba(0,0,0,0.85), 0 0 0 1px rgba(0,222,225,0.05)'
-    }
-  }, header, body, poweredBy)), document.body);
+  return renderShell(header, body, poweredBy);
 }
 
 // Kleiner, wiederverwendbarer Kopier-Button für die Deposit-Ansicht.
@@ -7872,11 +9452,11 @@ function CopyIconButton({ value }) {
     onClick: doCopy,
     style: {
       flexShrink: 0,
-      background: copied ? 'rgba(111,191,143,0.16)' : 'rgba(0,222,225,0.1)',
-      border: `1px solid ${copied ? 'rgba(111,191,143,0.45)' : 'rgba(0,222,225,0.35)'}`,
+      background: copied ? 'rgba(111,227,229,0.16)' : 'rgba(0,222,225,0.1)',
+      border: `1px solid ${copied ? 'rgba(111,227,229,0.45)' : 'rgba(0,222,225,0.35)'}`,
       borderRadius: 6, width: 24, height: 24, display: 'flex',
       alignItems: 'center', justifyContent: 'center',
-      color: copied ? '#6FBF8F' : '#00DEE1', cursor: 'pointer', padding: 0
+      color: copied ? '#6FE3E5' : '#00DEE1', cursor: 'pointer', padding: 0
     }
   }, copied ? /*#__PURE__*/React.createElement(IconCheck, { size: 11 }) : /*#__PURE__*/React.createElement(IconCopy, { size: 11 }));
 }
@@ -7933,6 +9513,42 @@ function ThorchainPortfolio() {
     setWallets(prev => prev.filter(w => w !== addr));
   };
 
+  // Benutzerdefinierte Wallet-Namen ("Custom 1", "Custom 2" o.ä. lassen sich sonst nicht
+  // auseinanderhalten, wenn mehrere Wallets getrackt werden -- nur die rohe, abgeschnittene
+  // Adresse zu zeigen macht es schwer, sich zu merken, welche Wallet welche ist). Getrennt von
+  // "wallets" (der reinen Adressliste) gespeichert, über die Adresse als Schlüssel verknüpft --
+  // bleibt dadurch auch erhalten, wenn Wallets in "wallets" umsortiert werden.
+  const [walletLabels, setWalletLabels] = useState(() => {
+    try {
+      const raw = localStorage.getItem('tp_wallet_labels');
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('tp_wallet_labels', JSON.stringify(walletLabels));
+    } catch (e) {}
+  }, [walletLabels]);
+  const renameWallet = (addr, label) => {
+    const trimmed = (label || '').trim();
+    setWalletLabels(prev => {
+      const next = { ...prev };
+      if (trimmed) {
+        next[addr] = trimmed.slice(0, 40); // Sicherheitsnetz gegen unbegrenzt lange Namen
+      } else {
+        delete next[addr]; // leerer Name -> zurück zum Standardnamen ("Wallet N")
+      }
+      return next;
+    });
+  };
+  // Welche Wallet gerade im Umbenennen-Modus ist (Adresse oder null) + der Zwischenstand des
+  // Eingabefelds, während getippt wird -- erst bei Bestätigen (Enter/Blur) landet der Wert
+  // tatsächlich in walletLabels.
+  const [editingWalletAddr, setEditingWalletAddr] = useState(null);
+  const [editingWalletValue, setEditingWalletValue] = useState('');
+
   // --- Ø Kaufpreis: manuell erfasste RUNE-Käufe (CEX + DEX), lokal gespeichert. ---
   // Warum manuell? On-Chain-Swaps über THORChain könnten theoretisch automatisch erkannt
   // werden, aber ein Kauf über eine Börse (CEX) hinterlässt auf der Blockchain keine Spur --
@@ -7954,6 +9570,7 @@ function ThorchainPortfolio() {
   }, [purchases]);
   const [purchaseCardOpen, setPurchaseCardOpen] = useState(false);
   const [purchaseFormOpen, setPurchaseFormOpen] = useState(false);
+  const [purchaseSettingsOpen, setPurchaseSettingsOpen] = useState(false); // Kostenbasis-/Reward-Bewertungsmethode -- standardmäßig eingeklappt, da selten geändert
   const [purchaseListExpanded, setPurchaseListExpanded] = useState(false);
   const [selectedPurchaseIds, setSelectedPurchaseIds] = useState([]);
   // Eigenes, zum App-Design passendes Bestätigungsfenster statt des nativen
@@ -8055,6 +9672,290 @@ function ThorchainPortfolio() {
   const [donationCopied, setDonationCopied] = useState(null);
   const [donationOpen, setDonationOpen] = useState(false);
 
+  // Entscheidet, an WELCHER Stelle die Swap-Karte im Baum landet: auf dem PC unter dem Chart,
+  // auf dem Handy als eigene dritte Seite. Bewusst in JS statt per CSS ein-/auszublenden --
+  // so existiert die Karte immer nur EINMAL im DOM und kann gar nicht doppelt erscheinen.
+  // Drei "Seiten" auf dem Handy (Chart / Details / Swap), damit man nicht mehr scrollen muss --
+  // per Tab-Button oder Wischgeste wechselbar. Auf dem Desktop bleibt alles nebeneinander
+  // sichtbar (siehe .tp-panel Regeln im <style>-Block) -- die Swap-Karte ordnet sich dort
+  // einfach als drittes Element neben Chart und Sidebar ein (tp-content-row hat flexWrap, rutscht
+  // bei zu wenig Platz automatisch in eine neue Zeile, statt das Layout zu sprengen).
+  const [mobileTab, setMobileTab] = useState('chart'); // 'chart' | 'details' | 'swap'
+
+  // Beim Seitenwechsel nach oben springen. Die drei Seiten sind unterschiedlich hoch -- ohne
+  // das behält der Browser die alte Scroll-Position bei und korrigiert sie erst, wenn die neue
+  // (kürzere) Seite steht. Genau das sah aus, als würde die Seite "höher starten und sich
+  // danach korrigieren".
+  //
+  // GILT ABER NUR für den Wechsel über die Tab-Buttons oben. Bei einer Wisch-Geste weiter unten
+  // im Inhalt (z.B. nachdem man auf der Chart-Seite runtergescrollt hat) wäre ein Sprung nach
+  // oben genau das Gegenteil von dem, was man erwartet -- man wischt seitlich, bleibt aber auf
+  // derselben Höhe, wie bei einem horizontalen Karussell. skipTabScrollResetRef wird direkt vor
+  // dem Wisch-ausgelösten setMobileTab() gesetzt und hier einmalig konsumiert.
+  const skipTabScrollResetRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isNarrowViewport) return;
+    if (skipTabScrollResetRef.current) {
+      skipTabScrollResetRef.current = false;
+      return;
+    }
+    window.scrollTo({ top: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mobileTab]);
+  const [isNarrowViewport, setIsNarrowViewport] = useState(() => typeof window !== 'undefined' && window.innerWidth < 640);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onResize = () => setIsNarrowViewport(window.innerWidth < 640);
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const MOBILE_TAB_ORDER = ['chart', 'details', 'swap'];
+  // Aus WELCHER Richtung die neu aktive Seite hereingleitet -- bisher war das fest an die
+  // jeweilige Tab-IDENTITÄT gekoppelt (Chart kam immer von links, Details/Swap immer von
+  // rechts), unabhängig davon, in welche Richtung tatsächlich gewischt wurde. Das ging bei
+  // Chart<->Details zufällig gut, weil deren feste Richtungen zufällig zur Wischrichtung
+  // passten -- sobald aber Swap im Spiel war (z.B. Swap->Chart beim Rundlauf, oder Swap<->
+  // Details rückwärts), lief die Animation der TATSÄCHLICHEN Fingerbewegung entgegen, was sich
+  // "falsch herum" anfühlte. Jetzt wird die Richtung bei JEDEM Wechsel explizit gesetzt (siehe
+  // goToMobileTab unten und handleContentTouchEnd), unabhängig davon, welche Seite es ist.
+  const [tabEnterFromRight, setTabEnterFromRight] = useState(true);
+  // Zentrale Stelle für einen Tab-Wechsel per Klick auf die Tab-Leiste (nicht per Wischen).
+  // Richtung wird aus dem Vergleich der Positionen in MOBILE_TAB_ORDER abgeleitet: ein Tab
+  // weiter rechts in der Leiste -> kommt von rechts herein, ein Tab weiter links -> von links.
+  const goToMobileTab = tab => {
+    const curIdx = MOBILE_TAB_ORDER.indexOf(mobileTab);
+    const newIdx = MOBILE_TAB_ORDER.indexOf(tab);
+    setTabEnterFromRight(newIdx >= curIdx);
+    setMobileTab(tab);
+  };
+  const swipeStartRef = useRef(null);
+  // Die Verschiebung während des Wischens wird DIREKT ins Element geschrieben, nicht über
+  // React-Zustand. Grund: bei jeder Fingerbewegung den kompletten Baum neu zu zeichnen (Chart,
+  // Tabellen, Kurse) ruckelt spürbar. So bewegt sich nur eine CSS-Eigenschaft, was der Browser
+  // flüssig auf der Grafikkarte erledigt; React erfährt erst beim Loslassen davon.
+  const swipePanelRef = useRef(null);
+  const swipeRowRef = useRef(null);
+  // Referenz auf den wischbaren Wrapper (die ganze Seite unterhalb der Tab-Leiste) -- wird
+  // unten für NATIVE, nicht-passive Touch-Listener gebraucht statt für JSX-onTouch*-Props.
+  //
+  // WICHTIG: React hängt onTouchStart/onTouchMove/onTouchEnd standardmäßig als "passive"
+  // Listener ein (bekannte React-Falle seit v17) -- e.preventDefault() darin wird dann
+  // stillschweigend ignoriert. Genau DAS ließ eine waagerechte Wischgeste bisher gegen das
+  // native vertikale Scrollen bzw. die iOS-"Zurück"-Geste kämpfen: die Seite wirkte "wackelig"
+  // statt griffig, weil der Browser parallel seine eigene Geste auswertete. Der Pinch-Zoom im
+  // Chart weiter oben umgeht genau diese Falle bereits über addEventListener(...,
+  // {passive:false}) direkt am DOM-Element -- dasselbe Muster kommt jetzt auch hier zum Einsatz.
+  const swipeContentRef = useRef(null);
+  // Hält den jeweils aktuellsten Stand der drei unten benötigten Werte für die nativen
+  // Listener, die nur EINMAL registriert werden (leeres Deps-Array im useEffect weiter unten).
+  // Ohne diesen Umweg müssten die Listener bei jeder Zustandsänderung ab- und wieder angemeldet
+  // werden -- geschähe das ausgerechnet mitten in einer laufenden Wischgeste, würde sie abreißen.
+  const swipeLiveStateRef = useRef({});
+  // Sperrt neue Wischgesten, solange eine Animation (Zurückfedern ODER Seitenwechsel) noch
+  // läuft. OHNE das griff ein schnelles Doppel-/Mehrfach-Wischen mitten in die laufende
+  // Animation: touchstart holte sich per querySelector('.tp-panel-active') dasselbe Element,
+  // das gerade noch per style.transition aus dem Bild gleitet -- React hatte den Tab-Wechsel ja
+  // noch gar nicht committet/gerendert. Der neue touchmove-Handler setzte dann mitten in dieser
+  // laufenden CSS-Transition abrupt transition:'none' und einen neuen Transform-Wert, was die
+  // Animation zerriss und die Seite sichtbar springen/ruckeln ließ -- genau das "buggy bei
+  // mehrfachem Wischen hintereinander". Jetzt wird jede neue Geste ignoriert, bis die laufende
+  // Animation sauber durchgelaufen und der Tab-Wechsel abgeschlossen ist.
+  const swipeBusyRef = useRef(false);
+
+  const applySwipeTransform = dx => {
+    const el = swipePanelRef.current;
+    if (!el) return;
+    el.style.transition = 'none';
+    el.style.transform = dx ? `translate3d(${dx}px,0,0)` : 'none';
+  };
+
+  // Zurückfedern, wenn die Schwelle NICHT erreicht wurde. Etwas gemächlicher als der reine
+  // Fingerkontakt (0.32s statt vorher 0.22s) -- ein zu schnelles Zurückschnappen wirkte
+  // hektisch/nervös, gerade wenn man mehrmals hintereinander kurz antippt/wischt.
+  const releaseSwipeTransform = () => {
+    const el = swipePanelRef.current;
+    swipePanelRef.current = null;
+    if (!el) {
+      swipeBusyRef.current = false;
+      return;
+    }
+    swipeBusyRef.current = true;
+    el.style.transition = 'transform 0.26s cubic-bezier(0.22, 1, 0.36, 1)';
+    el.style.transform = 'none';
+    setTimeout(() => {
+      swipeBusyRef.current = false;
+    }, 260);
+  };
+
+  // Wurde umgeschaltet: die alte Seite gleitet VOLLSTÄNDIG aus dem Bild, die neue kommt
+  // VOLLSTÄNDIG von der Gegenseite rein -- wie eine echte Karten-/Seiten-Wischanimation
+  // (vergleichbar mit iOS-Tab-Leisten oder Telegram-Chatlisten), statt kurz anzudeuten und dabei
+  // gleichzeitig auszublenden. Kein Opacity-Fade mehr: reine Bewegung wirkt entschlossener und
+  // moderner als eine Kombination aus Verblassen + Verschieben, die "unentschlossen"/unsauber
+  // aussah, weil beides gleichzeitig, aber nicht synchron genug lief.
+  //
+  // Ein Versuch, die Nachbarseite schon WÄHREND des Wischens sichtbar mitlaufen zu lassen (also
+  // ECHT gleichzeitig beide Panels im Bild), wurde bereits getestet und wieder entfernt: dafür
+  // musste sie absolut positioniert und der Container beschnitten werden, was das Layout
+  // sichtbar springen ließ (unterschiedliche Höhen von Chart-/Details-/Swap-Seite). Der
+  // Kompromiss hier: die alte Seite läuft erst ganz raus, die neue kommt direkt danach ganz
+  // rein -- durch identisches Timing/Easing auf beiden Seiten wirkt der Übergang trotzdem wie
+  // EIN durchgehender Wisch, nicht wie zwei getrennte Schritte.
+  const flingSwipeTransform = (direction, onDone) => {
+    const el = swipePanelRef.current;
+    swipePanelRef.current = null;
+    if (!el) {
+      swipeBusyRef.current = false;
+      onDone();
+      return;
+    }
+    swipeBusyRef.current = true;
+    // Tatsächliche Breite des Panels statt eines festen Pixelwerts -- so trägt die Animation
+    // die Seite auf JEDEM Gerät wirklich komplett aus dem sichtbaren Bereich, nicht nur ein
+    // kleines Stück (das sah vorher wie ein halbherziges Zucken statt einem Wisch aus).
+    const width = el.getBoundingClientRect().width || (typeof window !== 'undefined' ? window.innerWidth : 320);
+    // "Accelerate"-Kurve (Material Design): startet langsam, endet schnell -- passend für ein
+    // Element, das den Bildschirm mit Schwung VERLÄSST. Etwas schneller als zuvor (0.22s statt
+    // 0.3s) für ein knackigeres, weniger zähes Gefühl.
+    el.style.transition = 'transform 0.22s cubic-bezier(0.4, 0, 1, 1)';
+    el.style.transform = `translate3d(${direction * width}px,0,0)`;
+    setTimeout(() => {
+      el.style.transition = '';
+      el.style.transform = '';
+      onDone();
+      // Erst NACH onDone() (setMobileTab) freigeben -- so ist der Tab-Wechsel bereits
+      // angestoßen, bevor eine etwaige nächste Geste wieder anlaufen darf.
+      swipeBusyRef.current = false;
+    }, 220);
+  };
+  const handleContentTouchStart = e => {
+    const { isNarrowViewport: narrow, anyModalOpen: modalOpen } = swipeLiveStateRef.current;
+    // swipeBusyRef: solange eine vorherige Animation noch läuft, wird eine neue Geste komplett
+    // ignoriert (siehe ausführliche Erklärung bei der swipeBusyRef-Deklaration weiter oben) --
+    // verhindert, dass ein zu schnelles Nachwischen sich das noch animierende alte Panel greift
+    // und dessen Übergang zerreißt.
+    if (!narrow || modalOpen || swipeBusyRef.current) return;
+    const touch = e.touches[0];
+    swipeStartRef.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      // Für die Geschwindigkeitsmessung in handleContentTouchMove laufend nachgeführt.
+      lastX: touch.clientX,
+      lastT: e.timeStamp,
+      velocity: 0, // px/ms, positiv = nach rechts
+      decided: null
+    };
+    // Aktive Seite einmalig merken -- währenddessen wird nur noch deren Stil angefasst.
+    swipePanelRef.current = typeof document !== 'undefined' ? document.querySelector('.tp-panel-active') : null;
+  };
+
+  const handleContentTouchMove = e => {
+    const start = swipeStartRef.current;
+    const { anyModalOpen: modalOpen } = swipeLiveStateRef.current;
+    if (!start || modalOpen) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    // Einmalig entscheiden, ob die Geste waagerecht (Seitenwechsel) oder senkrecht (normales
+    // Scrollen) gemeint ist. Ohne diese Festlegung würde jedes leichte Zittern beim Scrollen
+    // die Seite seitlich verrutschen lassen.
+    if (start.decided === null) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      start.decided = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    }
+    if (start.decided !== 'x') return;
+    // Waagerechte Geste beanspruchen: Ohne das behandelt der Browser sie u.U. selbst -- auf
+    // dem iPhone ist ein Wisch nach rechts die systemweite "Zurück"-Geste, weshalb genau diese
+    // Richtung wirkungslos blieb. Greift jetzt zuverlässig, weil dieser Listener weiter unten
+    // NICHT über JSX, sondern nativ mit {passive:false} registriert wird (siehe useEffect) --
+    // vorher war preventDefault() hier schlicht wirkungslos.
+    if (e.cancelable) e.preventDefault();
+    // Geschwindigkeit laufend nachführen (px pro Millisekunde) -- wird beim Loslassen
+    // zusätzlich zur reinen Wischdistanz herangezogen, damit auch ein kurzer, schneller Flick
+    // zuverlässig die Seite wechselt (wie man es von nativen Tab-Wischern kennt), nicht nur
+    // ein langsames, weites Wischen.
+    const now = e.timeStamp;
+    const dt = now - start.lastT;
+    if (dt > 0) start.velocity = (touch.clientX - start.lastX) / dt;
+    start.lastX = touch.clientX;
+    start.lastT = now;
+    // Direkt anwenden statt über requestAnimationFrame gepuffert an das nächste Bild
+    // weiterzureichen: Touch-Events feuern auf modernen Geräten bereits an den Bildaufbau
+    // gekoppelt -- der zusätzliche rAF-Umweg fügte pro Fingerbewegung ein weiteres Bild
+    // Verzögerung zwischen Finger und sichtbarer Bewegung ein. Spürbar als leichtes
+    // Hinterherhinken statt als am Finger "klebende" Seite -- genau das machte das Wischen
+    // weniger gefestigt.
+    applySwipeTransform(dx);
+  };
+
+  const handleContentTouchEnd = e => {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+    const dx = start ? e.changedTouches[0].clientX - start.x : 0;
+    const width = typeof window !== 'undefined' ? window.innerWidth : 1;
+    // Zwei unabhängige Wege gelten als "getroffen": entweder weit genug gewischt (wie bisher),
+    // oder schnell genug geflickt, selbst wenn der Finger dafür nur kurz unterwegs war. Das
+    // entspricht dem Verhalten nativer Tab-Wischer (iOS/Android).
+    //
+    // Die Flick-Schwelle wurde bewusst angehoben (0.5 -> 0.9 px/ms) und verlangt zusätzlich eine
+    // kleine Mindestdistanz: bei 0.5 reichte schon ein winziges, hastiges Zucken des Fingers, um
+    // sofort die Seite zu wechseln -- das fühlte sich nervös/unkontrolliert an, nicht wie eine
+    // bewusste Geste. Jetzt braucht es entweder eine spürbare Distanz oder einen wirklich
+    // energischen, klar erkennbaren Wisch.
+    const distanceReached = Math.abs(dx) >= Math.min(55, width * 0.18);
+    const flicked = Math.abs(dx) >= 18 && Math.abs(start?.velocity || 0) >= 0.9; // ~900px/s
+    const reached = start && start.decided === 'x' && (distanceReached || flicked);
+    if (!reached) {
+      releaseSwipeTransform(); // zu kurz UND zu langsam gewischt -> zurückfedern
+      return;
+    }
+    // Ringförmig: von der letzten Seite geht es weiter zur ersten und umgekehrt. Vorher lief
+    // eine Wischgeste an den Enden ins Leere -- es passierte schlicht nichts, was sich wie ein
+    // Fehler anfühlt. So führt jede Geste immer zu einer sichtbaren Reaktion.
+    const { mobileTab: currentTab } = swipeLiveStateRef.current;
+    const idx = MOBILE_TAB_ORDER.indexOf(currentTab);
+    const count = MOBILE_TAB_ORDER.length;
+    const nextIdx = dx < 0 ? (idx + 1) % count : (idx - 1 + count) % count;
+    flingSwipeTransform(dx < 0 ? -1 : 1, () => {
+      // Verhindert, dass der Scroll-zu-oben-Effekt (siehe skipTabScrollResetRef weiter oben)
+      // bei diesem WISCH-ausgelösten Tab-Wechsel greift -- nur Klicks auf die Tab-Buttons
+      // sollen nach oben springen.
+      skipTabScrollResetRef.current = true;
+      // Einträgt EXPLIZIT die tatsächliche Wischrichtung (nicht die Zielseite!) als
+      // Einblend-Richtung. Vorher hing die Einblend-Richtung an der ID der Zielseite (Chart
+      // kam immer von links, Details/Swap immer von rechts) -- das lief der tatsächlichen
+      // Wischgeste beim Rundlauf über Swap entgegen. dx < 0 (nach links gewischt) -> vorwärts
+      // in MOBILE_TAB_ORDER -> die neue Seite soll von RECHTS hereinkommen (dorthin, wo die
+      // alte gerade verschwunden ist, entsteht Platz).
+      setTabEnterFromRight(dx < 0);
+      setMobileTab(MOBILE_TAB_ORDER[nextIdx]);
+    });
+  };
+
+  // Registriert die drei Handler oben NATIV am DOM-Element statt über JSX-onTouch*-Props --
+  // nur so lässt sich touchmove mit {passive:false} anmelden, wodurch e.preventDefault() dort
+  // tatsächlich wirkt (siehe ausführliche Erklärung bei swipeContentRef weiter oben). Leeres
+  // Deps-Array: die Listener werden nur einmal angemeldet, die Handler lesen sich wechselnde
+  // Werte über swipeLiveStateRef statt über React-Closures, damit ein Neu-Anmelden mitten in
+  // einer laufenden Geste nicht nötig ist.
+  useEffect(() => {
+    const el = swipeContentRef.current;
+    if (!el) return;
+    el.addEventListener('touchstart', handleContentTouchStart, { passive: true });
+    el.addEventListener('touchmove', handleContentTouchMove, { passive: false });
+    el.addEventListener('touchend', handleContentTouchEnd, { passive: true });
+    el.addEventListener('touchcancel', handleContentTouchEnd, { passive: true });
+    return () => {
+      el.removeEventListener('touchstart', handleContentTouchStart);
+      el.removeEventListener('touchmove', handleContentTouchMove);
+      el.removeEventListener('touchend', handleContentTouchEnd);
+      el.removeEventListener('touchcancel', handleContentTouchEnd);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ============================================================================
   // SWAP-FEATURE (memoless / "instant" Swaps direkt über THORChain)
   // ============================================================================
@@ -8096,9 +9997,13 @@ function ThorchainPortfolio() {
   const [swapPools, setSwapPools] = useState([]); // [{asset}] -- für die Ziel-Asset-Auswahl
   const [swapPoolsLoading, setSwapPoolsLoading] = useState(false);
 
-  const [swapFromAsset, setSwapFromAsset] = useState('');
-  const [swapToAsset, setSwapToAsset] = useState('THOR.RUNE');
-  const [swapAmount, setSwapAmount] = useState('');
+  // Startbelegung des Formulars: 1 BTC -> ETH. Vorher stand in beiden Feldern RUNE (die
+  // Memoless-Liste beginnt mit THOR.RUNE, und das Ziel war fest darauf voreingestellt) --
+  // damit war der Swap sinnlos und man musste erst beide Felder umstellen, um überhaupt
+  // einen Kurs zu sehen.
+  const [swapFromAsset, setSwapFromAsset] = useState('BTC.BTC');
+  const [swapToAsset, setSwapToAsset] = useState('ETH.ETH');
+  const [swapAmount, setSwapAmount] = useState('1');
   const [swapDestination, setSwapDestination] = useState('');
 
   const [swapQuote, setSwapQuote] = useState(null);
@@ -8120,27 +10025,38 @@ function ThorchainPortfolio() {
   // Countdown-Ticker für die Ablaufzeit der Einzahlungsadresse -- läuft nur, während der
   // Deposit-Schritt tatsächlich sichtbar ist, damit keine unnötigen Re-Renders passieren,
   // solange der Nutzer noch im Formular ist.
+  // Sichtbar ist das Swap-Interface entweder als Fenster (PC) ODER inline auf der Handy-Seite.
+  // Vorher lief der Sekunden-Ticker nur bei geöffnetem FENSTER -- auf dem Handy blieb die
+  // Zeitbasis deshalb auf dem Wert vom Seitenaufruf stehen, und der Countdown zeigte Unsinn
+  // (z.B. 103 statt maximal 60 Sekunden), weil der Kurs neuer war als die gespeicherte Zeit.
+  const swapVisible = swapModalOpen || isNarrowViewport && mobileTab === 'swap';
   useEffect(() => {
-    if (!swapModalOpen) return;
+    if (!swapVisible) return;
+    setSwapNowMs(Date.now());
     const timer = setInterval(() => setSwapNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [swapModalOpen]);
+  }, [swapVisible]);
 
-  // Läuft der Kurs ab, automatisch einen frischen holen -- aber nur solange das Fenster offen
-  // ist und noch keine Einzahlungsadresse erzeugt wurde (danach ist der Kurs bereits fixiert).
+  // Läuft der Kurs ab, automatisch einen frischen holen. Bewusst UNABHÄNGIG von swapVisible
+  // (anders als der Sekunden-Ticker oben): die Vorschau-Karte in der Seitenspalte (siehe
+  // SwapTriggerCard) zeigt denselben Kurs wie das Fenster, soll also auch dann alle 60s
+  // aktualisiert werden, wenn das Fenster GAR NICHT offen ist -- sonst bliebe sie dauerhaft auf
+  // dem Stand des letzten Fensterbesuchs eingefroren. Nur während eines laufenden Deposits
+  // pausiert, damit der bereits fixierte Kurs nicht überschrieben wird.
   useEffect(() => {
-    if (!swapModalOpen || swapStep === 'deposit' || !swapQuoteAt) return;
-    if (swapNowMs - swapQuoteAt < SWAP_QUOTE_TTL_MS) return;
-    setSwapQuoteNonce(n => n + 1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [swapNowMs, swapQuoteAt, swapModalOpen, swapStep]);
+    const interval = setInterval(() => {
+      if (swapStep === 'deposit') return;
+      setSwapQuoteNonce(n => n + 1);
+    }, SWAP_QUOTE_TTL_MS);
+    return () => clearInterval(interval);
+  }, [swapStep]);
 
   // USD-Kurse der aktuell gewählten Assets, damit neben jedem Betrag der Gegenwert stehen kann.
   // RUNE kommt aus der bereits vorhandenen Preisanzeige, alle übrigen Assets über denselben
   // Midgard-Pool-Endpunkt, den die App auch sonst für Coin-Preise nutzt (assetPriceUSD).
   const [swapAssetUsd, setSwapAssetUsd] = useState({});
   useEffect(() => {
-    if (!swapModalOpen) return;
+    if (!swapVisible) return;
     const wanted = [swapFromAsset, swapToAsset].filter(Boolean);
     let cancelled = false;
     (async () => {
@@ -8162,7 +10078,7 @@ function ThorchainPortfolio() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [swapModalOpen, swapFromAsset, swapToAsset]);
+  }, [swapVisible, swapFromAsset, swapToAsset]);
 
   const resetSwapFlow = () => {
     setSwapStep('form');
@@ -8171,6 +10087,10 @@ function ThorchainPortfolio() {
     setSwapDeposit(null);
     setSwapRegisterError(null);
     setSwapWarningChecked(false);
+    // Kurs neu anfordern. Ohne das blieb "Du erhältst" nach dem Öffnen auf 0.0 stehen: der
+    // Kurs wurde hier geleert, aber da Menge und Assets unverändert blieben, sah die
+    // Abruf-Logik keinen Grund für eine neue Anfrage.
+    setSwapQuoteNonce(n => n + 1);
   };
 
   const fetchMemolessAssetsNow = async () => {
@@ -8183,12 +10103,43 @@ function ThorchainPortfolio() {
       const list = Array.isArray(data?.assets) ? data.assets : [];
       const available = list.filter(a => !a.status || /available/i.test(a.status));
       setSwapMemolessAssets(available);
-      if (!swapFromAsset && available.length) setSwapFromAsset(available[0].asset);
+      // Nur einspringen, wenn noch gar nichts gesetzt ist, und dann BTC bevorzugen -- der
+      // erste Listeneintrag ist THOR.RUNE, was als Ausgangswährung wenig sinnvoll ist.
+      if (!swapFromAsset && available.length) {
+        const preferred = available.find(a => a.asset === 'BTC.BTC') || available[0];
+        setSwapFromAsset(preferred.asset);
+      }
     } catch (e) {
       setSwapMemolessAssetsError(t('swapErrorGeneric', lang));
     } finally {
       setSwapMemolessAssetsLoading(false);
     }
+  };
+
+  // Welche Chains gerade pausiert sind (Wartung, Updates, Störungen). THORChain meldet das
+  // über /thorchain/inbound_addresses: "halted" (Chain komplett aus), "chain_trading_paused"
+  // (Handel für diese Chain gestoppt) und "global_trading_paused" (alles gestoppt). Ohne diese
+  // Prüfung konnte man z.B. SOL auswählen, obwohl dort gerade nichts durchgeht -- der Swap
+  // wäre dann hängen geblieben oder gescheitert.
+  const [swapHaltedChains, setSwapHaltedChains] = useState(() => new Set());
+  const [swapGlobalHalt, setSwapGlobalHalt] = useState(false);
+
+  const fetchSwapHaltsNow = async () => {
+    try {
+      const res = await fetchThorchainApiWithFallback('/thorchain/inbound_addresses');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!Array.isArray(data)) return;
+      const halted = new Set();
+      let global = false;
+      for (const entry of data) {
+        if (!entry || !entry.chain) continue;
+        if (entry.global_trading_paused) global = true;
+        if (entry.halted || entry.chain_trading_paused) halted.add(String(entry.chain).toUpperCase());
+      }
+      setSwapHaltedChains(halted);
+      setSwapGlobalHalt(global);
+    } catch (e) {/* keine Halt-Info -> es wird nichts gesperrt, Verhalten wie bisher */}
   };
 
   const fetchSwapPoolsNow = async () => {
@@ -8220,6 +10171,11 @@ function ThorchainPortfolio() {
   useEffect(() => {
     fetchMemolessAssetsNow();
     fetchSwapPoolsNow();
+    fetchSwapHaltsNow();
+    // Pausen ändern sich während einer Wartung auch mal mitten in der Sitzung -- alle 2 Minuten
+    // nachsehen, damit eine gerade wieder freigegebene Chain nicht dauerhaft gesperrt bleibt.
+    const timer = setInterval(fetchSwapHaltsNow, 120000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -9537,7 +11493,9 @@ function ThorchainPortfolio() {
   const [bonded, setBonded] = useState(null);
   const [accruedForPortfolio, setAccruedForPortfolio] = useState(null); // atomar zusammen mit bonded ermittelt, siehe fetchPortfolio -- NICHT dasselbe wie die separate, für die "Next Reward"-Anzeige/Live-Ticker genutzte accruedAwardSum
   const [nodeBreakdown, setNodeBreakdown] = useState([]); // [{ nodeAddress, status, bonded }] — welcher Node wie viel hält
+  const [walletNodeBreakdown, setWalletNodeBreakdown] = useState([]); // [{ addr, nodes: [{nodeAddress, status, bonded}] }] — welche Wallet an welcher Node wie viel hält
   const [nodeBreakdownExpanded, setNodeBreakdownExpanded] = useState(false);
+  const [walletOverviewExpanded, setWalletOverviewExpanded] = useState(false);
   // Hält die zuletzt bekannten Werte per Ref fest (nicht nur per State), damit
   // fetchPortfolio auch bei mehrfachem Aufruf (Refresh-Button) immer den *aktuellen* Wert
   // sieht und nicht einen veralteten aus dem Zeitpunkt, als die Funktion erstellt wurde.
@@ -9596,43 +11554,55 @@ function ThorchainPortfolio() {
   });
   const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
   const [volume24h, setVolume24h] = useState(null); // RUNE-Menge, netzwerkweit
+  // Ohne diesen State verschwand die "24H VOLUME"-Karte bei fehlgeschlagenem Laden (z.B. wenn
+  // Midgard über beide Basis-URLs hinweg nicht erreichbar ist, etwa durch eine Firewall/einen
+  // Proxy, der bestimmte Domains blockiert) einfach komplett -- volume24h blieb dauerhaft null,
+  // die Karte war an "volume24h != null" geknüpft, es gab keinerlei Fehlermeldung, nur eine
+  // leere Stelle auf der Seite. Analog zum bereits vorhandenen Fehlerzustand bei Bond Rewards
+  // (nodeRewardsAllFailed) wird jetzt stattdessen eine sichtbare Fehlermeldung angezeigt.
+  const [volume24hFailed, setVolume24hFailed] = useState(false);
+  const [volume24hErrorDetail, setVolume24hErrorDetail] = useState(null);
+  // Geteilter Zähler zwischen dem initialen Ladeversuch (in fetchPortfolio, läuft sofort beim
+  // Laden der Seite) und dem wiederkehrenden 30s-Poll (siehe useEffect weiter unten) -- vorher
+  // hatte NUR der Poll einen eigenen, lokalen Zähler; scheiterte ausgerechnet der initiale
+  // Versuch, zählte das nirgendwo mit. Im schlimmsten Fall dauerte es dadurch bis zu 60
+  // Sekunden (initialer Fehlschlag unbemerkt + zwei volle Poll-Zyklen à 30s), bevor überhaupt
+  // eine Fehlermeldung erschien -- die Karte blieb bis dahin einfach leer, ohne jede
+  // Rückmeldung. Mit dem geteilten Zähler zählt ein initialer Fehlschlag als erster von zwei
+  // nötigen, der erste Poll-Fehlschlag (nach 30s) reicht dann schon aus.
+  const volumeFailureCountRef = useRef(0);
+  const volumeEverSucceededRef = useRef(false);
   const [volumeHistory, setVolumeHistory] = useState(null); // [{ t, volumeRune }] letzte 30 Tage
-  // Drei "Seiten" auf dem Handy (Chart / Details / Swap), damit man nicht mehr scrollen muss --
-  // per Tab-Button oder Wischgeste wechselbar. Auf dem Desktop bleibt alles nebeneinander
-  // sichtbar (siehe .tp-panel Regeln im <style>-Block) -- die Swap-Karte ordnet sich dort
-  // einfach als drittes Element neben Chart und Sidebar ein (tp-content-row hat flexWrap, rutscht
-  // bei zu wenig Platz automatisch in eine neue Zeile, statt das Layout zu sprengen).
-  const [mobileTab, setMobileTab] = useState('chart'); // 'chart' | 'details' | 'swap'
-  // Entscheidet, an WELCHER Stelle die Swap-Karte im Baum landet: auf dem PC unter dem Chart,
-  // auf dem Handy als eigene dritte Seite. Bewusst in JS statt per CSS ein-/auszublenden --
-  // so existiert die Karte immer nur EINMAL im DOM und kann gar nicht doppelt erscheinen.
-  const [isNarrowViewport, setIsNarrowViewport] = useState(() => typeof window !== 'undefined' && window.innerWidth < 640);
+  // Feinkörnige, rollierende Live-Reihe für den neuen "LIVE"-Modus im Volumen-Sparkline (siehe
+  // VolumeSparkline weiter oben und den Poll-Effekt weiter unten) -- im Unterschied zu
+  // volumeHistory (ein Wert PRO TAG) sind das Momentaufnahmen des rollierenden 24h-Werts alle
+  // paar Sekunden, zeigt also die tatsächliche Kursänderung der Kennzahl in Minuten-Auflösung
+  // statt in Tages-Balken.
+  const [liveVolumeSeries, setLiveVolumeSeries] = useState([]);
+  // Separater State für die akkumulierte ECHTE Swap-Fee (siehe liveSwapFeeAccumRuneRef weiter
+  // unten) -- ein reiner Ref-Wert allein löst keinen Re-Render aus, ohne diesen State würde
+  // die Anzeige nie aktualisiert.
+  const [liveFeeAccumRune, setLiveFeeAccumRune] = useState(0);
+  // Sät liveVolumeSeries mit zwei Startpunkten bei 0, sobald volume24h zum ERSTEN Mal einen
+  // Wert bekommt (nur als Signal "die App ist bereit" genutzt -- der eigentliche Startwert ist
+  // bewusst 0, nicht volume24h selbst, siehe liveSwapFeeAccumRuneRef weiter unten für die
+  // ausführliche Begründung). Ohne diesen Seed wäre die Live-Ansicht direkt nach dem Laden für
+  // die ersten Sekunden komplett leer, weil ein Linienchart mindestens 2 Punkte braucht.
+  // Idempotent (nur wenn noch leer), damit spätere echte Bumps hier nicht überschrieben werden.
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const onResize = () => setIsNarrowViewport(window.innerWidth < 640);
-    onResize();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  const MOBILE_TAB_ORDER = ['chart', 'details', 'swap'];
-  const swipeStartRef = useRef(null);
-  const handleContentTouchStart = e => {
-    swipeStartRef.current = {
-      x: e.touches[0].clientX,
-      y: e.touches[0].clientY
-    };
-  };
-  const handleContentTouchEnd = e => {
-    const start = swipeStartRef.current;
-    swipeStartRef.current = null;
-    if (!start) return;
-    const dx = e.changedTouches[0].clientX - start.x;
-    const dy = e.changedTouches[0].clientY - start.y;
-    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return; // zu kurz oder eher vertikal -> ignorieren
-    const idx = MOBILE_TAB_ORDER.indexOf(mobileTab);
-    if (dx < 0) setMobileTab(MOBILE_TAB_ORDER[Math.min(idx + 1, MOBILE_TAB_ORDER.length - 1)]); // links wischen -> weiter
-    else setMobileTab(MOBILE_TAB_ORDER[Math.max(idx - 1, 0)]); // rechts wischen -> zurück
-  };
+    if (volume24h == null) return;
+    setLiveVolumeSeries(prev => {
+      if (prev.length > 0) return prev;
+      const now = Date.now();
+      return [{
+        t: now - 1000,
+        volumeRune: 0
+      }, {
+        t: now,
+        volumeRune: 0
+      }];
+    });
+  }, [volume24h]);
 
   // Vollständige tägliche RUNE-Preishistorie (seit Listing) — ein einziger Abruf pro Basis, um
   // jedem historischen Reward-Eintrag den damaligen Preis zuordnen zu können, statt für jeden
@@ -9857,6 +11827,25 @@ function ThorchainPortfolio() {
   // kein Zoom/Pan-Zustand — genau die Komplexität, die beim großen Kerzen-Chart für endlose
   // Probleme gesorgt hat, wird hier gar nicht erst eingeführt.
   const [showRunePriceChart, setShowRunePriceChart] = useState(false);
+  const [showApyHistoryModal, setShowApyHistoryModal] = useState(false);
+  const [apyHistoryRange, setApyHistoryRange] = useState(null); // null = volle Zeit; sonst Tage (30/90/365)
+  const [apyHistoryListExpanded, setApyHistoryListExpanded] = useState(false); // Detail-Liste standardmäßig eingeklappt, spart Platz
+  const [showApyCalculatorModal, setShowApyCalculatorModal] = useState(false);
+  const [showDeTaxModal, setShowDeTaxModal] = useState(false);
+  const [calcStartAmountStr, setCalcStartAmountStr] = useState(''); // roher Text-Wert des Eingabefelds -- leer = aktueller Bond als Vorbelegung
+  const [calcPeriodDays, setCalcPeriodDays] = useState(365);
+  const [calcCustomDate, setCalcCustomDate] = useState(''); // ISO yyyy-mm-dd; wenn gesetzt, hat Vorrang vor calcPeriodDays
+  const [calcCustomApyStrs, setCalcCustomApyStrs] = useState(['5', '10', '15']); // ebenfalls roher Text, aus demselben Grund
+  const [showVolumeHistoryModal, setShowVolumeHistoryModal] = useState(false);
+  const [volumeHistoryRangeDays, setVolumeHistoryRangeDays] = useState(30);
+  // Cache je Zeitraum (Tage -> { loading, error, data }), damit ein bereits geladener Zeitraum
+  // beim erneuten Anklicken nicht jedes Mal neu von Midgard abgefragt werden muss.
+  const [volumeHistoryCache, setVolumeHistoryCache] = useState({});
+  // Zuletzt erfolgreich geladene Volumen-Daten (unabhängig davon, ob sie zum GERADE
+  // ausgewählten Zeitraum gehören) -- wird beim Wechseln zwischen Zeiträumen weiter angezeigt,
+  // während im Hintergrund nachgeladen wird, statt den Chart kurz komplett auszublenden. Das
+  // verhindert das ruckartige "Hängen"/Springen beim Umschalten der Zeiträume.
+  const [volumeHistoryDisplay, setVolumeHistoryDisplay] = useState(null); // { rangeDays, data }
   // Welches Paar der RUNE-Preis-Chart zeigt: 'USD' (bzw. gewählte Fiat-Währung), 'BTC' oder
   // 'ETH' -- direkt von Binance über die jeweiligen RUNEBTC/RUNEETH-Handelspaare, nicht über
   // eine Umrechnung via USD (das wäre ungenauer, da beide Kurse dann getrennt schwanken).
@@ -10066,12 +12055,20 @@ function ThorchainPortfolio() {
   // vergleichbar). Bewusst über den gleichen simplen Kerzen-Abruf wie der RUNE-Solo-Chart,
   // nur ohne Währungsumrechnung -- die ist für eine Prozent-Performance irrelevant.
   const [showCompareChart, setShowCompareChart] = useState(false);
-  // Solange ein Chart-Modal (RUNE-Preis oder Vergleich) offen ist, darf die Seite dahinter
-  // nicht mitwischen -- ein "position: fixed"-Overlay verhindert das auf iOS/Safari NICHT von
-  // allein (bekannter Hintergrund-Scroll-Bug), deshalb wird der body hier zusätzlich aktiv
-  // fixiert und beim Schließen exakt an der ursprünglichen Scroll-Position wiederhergestellt.
+  // Solange IRGENDEIN Modal offen ist (Preis-Chart, Vergleich, Bond-APY-Historie,
+  // Volumen-Historie, Wachstumsrechner, Swap-Fenster), darf die Seite dahinter nicht
+  // mitwischen -- ein "position: fixed"-Overlay verhindert das auf iOS/Safari NICHT von allein
+  // (bekannter Hintergrund-Scroll-Bug), deshalb wird der body hier zusätzlich aktiv fixiert und
+  // beim Schließen exakt an der ursprünglichen Scroll-Position wiederhergestellt. WICHTIG: hier
+  // ALLE Modals der App eintragen -- fehlt eines, wackelt/scrollt der Hintergrund bei dessen
+  // Öffnen weiterhin unkontrolliert mit (genau das war der gemeldete Bug).
+  const anyModalOpen = showRunePriceChart || showCompareChart || showApyHistoryModal || showVolumeHistoryModal || showApyCalculatorModal || showDeTaxModal || swapModalOpen;
+  // Hier (statt direkt bei der Deklaration weiter oben) befüllt, weil anyModalOpen erst an
+  // dieser Stelle im Funktionskörper existiert -- ein Zugriff weiter oben würde an der
+  // "temporal dead zone" von "const" scheitern.
+  swipeLiveStateRef.current = { mobileTab, anyModalOpen, isNarrowViewport };
   useEffect(() => {
-    if (!showRunePriceChart && !showCompareChart) return;
+    if (!anyModalOpen) return;
     const scrollY = window.scrollY;
     const {
       style
@@ -10099,7 +12096,46 @@ function ThorchainPortfolio() {
       style.overflow = prev.overflow;
       window.scrollTo(0, scrollY);
     };
-  }, [showRunePriceChart, showCompareChart]);
+  }, [anyModalOpen]);
+  // Die native "Zurück"-Wisch-Geste von Safari/Chrome auf iOS lässt sich von einer Webseite aus
+  // NICHT verhindern (weder per touch-action noch per preventDefault noch per CSS) -- das ist
+  // eine bewusste Geste auf Browser-Chrome-Ebene, die Apple absichtlich nicht überschreibbar
+  // macht. Was wir aber verhindern KÖNNEN: dass sie einen tatsächlich von der App wegnavigiert.
+  // Trick: sobald ein Modal offen ist, einen zusätzlichen (leeren) History-Eintrag anlegen. Löst
+  // die Zurück-Geste dann tatsächlich aus, poppt sie NUR diesen Dummy-Eintrag (per popstate
+  // abgefangen) -- statt die App zu verlassen, schließen wir stattdessen einfach alle Modals.
+  // Das verwandelt "aus der App rausnavigieren" in "Modal schließen", was ohnehin meist die
+  // eigentliche Absicht hinter der Geste war.
+  useEffect(() => {
+    if (!anyModalOpen) return;
+    // try/catch: unter file://-Herkunft (Datei per Doppelklick geöffnet statt über einen
+    // echten Webserver) blockiert Chrome die History-API teilweise ("Unsafe attempt to load
+    // URL ... from frame with URL ..." in der Konsole) -- ohne Absicherung würde das hier einen
+    // unbehandelten Fehler auslösen, der die komplette Modal-Öffnen/Schließen-Logik dieses
+    // Effekts (inkl. des Body-Scroll-Locks weiter oben) in einem kaputten Zustand hängen lassen
+    // konnte: Body blieb dauerhaft auf position:fixed gesperrt, obendrein wirkte die Seite dann
+    // komplett schwarz und ließ sich nicht mehr scrollen. Schlägt pushState fehl, funktioniert
+    // einfach nur die Zurück-Wisch-Geste-Abfangung nicht -- alles andere läuft normal weiter.
+    try {
+      window.history.pushState({
+        tpModalGuard: true
+      }, '');
+    } catch (e) {
+      console.warn('[RUNE Portfolio] history.pushState blockiert (vermutlich file://-Herkunft) -- Zurück-Geste schließt Modals in diesem Fall nicht automatisch.', e);
+    }
+    const onPopState = () => {
+      setShowRunePriceChart(false);
+      setShowCompareChart(false);
+      setShowApyHistoryModal(false);
+      setShowVolumeHistoryModal(false);
+      setShowApyCalculatorModal(false);
+      setSwapModalOpen(false);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+    };
+  }, [anyModalOpen]);
   const [compareRangeDays, setCompareRangeDays] = useState(() => {
     try {
       const saved = parseInt(localStorage.getItem('tp_compare_range'), 10);
@@ -10330,15 +12366,35 @@ function ThorchainPortfolio() {
       clearInterval(id);
     };
   }, [hasData, altCoin.binanceSymbol, altCoin.krakenPair, altCoin.poolAsset, altCoin.geckoId]);
-  const localFxRateRef = useRef(1); // Einheiten der Zielwährung pro 1 USD (1 wenn currency === 'usd')
+  // Kurs MIT zugehöriger Währung speichern. Ohne diese Kennzeichnung würde beim Umschalten
+  // (z.B. GBP -> EUR) für einen kurzen Moment noch der alte Kurs auf die neue Währung
+  // angewendet -- die Beträge wären dann still falsch statt nur kurz veraltet.
+  const localFxRateRef = useRef({ cur: 'usd', rate: 1 });
   const eurUsdtRateRef = useRef(null); // zuletzt bekannter EURUSDT-Kurs aus dem 1s-Ticker, für Kraken-Preisumrechnung nach EUR
+
+  // EINE zentrale Umrechnung USD -> Anzeigewährung. Vorher gab es mehrere Varianten davon,
+  // und mindestens eine gab bei noch fehlendem Kurs stillschweigend den USD-Betrag zurück --
+  // mit Währungszeichen der Zielwährung davor. Hier wird stattdessen der zuletzt bekannte
+  // Kurs verwendet (Ticker bevorzugt, sonst der FX-Kurs), sodass nie ein unumgerechneter
+  // Betrag als Euro-Betrag ausgegeben wird.
+  const convertUsdToLocal = usdVal => {
+    if (currency === 'usd') return usdVal;
+    if (currency === 'eur' && eurUsdtRateRef.current) return usdVal / eurUsdtRateRef.current;
+    const fx = localFxRateRef.current;
+    // Nur verwenden, wenn der Kurs wirklich zur aktuell gewählten Währung gehört.
+    if (fx && fx.cur === currency && fx.rate) return usdVal * fx.rate;
+    return null; // Kurs noch nicht bekannt -> Aufrufer zeigt lieber nichts als einen Dollarbetrag
+  };
 
   useEffect(() => {
     if (currency === 'usd') {
-      localFxRateRef.current = 1;
+      localFxRateRef.current = { cur: 'usd', rate: 1 };
       return;
     }
-    if (currency === 'eur') return; // läuft über EURUSDT im Tick selbst
+    // EUR wird NICHT mehr ausgeklammert. Vorher verließ sich alles allein auf den EURUSDT-Kurs
+    // aus dem 1-Sekunden-Ticker -- war der beim ersten Rendern noch nicht durch, wurden
+    // USD-Beträge unverändert mit Euro-Zeichen angezeigt und erst später korrigiert. Jetzt
+    // liegt von Anfang an ein Kurs bereit; der Ticker verfeinert ihn danach nur noch.
     let cancelled = false;
     const refreshFx = async () => {
       // Primär frankfurter.app (EZB-Referenzkurse, kein API-Key, schnell) -- erst wenn das
@@ -10350,7 +12406,7 @@ function ThorchainPortfolio() {
           const json = await res.json();
           const rate = json && json.rates && json.rates[currency.toUpperCase()];
           if (rate && !cancelled) {
-            localFxRateRef.current = rate;
+            localFxRateRef.current = { cur: currency, rate };
             return;
           }
         }
@@ -10362,7 +12418,7 @@ function ThorchainPortfolio() {
         if (!res.ok) return;
         const json = await res.json();
         const rate = json && json.tether && json.tether[currency];
-        if (rate && !cancelled) localFxRateRef.current = rate;
+        if (rate && !cancelled) localFxRateRef.current = { cur: currency, rate };
       } catch (e) {/* Kurs bleibt auf dem letzten bekannten Stand */}
     };
     refreshFx();
@@ -10408,11 +12464,9 @@ function ThorchainPortfolio() {
         if (rune == null || eurUsdt == null || altCoin.binanceSymbol && alt == null) throw new Error('POLL_MISSING_DATA');
         if (cancelled) return;
         eurUsdtRateRef.current = eurUsdt;
-        const toLocal = usdVal => {
-          if (currency === 'usd') return usdVal;
-          if (currency === 'eur') return usdVal / eurUsdt;
-          return usdVal * localFxRateRef.current;
-        };
+        // Hier ist der frische EURUSDT-Kurs aus derselben Antwort bereits bekannt und damit
+        // genauer als der gespeicherte -- deshalb direkt verwenden, sonst zentral umrechnen.
+        const toLocal = usdVal => currency === 'eur' ? usdVal / eurUsdt : convertUsdToLocal(usdVal);
         setPrice({
           usd: rune,
           local: toLocal(rune)
@@ -10452,11 +12506,7 @@ function ThorchainPortfolio() {
   useEffect(() => {
     if (!hasData || altCoin.binanceSymbol) return;
     let cancelled = false;
-    const toLocalFromUsd = usdVal => {
-      if (currency === 'usd') return usdVal;
-      if (currency === 'eur') return eurUsdtRateRef.current ? usdVal / eurUsdtRateRef.current : usdVal;
-      return usdVal * localFxRateRef.current;
-    };
+    const toLocalFromUsd = usdVal => convertUsdToLocal(usdVal);
     const refreshAltPrice = async () => {
       if (altCoin.krakenPair) {
         try {
@@ -10514,23 +12564,58 @@ function ThorchainPortfolio() {
 
   // 24h-Volumen (+ dessen 30-Tage-Historie fürs Sparkline) alle 30s automatisch neu abfragen,
   // damit es nicht nur beim initialen Laden bzw. manuellen Refresh aktuell ist.
+  // Backoff bei wiederholten Fehlschlägen (z.B. wenn ein Firmen-Proxy/Firewall beide
+  // Midgard-Quellen blockiert -- ERR_TUNNEL_CONNECTION_FAILED o.ä.): sonst würde alle 30s für
+  // immer erneut fehlschlagen und die Konsole zuspammen. Nach jedem Fehlschlag verdoppelt sich
+  // die Wartezeit bis zum nächsten Versuch (Cap bei 5 Minuten); nach einem Erfolg geht es sofort
+  // zurück auf den normalen 30s-Rhythmus.
   useEffect(() => {
     if (!hasData) return;
     let cancelled = false;
+    let timer = null;
+    const BASE_INTERVAL_MS = 30000;
+    const MAX_INTERVAL_MS = 5 * 60 * 1000;
+    const schedule = delayMs => {
+      if (cancelled) return;
+      timer = setTimeout(tick, delayMs);
+    };
     const tick = async () => {
       try {
-        const [vol, hist] = await Promise.all([fetchVolume24h(), fetchVolumeHistory()]);
+        const bundle = await fetchVolumeBundle();
+        const vol = parseVolume24h(bundle);
+        const hist = parseVolumeHistory(bundle);
         if (cancelled) return;
-        if (vol != null) setVolume24h(vol);
-        if (hist != null) setVolumeHistory(patchLastVolumeWithLive(hist, vol));
+        if (vol != null || hist != null) {
+          volumeFailureCountRef.current = 0;
+          volumeEverSucceededRef.current = true;
+          setVolume24hFailed(false);
+          setVolume24hErrorDetail(null);
+          if (vol != null) setVolume24h(vol);
+          if (hist != null) setVolumeHistory(patchLastVolumeWithLive(hist, vol));
+        } else {
+          volumeFailureCountRef.current += 1;
+        }
       } catch (e) {
         console.warn('[RUNE Portfolio] Auto-Refresh Volumen fehlgeschlagen:', e);
+        volumeFailureCountRef.current += 1;
+        setVolume24hErrorDetail(`${e && e.name || 'Fehler'}: ${e && e.message || String(e)}`);
       }
+      // Erst nach dem ZWEITEN Fehlschlag in Folge als endgültig fehlgeschlagen anzeigen --
+      // ein einzelner, kurzer Ausrutscher (z.B. eine langsame Antwort knapp über dem Timeout)
+      // soll nicht sofort eine Fehlermeldung aufreißen, wenn der nächste Versuch gleich wieder
+      // erfolgreich sein könnte. volumeFailureCountRef/volumeEverSucceededRef statt lokaler
+      // Variablen: werden jetzt auch vom INITIALEN Ladeversuch (siehe fetchPortfolio) mit
+      // hochgezählt, siehe Kommentar bei der Ref-Deklaration weiter oben.
+      if (!cancelled && volumeFailureCountRef.current >= 2 && !volumeEverSucceededRef.current) {
+        setVolume24hFailed(true);
+      }
+      const delayMs = Math.min(BASE_INTERVAL_MS * 2 ** volumeFailureCountRef.current, MAX_INTERVAL_MS);
+      schedule(delayMs);
     };
-    const volTimer = setInterval(tick, 30000);
+    schedule(BASE_INTERVAL_MS);
     return () => {
       cancelled = true;
-      clearInterval(volTimer);
+      if (timer) clearTimeout(timer);
     };
   }, [hasData]);
 
@@ -10732,81 +12817,156 @@ function ThorchainPortfolio() {
   // midgard.thorchain.network ist die offiziell dokumentierte öffentliche Alternative.
   const MIDGARD_BASES = ['https://gateway.liquify.com/chain/thorchain_midgard/v2', 'https://midgard.thorchain.network/v2'];
 
-  // 24h-Handelsvolumen des gesamten THORChain-Netzwerks — dieselbe Datenquelle (Midgard),
-  // die auch thorchain.net für diese Kennzahl verwendet. Wir summieren 24 Stunden-Intervalle
-  // statt ein einzelnes Tages-Intervall zu nehmen — dadurch entsteht kein Problem, falls der
-  // aktuelle UTC-Tag gerade erst begonnen hat (was sonst fälschlich nahe 0 anzeigen würde).
-  const fetchVolume24h = async () => {
-    for (const base of MIDGARD_BASES) {
-      try {
-        const res = await thorchainFetch(`${base}/history/swaps?interval=hour&count=24`, {
-          headers: {
-            'x-client-id': 'rune-portfolio-app'
-          }
-        });
-        if (!res.ok) {
-          console.warn('[RUNE Portfolio] Volumen-Anfrage HTTP-Fehler', res.status, base);
-          continue;
-        }
-        const json = await res.json();
-        const intervals = json.intervals || [];
-        if (!intervals.length) {
-          console.warn('[RUNE Portfolio] Volumen: keine Intervalle in Antwort von', base, json);
-          continue;
-        }
-        console.info('[RUNE Portfolio] Volumen-Rohdaten (erstes Intervall):', intervals[0]);
-        let totalBase = 0;
-        let foundField = false;
-        for (const iv of intervals) {
-          const raw = iv.totalVolume ?? iv.volume ?? null;
-          if (raw == null) continue;
-          const n = parseInt(raw, 10);
-          if (isFinite(n)) {
-            totalBase += n;
-            foundField = true;
-          }
-        }
-        if (!foundField) {
-          console.warn('[RUNE Portfolio] Volumen: kein bekanntes Volumen-Feld gefunden, Beispiel-Intervall:', intervals[0]);
-          continue;
-        }
-        return totalBase / 1e8; // RUNE
-      } catch (e) {
-        console.warn('[RUNE Portfolio] Netzwerkfehler bei Volumen-Anfrage:', base, e);
+  // 24h-Handelsvolumen des gesamten THORChain-Netzwerks — läuft jetzt über den eigenen
+  // Cloudflare-Worker (/volume) statt direkt aus dem Browser gegen Midgard. Grund: vorher gab
+  // es HIER keinen serverseitigen Fallback/Cache -- blockierte das Netzwerk eines Nutzers (z.B.
+  // eine Firewall) BEIDE Midgard-Basen gleichzeitig, blieb die Karte dauerhaft leer, ohne dass
+  // irgendein clientseitiger Fallback das hätte auffangen können. Der Worker macht serverseitig
+  // exakt dasselbe gehedgte Fallback-Muster (siehe fetchJsonHedged im Worker-Code) -- Anfragen
+  // von DORT sind von der Netzwerk-Einschränkung des einzelnen Nutzers nicht betroffen.
+  //
+  // EIN gemeinsamer Request statt zwei getrennter (fetchVolume24h + fetchVolumeHistory riefen
+  // vorher BEIDE unabhängig voneinander /volume auf, obwohl die Antwort exakt dieselbe ist --
+  // der Worker liefert Stunden- UND Tages-Daten schon in EINER Antwort). Halbiert die Anzahl
+  // der Round-Trips für diese Karte, war einer der Gründe, warum sie manchmal spürbar länger
+  // brauchte als die anderen Karten (die alle nur einen einzigen Request pro Ladevorgang
+  // machen).
+  const fetchVolumeBundle = async () => {
+    try {
+      const res = await fetchWithTimeout(`${PURCHASES_SYNC_BACKEND_BASE}/volume`, {}, 8000);
+      if (!res.ok) throw new Error('HTTP_' + res.status);
+      return await res.json();
+    } catch (e) {
+      console.warn('[RUNE Portfolio] Volumen-Anfrage (Backend) fehlgeschlagen:', e);
+      return null;
+    }
+  };
+  const parseVolume24h = bundle => {
+    const json = bundle && bundle.hour;
+    if (!json) {
+      console.warn('[RUNE Portfolio] Volumen (Stunde): keine Antwort vom Backend', bundle && bundle.hourError);
+      return null;
+    }
+    const intervals = json.intervals || [];
+    if (!intervals.length) {
+      console.warn('[RUNE Portfolio] Volumen: keine Intervalle in Antwort', json);
+      return null;
+    }
+    let totalBase = 0;
+    let foundField = false;
+    for (const iv of intervals) {
+      const raw = iv.totalVolume ?? iv.volume ?? null;
+      if (raw == null) continue;
+      const n = parseInt(raw, 10);
+      if (isFinite(n)) {
+        totalBase += n;
+        foundField = true;
       }
     }
-    return null;
+    if (!foundField) {
+      console.warn('[RUNE Portfolio] Volumen: kein bekanntes Volumen-Feld gefunden, Beispiel-Intervall:', intervals[0]);
+      return null;
+    }
+    return totalBase / 1e8; // RUNE
+  };
+  const parseVolumeHistory = bundle => {
+    const json = bundle && bundle.day;
+    if (!json) {
+      console.warn('[RUNE Portfolio] Volumen-Historie: keine Antwort vom Backend', bundle && bundle.dayError);
+      return null;
+    }
+    const intervals = json.intervals || [];
+    if (!intervals.length) return null;
+    return intervals.map(iv => {
+      const raw = iv.totalVolume ?? iv.volume ?? null;
+      const n = raw != null ? parseInt(raw, 10) : NaN;
+      return {
+        t: parseInt(iv.startTime, 10) * 1000,
+        volumeRune: isFinite(n) ? n / 1e8 : 0
+      };
+    });
   };
 
-  // Tages-Volumen der letzten 30 Tage (für den kleinen Sparkline-Graphen unter dem
-  // 24h-Volumen-Wert). Gleiche Datenquelle wie fetchVolume24h, nur mit Tages-Intervallen.
-  const fetchVolumeHistory = async () => {
-    for (const base of MIDGARD_BASES) {
-      try {
-        const res = await thorchainFetch(`${base}/history/swaps?interval=day&count=30`, {
-          headers: {
-            'x-client-id': 'rune-portfolio-app'
-          }
-        });
-        if (!res.ok) continue;
-        const json = await res.json();
-        const intervals = json.intervals || [];
-        if (!intervals.length) continue;
-        const points = intervals.map(iv => {
-          const raw = iv.totalVolume ?? iv.volume ?? null;
-          const n = raw != null ? parseInt(raw, 10) : NaN;
-          return {
-            t: parseInt(iv.startTime, 10) * 1000,
-            volumeRune: isFinite(n) ? n / 1e8 : 0
-          };
-        });
-        return points;
-      } catch (e) {
-        console.warn('[RUNE Portfolio] Netzwerkfehler bei Volumen-Historie-Anfrage:', base, e);
-      }
-    }
-    return null;
+  // Wie fetchVolumeHistory, aber mit konfigurierbarem Intervall/Count -- für das
+  // Volumen-Historie-Modal (1M/3M/1J/2J/3J), das im Gegensatz zur festen 30-Tage-Sparkline
+  // deutlich längere Zeiträume abdecken soll. Längere Zeiträume nutzen bewusst gröbere
+  // Intervalle (Woche/Monat statt Tag), damit die Antwort nicht Tausende Datenpunkte umfasst.
+  const fetchVolumeHistoryRangeOnce = async (interval, count) => {
+    const json = await fetchJsonHedged(MIDGARD_BASES, base => `${base}/history/swaps?interval=${interval}&count=${count}`);
+    const intervals = json.intervals || [];
+    if (!intervals.length) return null;
+    return intervals.map(iv => {
+      const raw = iv.totalVolume ?? iv.volume ?? null;
+      const n = raw != null ? parseInt(raw, 10) : NaN;
+      return {
+        t: parseInt(iv.startTime, 10) * 1000,
+        volumeRune: isFinite(n) ? n / 1e8 : 0
+      };
+    });
   };
+  const fetchVolumeHistoryRange = async (interval, count, days) => {
+    try {
+      return await fetchVolumeHistoryRangeOnce(interval, count);
+    } catch (e) {
+      // Manche Midgard-Deployments begrenzen "count" undokumentiert -- bei größeren Zeiträumen
+      // (z.B. 2 Jahre = 104 Wochen-Intervalle) kann das den kompletten Request scheitern lassen,
+      // während kleinere Zeiträume (z.B. 1 Jahr = 52 Wochen) klaglos funktionieren. WICHTIG: der
+      // Fallback wechselt auf ein GRÖBERES Intervall (Monat statt Woche), das aber weiterhin den
+      // VOLLEN ursprünglich angefragten Zeitraum abdeckt -- ein einfaches "auf weniger Punkte
+      // reduzieren" würde sonst z.B. bei 2 Jahren auf denselben Zeitraum wie 1 Jahr zurückfallen
+      // und beide Ranges fälschlich identisch aussehen lassen.
+      console.warn('[RUNE Portfolio] Volumen-Historie (Range)-Anfrage fehlgeschlagen, versuche gröberes Intervall über denselben Zeitraum:', e);
+      if (interval !== 'month' && days != null) {
+        const fallbackCount = Math.max(2, Math.ceil(days / 30));
+        try {
+          return await fetchVolumeHistoryRangeOnce('month', fallbackCount);
+        } catch (e2) {
+          console.warn('[RUNE Portfolio] Volumen-Historie (Range)-Anfrage auch mit Monats-Intervall fehlgeschlagen:', e2);
+          return null;
+        }
+      }
+      return null;
+    }
+  };
+
+  // Lädt (und cached) die Volumen-Historie für einen bestimmten Zeitraum, sobald das Modal
+  // geöffnet wird bzw. der Nutzer einen anderen Zeitraum auswählt.
+  useEffect(() => {
+    if (!showVolumeHistoryModal) return;
+    const rangeDef = VOLUME_HISTORY_RANGES.find(r => r.days === volumeHistoryRangeDays);
+    if (!rangeDef) return;
+    const existing = volumeHistoryCache[volumeHistoryRangeDays];
+    if (existing && (existing.loading || existing.data)) return; // schon geladen bzw. lädt gerade
+    let cancelled = false;
+    setVolumeHistoryCache(prev => ({
+      ...prev,
+      [volumeHistoryRangeDays]: {
+        loading: true,
+        error: null,
+        data: null
+      }
+    }));
+    fetchVolumeHistoryRange(rangeDef.interval, rangeDef.count, rangeDef.days).then(data => {
+      if (cancelled) return;
+      setVolumeHistoryCache(prev => ({
+        ...prev,
+        [volumeHistoryRangeDays]: {
+          loading: false,
+          error: data == null ? 'FETCH_FAILED' : null,
+          data
+        }
+      }));
+      if (data != null) {
+        setVolumeHistoryDisplay({
+          rangeDays: volumeHistoryRangeDays,
+          data
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [showVolumeHistoryModal, volumeHistoryRangeDays]);
 
   // WICHTIG: Der letzte Balken der 30-Tage-Historie oben ist NUR das laufende UTC-Kalendertag
   // (00:00 UTC bis jetzt) — je nach Tageszeit oft nur ein Bruchteil eines vollen Tages. Die große
@@ -10825,119 +12985,31 @@ function ThorchainPortfolio() {
     return patched;
   };
 
-  // Ruft Midgard-Actions ab und summiert Bond-/Unbond-Beträge. Probiert mehrere Basis-URLs
-  // (Liquify zuerst) und Filter-Varianten durch und filtert zusätzlich clientseitig nach dem
-  // tatsächlichen "type"-Feld jeder zurückgegebenen Aktion — das ist die zuverlässigste Methode.
-  const fetchActionsForType = async (addr, txType) => {
-    const attempts = [];
-    for (const base of MIDGARD_BASES) {
-      attempts.push(`${base}/actions?address=${addr}&txType=${txType}&limit=50`);
-      attempts.push(`${base}/actions?address=${addr}&type=${txType}&limit=50`);
-    }
-    let lastErrorDetail = null; // technisches Detail des letzten Fehlschlags, für UI/Diagnose
-    for (const baseUrl of attempts) {
-      let offset = 0;
-      let pages = 0;
-      let totalBase = 0;
-      let earliestDateMs = null;
-      let matchedAny = false;
-      let hadError = false;
-      const items = [];
-      while (pages < 12) {
-        const url = `${baseUrl}&offset=${offset}`;
-        let res;
-        try {
-          res = await thorchainFetch(url, {
-            headers: {
-              'x-client-id': 'rune-portfolio-app'
-            }
-          });
-        } catch (netErr) {
-          console.warn('[RUNE Portfolio] Netzwerkfehler bei Midgard-Anfrage (evtl. CORS):', url, netErr);
-          lastErrorDetail = `Netzwerkfehler (${netErr && netErr.name + ': ' + netErr.message || netErr}) bei ${new URL(url).host}`;
-          hadError = true;
-          break;
-        }
-        if (!res.ok) {
-          const bodyText = await res.text().catch(() => '');
-          console.warn('[RUNE Portfolio] Midgard antwortete mit Fehler', res.status, url, bodyText.slice(0, 300));
-          lastErrorDetail = `HTTP ${res.status} von ${new URL(url).host}${bodyText ? ' — ' + bodyText.slice(0, 120) : ''}`;
-          hadError = true;
-          break;
-        }
-        const json = await res.json();
-        const actions = json.actions || [];
-        if (actions.length === 0) break;
-        for (const a of actions) {
-          if (a.type !== txType) continue; // clientseitiger Filter, unabhängig vom URL-Parameter
-          matchedAny = true;
-          let amountBase = 0;
-          const coinsGroups = txType === 'bond' ? a.in || [] : a.out && a.out.length ? a.out : a.in || [];
-          for (const grp of coinsGroups) {
-            for (const c of grp.coins || []) {
-              if (c.asset === 'THOR.RUNE' || c.asset === 'RUNE') {
-                amountBase += parseInt(c.amount, 10) || 0;
-              }
-            }
-          }
-          totalBase += amountBase;
-          const dateMs = a.date ? Math.floor(parseInt(a.date, 10) / 1e6) : null;
-          if (dateMs && (earliestDateMs === null || dateMs < earliestDateMs)) earliestDateMs = dateMs;
-          // Die Node-Adresse steckt direkt in den Metadaten jeder Bond/Unbond-Transaktion
-          // (metadata.bond.nodeAddress, gilt für beide Richtungen) — das ist entscheidend, um
-          // auch Nodes zu finden, von denen die Adresse inzwischen komplett abgebonded hat und
-          // die deshalb in der AKTUELLEN Node-Liste nicht mehr auftauchen.
-          const nodeAddress = a.metadata && a.metadata.bond && a.metadata.bond.nodeAddress || null;
-          items.push({
-            dateMs,
-            amount: amountBase / 1e8,
-            type: txType,
-            txId: a.in && a.in[0] && a.in[0].txID || null,
-            height: parseInt(a.height, 10) || null,
-            nodeAddress
-          });
-        }
-        if (actions.length < 50) break;
-        offset += 50;
-        pages++;
-      }
-      if (hadError) continue; // nächste URL-Variante probieren
-      if (matchedAny) {
-        console.info(`[RUNE Portfolio] Midgard-Treffer für Typ "${txType}" über`, baseUrl.split('?')[1].split('&')[1]);
-        return {
-          totalBase,
-          earliestDateMs,
-          found: true,
-          items
-        };
-      }
-      // 0 Treffer, aber kein technischer Fehler -> könnte einfach bedeuten "nie unbonded" o.ä.
-    }
-    return {
-      totalBase: 0,
-      earliestDateMs: null,
-      found: false,
-      items: [],
-      errorDetail: lastErrorDetail
-    };
-  };
+  // Läuft jetzt über den eigenen Worker (/bond-ledger) statt die komplette Midgard-Paginierung
+  // direkt im Browser nachzubauen -- der Worker verwendet serverseitig dieselbe Logik (gehedgte
+  // Fallback-Basen, Rausfiltern gescheiterter/erstatteter Bond-Versuche, Node-Adresse aus den
+  // Metadaten), nur eben unbeeinflusst von der Netzwerk-Einschränkung eines einzelnen Nutzers.
+  // Rückgabeform bewusst UNVERÄNDERT zur vorherigen, rein clientseitigen Fassung (success/
+  // principal/earliestDateMs/transactions bzw. success:false/errorDetail), damit an der
+  // Aufrufstelle (weiter unten) nichts angepasst werden musste.
   const fetchBondLedger = async addr => {
     try {
-      const bondRes = await fetchActionsForType(addr, 'bond');
-      if (!bondRes.found) {
-        console.warn('[RUNE Portfolio] Keine BOND-Aktionen über Midgard gefunden für', addr, bondRes.errorDetail || '');
-        throw new Error(bondRes.errorDetail || 'NO_BOND_ACTIONS');
+      // WICHTIG: 20s waren zu knapp. /bond-ledger paginiert SERVERSEITIG durch bis zu 12
+      // Midgard-Seiten PRO Richtung (bond + unbond) -- bei einer aktiven Adresse mit vielen
+      // Bond/Unbond-Transaktionen kann das in Summe klar über 20s dauern, besonders wenn der
+      // Worker dabei auf eine langsame Quelle ausweichen (hedgen) muss. Der Client brach dann
+      // vorzeitig mit "The operation was aborted" ab, OBWOHL der Worker im Hintergrund
+      // eigentlich noch fleißig am Arbeiten war -- kein echter Fehler, nur ein zu ungeduldiger
+      // Client. Auf 45s angehoben, um realistische Worst-Case-Ladezeiten abzudecken.
+      const res = await fetchWithTimeout(`${PURCHASES_SYNC_BACKEND_BASE}/bond-ledger?address=${encodeURIComponent(addr)}`, {}, 45000);
+      if (!res.ok) throw new Error('HTTP_' + res.status);
+      const data = await res.json();
+      if (!data.success) {
+        console.warn('[RUNE Portfolio] Bond-Ledger (Backend) ohne Treffer für', addr, data.errorDetail || '');
       }
-      const unbondRes = await fetchActionsForType(addr, 'unbond');
-      const allItems = [...bondRes.items, ...unbondRes.items].sort((a, b) => (b.dateMs || 0) - (a.dateMs || 0));
-      return {
-        success: true,
-        principal: (bondRes.totalBase - unbondRes.totalBase) / 1e8,
-        earliestDateMs: bondRes.earliestDateMs,
-        transactions: allItems
-      };
+      return data;
     } catch (e) {
-      console.warn('[RUNE Portfolio] Bond-Ledger via Midgard fehlgeschlagen, falle zurück auf lokales Tracking:', e);
+      console.warn('[RUNE Portfolio] Bond-Ledger-Anfrage (Backend) fehlgeschlagen, falle zurück auf lokales Tracking:', e);
       return {
         success: false,
         errorDetail: e && e.message || String(e)
@@ -11259,22 +13331,47 @@ function ThorchainPortfolio() {
       const txNodeAddresses = (ledger.transactions || []).map(tx => tx.nodeAddress).filter(Boolean);
       const allNodeAddresses = Array.from(new Set([...(bondInfo.matchedNodeAddresses || []), ...txNodeAddresses]));
       if (!ledger.success) {
-        const data = {
+        // WICHTIG: NICHT blind überschreiben! Gab es VORHER schon einen erfolgreichen
+        // Ledger-Abruf für diese Adresse (principal/transactions bereits vorhanden, z.B. aus
+        // dem lokalen Cache oder einem früheren erfolgreichen Refresh), soll ein einzelner
+        // fehlgeschlagener HINTERGRUND-Refresh (z.B. ein Timeout, siehe fetchBondLedger weiter
+        // oben) diesen guten Stand nicht durch eine Fehlermeldung ersetzen -- genau das
+        // passierte vorher: die Karte zeigte bereits erfolgreich Daten an, ein einzelner
+        // "aborted"-Timeout beim nächsten stillen Hintergrund-Abgleich riss dann trotzdem eine
+        // Fehlermeldung auf. current/accruedAward kommen unabhängig davon aus der separaten,
+        // schnellen /balance-Abfrage (bondInfo) und werden trotzdem aktualisiert -- nur der
+        // Ledger-Teil (principal/transactions/earliestDateMs) bleibt beim letzten guten Stand.
+        setNodeRewardsData(prev => {
+          const prevEntry = prev[addr];
+          const hadGoodLedger = prevEntry && prevEntry.principal != null;
+          const data = hadGoodLedger ? {
+            ...prevEntry,
+            loading: false,
+            error: null,
+            current: bondInfo.bonded,
+            accruedAward: bondInfo.accruedAward,
+            matchedNodeAddresses: bondInfo.matchedNodeAddresses || prevEntry.matchedNodeAddresses || []
+          } : {
+            loading: false,
+            error: 'NO_LEDGER',
+            errorDetail: ledger.errorDetail || null,
+            current: bondInfo.bonded,
+            principal: null,
+            transactions: [],
+            earliestDateMs: null,
+            accruedAward: bondInfo.accruedAward,
+            matchedNodeAddresses: bondInfo.matchedNodeAddresses || []
+          };
+          return {
+            ...prev,
+            [addr]: data
+          };
+        });
+        return {
           loading: false,
           error: 'NO_LEDGER',
-          errorDetail: ledger.errorDetail || null,
-          current: bondInfo.bonded,
-          principal: null,
-          transactions: [],
-          earliestDateMs: null,
-          accruedAward: bondInfo.accruedAward,
-          matchedNodeAddresses: bondInfo.matchedNodeAddresses || []
+          errorDetail: ledger.errorDetail || null
         };
-        setNodeRewardsData(prev => ({
-          ...prev,
-          [addr]: data
-        }));
-        return data;
       }
       const data = {
         loading: false,
@@ -11496,6 +13593,7 @@ function ThorchainPortfolio() {
           bondedAmount: 0,
           accruedAwardAtomicSum: 0,
           combinedNodeBreakdown: [],
+          walletNodeBreakdown: [],
           bondedWallets: []
         };
       }
@@ -11562,12 +13660,20 @@ function ThorchainPortfolio() {
         });
       });
       const combinedNodeBreakdown = Object.values(nodeBreakdownMap).sort((a, b) => b.bonded - a.bonded);
+      // Wie combinedNodeBreakdown, aber NICHT über Wallets zusammengefasst -- eine Zeile pro
+      // Wallet, mit der Liste der Nodes, auf die GENAU DIESE Wallet bondet. Für die
+      // "Übersicht"-Dropdown, die zeigt, welche Wallet an welcher Node wie viel RUNE hält.
+      const walletNodeBreakdown = succeeded.filter(r => (r.nodeBreakdown || []).length > 0).map(r => ({
+        addr: r.addr,
+        nodes: [...r.nodeBreakdown].sort((a, b) => b.bonded - a.bonded)
+      }));
       const bondedWallets = succeeded.filter(r => r.bondedAmount > 0).map(r => r.addr);
       return {
         availableAmount,
         bondedAmount,
         accruedAwardAtomicSum,
         combinedNodeBreakdown,
+        walletNodeBreakdown,
         bondedWallets
       };
     };
@@ -11589,6 +13695,10 @@ function ThorchainPortfolio() {
         // Nicht-USD/EUR-Währungen wird mit dem bereits vorhandenen FX-Kurs (frankfurter.app,
         // siehe localFxRateRef oben) umgerechnet.
         let localRate = 1;
+        // Multiplikation mit null ergäbe in JavaScript stillschweigend 0 -- deshalb hier
+        // ausdrücklich prüfen und im Zweifel null durchreichen (die Anzeige zeigt dann "—",
+        // bis der Kurs da ist, statt eines falschen Betrags).
+        const toLocalSafe = usdVal => localRate == null || usdVal == null ? null : usdVal * localRate;
         let runeFromBinance = null;
         let eurUsdtFromBinance = null;
         try {
@@ -11606,11 +13716,14 @@ function ThorchainPortfolio() {
             if (eurUsdtFromBinance == null) throw new Error('BINANCE_EUR_MISSING');
             localRate = 1 / eurUsdtFromBinance;
           } else {
-            localRate = localFxRateRef.current; // von frankfurter.app befüllt (CoinGecko nur dessen Fallback)
+            // von frankfurter.app befüllt (CoinGecko nur dessen Fallback) -- nur nutzen,
+            // wenn der Kurs zur aktuell gewählten Währung gehört.
+            const fx = localFxRateRef.current;
+            localRate = fx && fx.cur === currency && fx.rate ? fx.rate : null;
           }
           currentPrice = {
             usd: runeFromBinance,
-            local: runeFromBinance * localRate
+            local: toLocalSafe(runeFromBinance)
           };
         } catch (runeErr) {
           const geckoRuneRes = await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=thorchain&vs_currencies=usd,${currency}`);
@@ -11636,7 +13749,7 @@ function ThorchainPortfolio() {
             if (altUsd == null) throw new Error('BINANCE_ALT_MISSING');
             currentAltPrice = {
               usd: altUsd,
-              local: altUsd * localRate
+              local: toLocalSafe(altUsd)
             };
             altHandled = true;
           } catch (e) {/* nächste Quelle probieren */}
@@ -11648,7 +13761,7 @@ function ThorchainPortfolio() {
             } = await fetchKrakenPrice(altCoin.krakenPair);
             currentAltPrice = {
               usd: altUsd,
-              local: altUsd * localRate
+              local: toLocalSafe(altUsd)
             };
             altHandled = true;
           } catch (e) {/* nächste Quelle probieren */}
@@ -11660,7 +13773,7 @@ function ThorchainPortfolio() {
             } = await fetchThorchainPoolPrice(altCoin.poolAsset);
             currentAltPrice = {
               usd: altUsd,
-              local: altUsd * localRate
+              local: toLocalSafe(altUsd)
             };
             altHandled = true;
           } catch (e) {/* nächste Quelle probieren */}
@@ -11756,9 +13869,11 @@ function ThorchainPortfolio() {
         bondedAmount,
         accruedAwardAtomicSum,
         combinedNodeBreakdown,
+        walletNodeBreakdown,
         bondedWallets
       } = walletSettled.value;
       setNodeBreakdown(combinedNodeBreakdown);
+      setWalletNodeBreakdown(walletNodeBreakdown || []);
       setBalance(availableAmount);
       setBonded(bondedAmount);
       setAccruedForPortfolio(accruedAwardAtomicSum);
@@ -11797,9 +13912,32 @@ function ThorchainPortfolio() {
         if (fetchPortfolioRef.current) fetchPortfolioRef.current();
       }, delay);
     }
-    Promise.all([fetchVolume24h(), fetchVolumeHistory()]).then(([vol, hist]) => {
-      setVolume24h(vol);
-      setVolumeHistory(patchLastVolumeWithLive(hist, vol));
+    fetchVolumeBundle().then(bundle => {
+      const vol = parseVolume24h(bundle);
+      const hist = parseVolumeHistory(bundle);
+      // WICHTIG: vorher wurde hier weder Erfolg noch Fehlschlag im volume24hFailed/
+      // volume24hErrorDetail-Status vermerkt -- nur der SEPARATE, alle 30s laufende
+      // Hintergrund-Poll (siehe useEffect weiter oben) tat das. Schlug ausgerechnet DIESER
+      // erste, initiale Versuch fehl, blieb die Karte bis zum zweiten Fehlschlag des
+      // Hintergrund-Polls (im schlimmsten Fall über eine Minute) OHNE jede sichtbare
+      // Rückmeldung -- weder Daten noch Fehlermeldung, einfach nichts. Jetzt geteilter Zähler
+      // (volumeFailureCountRef) mit dem Poll-Effekt: ein Fehlschlag HIER zählt schon als
+      // erster von zwei nötigen, der nächste Poll-Fehlschlag (nach 30s statt erst nach 60s)
+      // reicht dann schon, um die Fehlermeldung zu zeigen.
+      if (vol != null || hist != null) {
+        volumeFailureCountRef.current = 0;
+        volumeEverSucceededRef.current = true;
+        setVolume24hFailed(false);
+        setVolume24hErrorDetail(null);
+        if (vol != null) setVolume24h(vol);
+        if (hist != null) setVolumeHistory(patchLastVolumeWithLive(hist, vol));
+      } else {
+        volumeFailureCountRef.current += 1;
+        setVolume24hErrorDetail('Initialer Ladeversuch ohne Antwort vom Backend.');
+        if (volumeFailureCountRef.current >= 2 && !volumeEverSucceededRef.current) {
+          setVolume24hFailed(true);
+        }
+      }
     });
     setLoading(false);
   }, [wallets, lang, fetchPriceHistoryFullOnce, altCoin, currency]);
@@ -11975,7 +14113,10 @@ function ThorchainPortfolio() {
       marginBottom: 8,
       fontFamily: "'Inter', sans-serif"
     }
-  }, "RUNE", /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(TickerLogo, {
+    code: "RUNE",
+    size: 15
+  }), "RUNE", /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -12001,7 +14142,7 @@ function ThorchainPortfolio() {
     }
   }, runePriceStr), runeChange24h != null && /*#__PURE__*/React.createElement("div", {
     style: {
-      color: runeChange24h >= 0 ? '#6FBF8F' : '#C97A7A',
+      color: runeChange24h >= 0 ? '#6FE3E5' : '#E0B268',
       fontSize: 10.5,
       fontWeight: 600,
       whiteSpace: 'nowrap',
@@ -12073,7 +14214,10 @@ function ThorchainPortfolio() {
       marginBottom: 8,
       fontFamily: "'Inter', sans-serif"
     }
-  }, altCoin.code, /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(TickerLogo, {
+    code: altCoin.code,
+    size: 15
+  }), altCoin.code, /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'flex',
       alignItems: 'center',
@@ -12099,7 +14243,7 @@ function ThorchainPortfolio() {
     }
   }, altPriceStr), altChange24h != null && /*#__PURE__*/React.createElement("div", {
     style: {
-      color: altChange24h >= 0 ? '#6FBF8F' : '#C97A7A',
+      color: altChange24h >= 0 ? '#6FE3E5' : '#E0B268',
       fontSize: 10.5,
       fontWeight: 600,
       whiteSpace: 'nowrap',
@@ -12164,6 +14308,7 @@ function ThorchainPortfolio() {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
+      gap: 5,
       background: c.code === altCoinCode ? 'rgba(0,222,225,0.14)' : 'transparent',
       color: c.code === altCoinCode ? '#00DEE1' : '#A0BABC',
       border: 'none',
@@ -12174,7 +14319,10 @@ function ThorchainPortfolio() {
       fontWeight: 700,
       fontFamily: "'Inter', sans-serif"
     }
-  }, c.code))));
+  }, /*#__PURE__*/React.createElement(TickerLogo, {
+    code: c.code,
+    size: 14
+  }), c.code))));
 
   // Aktive-Nodes-Anzeige (95 +12 -11 🔔). Wird sowohl in der mobilen Controls-Zeile
   // (neben Wallets/Per node) als auch -- nur auf Desktop -- rechtsbündig über der
@@ -12205,12 +14353,12 @@ function ThorchainPortfolio() {
     }
   }, /*#__PURE__*/React.createElement("span", null, nodeChurnStats.activeCount), /*#__PURE__*/React.createElement("span", {
     style: {
-      color: '#8FE0AC',
+      color: '#6FE3E5',
       fontWeight: 700
     }
   }, "+", nodeChurnStats.joiningCount), /*#__PURE__*/React.createElement("span", {
     style: {
-      color: '#F0A0A0',
+      color: '#F5C36B',
       fontWeight: 700
     }
   }, "-", nodeChurnStats.leavingCount), /*#__PURE__*/React.createElement("span", {
@@ -12225,8 +14373,8 @@ function ThorchainPortfolio() {
       position: 'absolute',
       top: -6,
       right: -6,
-      background: '#F0A0A0',
-      color: '#1F0F0F',
+      background: '#F5C36B',
+      color: '#1F160A',
       borderRadius: 999,
       fontSize: 9,
       fontWeight: 700,
@@ -12271,11 +14419,11 @@ function ThorchainPortfolio() {
     }
   }, /*#__PURE__*/React.createElement("span", null, nodeChurnStats.activeCount, " ", t('nodeActiveLabel', lang)), /*#__PURE__*/React.createElement("span", {
     style: {
-      color: '#8FE0AC'
+      color: '#6FE3E5'
     }
   }, nodeChurnStats.joiningCount, " ", t('nodesJoiningSuffixShort', lang)), /*#__PURE__*/React.createElement("span", {
     style: {
-      color: '#F0A0A0'
+      color: '#F5C36B'
     }
   }, nodeChurnStats.leavingCount, " ", t('nodesLeavingSuffixShort', lang))), nodeWatchNotifications.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -12292,7 +14440,7 @@ function ThorchainPortfolio() {
       fontSize: 10.5,
       color: '#CBDBDC',
       background: '#0D2022',
-      border: `1px solid ${n.variant === 'success' ? 'rgba(143,224,172,0.3)' : 'rgba(240,160,160,0.3)'}`,
+      border: `1px solid ${n.variant === 'success' ? 'rgba(111,227,229,0.3)' : 'rgba(245,195,107,0.3)'}`,
       borderRadius: 7,
       padding: '5px 10px'
     }
@@ -12359,7 +14507,9 @@ function ThorchainPortfolio() {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: 20
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
     }
   }, /*#__PURE__*/React.createElement("div", {
     onClick: e => e.stopPropagation(),
@@ -12369,6 +14519,8 @@ function ThorchainPortfolio() {
       maxWidth: 860,
       maxHeight: '92vh',
       overflow: 'auto',
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
       padding: '22px 24px 22px',
       position: 'relative'
     }
@@ -12500,9 +14652,9 @@ function ThorchainPortfolio() {
       display: 'flex',
       alignItems: 'center',
       gap: 5,
-      color: runePriceRangeChangePct >= 0 ? '#8FE0AC' : '#F0A0A0',
-      background: runePriceRangeChangePct >= 0 ? 'rgba(143,224,172,0.1)' : 'rgba(240,160,160,0.1)',
-      border: `1px solid ${runePriceRangeChangePct >= 0 ? 'rgba(143,224,172,0.25)' : 'rgba(240,160,160,0.25)'}`,
+      color: runePriceRangeChangePct >= 0 ? '#6FE3E5' : '#F5C36B',
+      background: runePriceRangeChangePct >= 0 ? 'rgba(111,227,229,0.1)' : 'rgba(245,195,107,0.1)',
+      border: `1px solid ${runePriceRangeChangePct >= 0 ? 'rgba(111,227,229,0.25)' : 'rgba(245,195,107,0.25)'}`,
       borderRadius: 999,
       padding: '4px 10px 4px 8px',
       fontSize: 12.5,
@@ -12685,7 +14837,9 @@ function ThorchainPortfolio() {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: 20
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
     }
   }, /*#__PURE__*/React.createElement("div", {
     onClick: e => e.stopPropagation(),
@@ -12695,6 +14849,8 @@ function ThorchainPortfolio() {
       maxWidth: 860,
       maxHeight: '92vh',
       overflow: 'auto',
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
       padding: '22px 24px 22px',
       position: 'relative'
     }
@@ -12807,7 +14963,7 @@ function ThorchainPortfolio() {
     }
   }, "RUNE"), compareRunePct != null && /*#__PURE__*/React.createElement("span", {
     style: {
-      color: compareRunePct >= 0 ? '#8FE0AC' : '#F0A0A0',
+      color: compareRunePct >= 0 ? '#6FE3E5' : '#F5C36B',
       fontSize: 12.5,
       fontWeight: 700
     }
@@ -12833,7 +14989,7 @@ function ThorchainPortfolio() {
     }
   }, altCoin.code), compareAltPct != null && /*#__PURE__*/React.createElement("span", {
     style: {
-      color: compareAltPct >= 0 ? '#8FE0AC' : '#F0A0A0',
+      color: compareAltPct >= 0 ? '#6FE3E5' : '#F5C36B',
       fontSize: 12.5,
       fontWeight: 700
     }
@@ -12958,6 +15114,361 @@ function ThorchainPortfolio() {
   const nodeRewardsUsableEntries = rewardsDataList.filter(d => !d.loading && !d.error && d.current != null && d.principal != null);
   const nodeRewardsAllFailed = nodeRewardsLoaded && nodeRewardsUsableEntries.length === 0;
 
+  // ============================================================================
+  // LIVE-VISUALISIERUNG: Swap-Volumen -> Bond-Rewards (+ das Volumen selbst live mitlaufen
+  // lassen)
+  //
+  // Bond-Rewards speisen sich (neben der Block-Emission) aus einem Teil der Swap-Fees -- mehr
+  // Swap-Volumen bedeutet also mehr Rewards. Bisher war das eine abstrakte Tatsache, die man
+  // der tickenden Reward-Zahl nicht ansah. Hier wird sie SICHTBAR: echte, gerade abgeschlossene
+  // Swaps (aus Midgards /actions-Feed) lösen je einen kleinen Partikel aus, der von der
+  // Swap-Volumen-Kachel HOCH in die Bond-Rewards-Karte darüber wandert -- größere Swaps
+  // erzeugen größere Partikel. DERSELBE Swap-Feed bumpt außerdem live die 24h-Volumen-Zahl UND
+  // den letzten Punkt des Volumen-Sparklines -- vorher bewegte sich der Graph nur beim
+  // nächsten vollen Netzwerk-Refresh (alle paar Minuten), jetzt sichtbar mit jedem echten Swap.
+  // Beides rein additiv/kosmetisch: der nächste vollständige fetchVolume24h()-Poll überschreibt
+  // den hier live hochgezählten Wert ohnehin wieder mit dem exakten Netzwerkwert, das Trickeln
+  // dazwischen ist nur fürs Auge.
+  const liveFlowChannelRef = useRef(null); // Container, in den Partikel-Elemente gespawnt werden
+  const liveFlowCardRef = useRef(null); // äußere Bond-Rewards-Karte -- wird bei Ankunft kurz eingefärbt
+  const liveFlowNumberRef = useRef(null); // die tickende "+X RUNE"-Zahl -- wird bei Ankunft kurz pulsiert
+  const liveVolumeNumberRef = useRef(null); // die "24H VOLUME"-Zahl -- wird beim Live-Bump kurz pulsiert
+  const liveFlowLastHeightRef = useRef(null); // höchste bereits verarbeitete Action-Höhe (Dedupe)
+  const liveFlowFirstPollRef = useRef(true); // 1. Poll liefert oft 50 "alte" Swaps -- die NICHT alle sofort als Partikel losschießen
+  // WICHTIG: der Live-Chart wurde ursprünglich direkt aus volume24h gespeist (derselben Zahl,
+  // die auch als "24H VOLUME"-Kachel angezeigt wird) -- das erzeugte einen sichtbaren Bug: ein
+  // unregelmäßiges Plateau/Steilabfall-Muster statt einer glatten Kurve. Ursache: volume24h
+  // wird an ANDERER Stelle in der App regelmäßig durch einen ECHTEN, vollständigen
+  // Netzwerk-Abruf überschrieben -- und dieser echte Wert kann NIEDRIGER sein als unsere lokal
+  // hochgezählte Annäherung, weil wir nur ADDIEREN (neue erkannte Swaps), aber nie
+  // berücksichtigen, dass alte Swaps mit der Zeit aus dem rollierenden 24h-Fenster
+  // HERAUSFALLEN. Traf ein solcher echter Refresh mitten in unserem Live-Fenster ein, sprang
+  // die "Delta seit Fensterbeginn"-Kurve schlagartig nach unten -- genau der gemeldete
+  // Steilabfall.
+  //
+  // Der Live-Chart zeichnet deshalb NICHT irgendeine Ableitung von volume24h, sondern
+  // ausschließlich den Fee-Akkumulator (liveSwapFeeAccumRuneRef, siehe estimateSwapFeeRune
+  // weiter unten) -- dieselbe Zahl, die auch die Textzeile "Swap Fees Generated (Live)" unter
+  // dem Chart zeigt. Vorher zeichnete die Linie eine ANDERE Größe (akkumuliertes Volumen) als
+  // der Text darunter (Gebühren) auswies -- zwei unterschiedliche Zahlen auf derselben Karte,
+  // ohne dass die Linie das im Text Genannte überhaupt abbildete. Rein additiv wie zuvor (kann
+  // nur wachsen, nie schrumpfen), also weiterhin von Natur aus eine glatte Treppenkurve und
+  // NIE von der externen volume24h-Korrektur betroffen. Die "24H VOLUME"-Kopfzahl und ihr
+  // Tages-Sparkline bleiben unverändert an volume24h gekoppelt (dort ist die Netzwerk-Korrektur
+  // richtig und gewollt) -- nur der Live-Chart darunter zeigt jetzt konsequent dieselbe Größe
+  // wie die Textzeile direkt darunter.
+  // Separater Akkumulator für die ECHTEN Swap-Fees (nicht das Volumen!) -- siehe
+  // estimateSwapFeeRune weiter unten für die genaue Herkunft und wichtige Einschränkungen
+  // dazu, was diese Zahl bedeutet und was NICHT.
+  const liveSwapFeeAccumRuneRef = useRef(0);
+  // Hält den jeweils aktuellsten Stand von volume24h/activePrice für den Poll-Effekt weiter
+  // unten, der bewusst nur EINMAL läuft (leeres Deps-Array) -- ein direktes Abhängen von
+  // volume24h wäre eine Endlosschleife, weil der Effekt selbst volume24h verändert.
+  const liveFlowStateRef = useRef({});
+  liveFlowStateRef.current = {
+    volume24h,
+    activePrice
+  };
+
+  // Schätzt den USD-Wert eines Swaps aus dem Midgard-Action-Objekt: Menge der Eingangs-Coin
+  // (Midgard normalisiert Beträge auf 8 Nachkommastellen, wie bei RUNE) mal deren USD-Preis
+  // zum Swap-Zeitpunkt (inPriceUSD). Nur eine grobe Annäherung für die Partikel-GRÖSSE -- keine
+  // Buchhaltung, daher genügt das.
+  //
+  // WICHTIG: Das ist die SWAP-GRÖSSE (Volumen), NICHT die Gebühr! Die tatsächliche, von
+  // Midgard direkt gelieferte Gebühr steht in einem eigenen Feld, siehe estimateSwapFeeRune
+  // direkt darunter -- die beiden Werte NICHT verwechseln.
+  const estimateSwapUsd = action => {
+    try {
+      const swap = action && action.metadata && action.metadata.swap;
+      const inCoin = action && action.in && action.in[0] && action.in[0].coins && action.in[0].coins[0];
+      if (!swap || !inCoin) return null;
+      const priceUsd = parseFloat(swap.inPriceUSD);
+      const amountBase = parseInt(inCoin.amount, 10);
+      if (!isFinite(priceUsd) || !isFinite(amountBase) || amountBase <= 0) return null;
+      return amountBase / 1e8 * priceUsd;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // Liest die ECHTE Liquidity-Fee direkt aus Midgard (metadata.swap.liquidityFee, RUNE-Betrag
+  // in Basiseinheiten/1e8) -- keine Schätzung, sondern der Wert, den Midgard selbst für genau
+  // diesen Swap ausweist.
+  //
+  // ZWEI WICHTIGE EINSCHRÄNKUNGEN, die man kennen sollte, bevor man diese Zahl irgendwo als
+  // "an Bond-Provider ausgeschüttet" interpretiert:
+  // 1. liquidityFee ist die AMM-Slip-Gebühr (abhängig von Pool-Tiefe und Swap-Größe), die
+  //    beim Swap im Pool VERBLEIBT und dessen Tiefe erhöht -- sie wird NICHT in diesem Moment
+  //    an Bond-Provider ausgezahlt. Bond-Rewards kommen aus der Block-Emission, deren Höhe das
+  //    System über die "Incentive Pendulum" laufend an das Verhältnis von gebundenem zu
+  //    gepooltem RUNE anpasst -- Swap-Fees fließen da nur INDIREKT und über die Zeit mit ein,
+  //    nicht 1:1 pro Swap.
+  // 2. Bei Streaming-Swaps (THORChain teilt große Swaps automatisch in viele Teil-Swaps über
+  //    mehrere Blöcke) taucht die Fee mitunter erst beim letzten Teil-Swap vollständig auf --
+  //    für die kurzfristige Live-Anzeige hier unkritisch, für exakte Buchhaltung nicht geeignet.
+  const estimateSwapFeeRune = action => {
+    try {
+      const swap = action && action.metadata && action.metadata.swap;
+      if (!swap) return null;
+      const feeBase = parseInt(swap.liquidityFee, 10);
+      if (!isFinite(feeBase) || feeBase < 0) return null;
+      return feeBase / 1e8;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // Lässt einen einzelnen Partikel vom unteren zum oberen Rand des Kanals wandern und pulsiert
+  // bei Ankunft kurz die Reward-Karte/-Zahl. sizeUsd steuert Partikel-Größe UND Lauf-Tempo
+  // (größerer Swap = größerer, etwas fixerer Partikel) -- LOG-skaliert, weil Swap-Größen von
+  // ein paar Dollar bis zu Millionen reichen und eine lineare Skala fast alles winzig aussehen
+  // ließe.
+  //
+  // Statt schlichter Kreise (bzw. zuvor "Glow-Orbs") jetzt kleine BLITZ-Icons -- dieselbe
+  // Blitz-Form, die auch im Header der Bond-Rewards-Karte steht (siehe IconBoltLogo weiter
+  // oben). Das macht die Partikel sofort als "Energie, die dorthin fließt" lesbar, statt als
+  // generische Punkte, und verbindet den Effekt optisch mit dem Markenzeichen der App (dieselbe
+  // Form steckt auch im RUNE.WATCH-Logo). Jeder Partikel bekommt zusätzlich eine leichte
+  // zufällige Drehung -- wirkt dadurch weniger wie exakt kopierte Klone, mehr wie einzelne,
+  // taumelnde Funken.
+  const spawnSwapParticle = sizeUsd => {
+    const channel = liveFlowChannelRef.current;
+    if (!channel) return;
+    const clamped = Math.max(10, Math.min(sizeUsd || 50, 2000000));
+    const scale = Math.min(1, Math.log10(clamped) / Math.log10(2000000)); // 0..1
+    const diameter = 9 + scale * 15; // 9px..24px
+    const durationMs = 1500 - scale * 450;
+    const big = scale > 0.6;
+    const fillColor = big ? '#F5C36B' : '#00DEE1';
+    const glowColor = big ? 'rgba(245,195,107,0.9)' : 'rgba(0,222,225,0.9)';
+    const glowFaint = big ? 'rgba(245,195,107,0.35)' : 'rgba(0,222,225,0.35)';
+    const leftPct = 47 + Math.random() * 6;
+    // Blitz-Pfad exakt aus IconBoltLogo übernommen (siehe dort), mit engerem viewBox auf die
+    // tatsächliche Form zugeschnitten (statt des vollen 0 0 100 100-Rahmens des Logos, in dem
+    // der Blitz nur einen kleinen, dezentrierten Ausschnitt einnimmt).
+    const boltSvg = color => `<svg viewBox="37 29 25 41" width="100%" height="100%" style="display:block"><path d="M56.27,31.5 L39.48,53.24 L48.33,53.94 L44.84,68.43 L60.45,49.13 L51.46,48.64 Z" fill="${color}"/></svg>`;
+
+    // Ein einzelner Blitz-Partikel (Hauptpartikel oder blasseres/kleineres Echo dahinter, siehe
+    // Aufrufe unten). Zwei verschachtelte Elemente: das äußere übernimmt Position + die
+    // Lauf-Animation (translate3d, siehe tpSwapParticleUp), das innere die statische Drehung +
+    // den Glow -- eine CSS-Animation auf "transform" würde sonst eine zusätzlich am selben
+    // Element gesetzte statische Drehung während des Laufens überschreiben.
+    const makeBolt = (d, opacity, delayMs, left) => {
+      const outer = document.createElement('div');
+      outer.style.position = 'absolute';
+      outer.style.left = `${left}%`;
+      outer.style.bottom = '0';
+      outer.style.width = `${d}px`;
+      outer.style.height = `${d * 1.6}px`;
+      outer.style.opacity = String(opacity);
+      outer.style.willChange = 'transform, opacity';
+      outer.style.animation = `tpSwapParticleUp ${durationMs}ms cubic-bezier(0.3,0.6,0.4,1) ${delayMs}ms forwards`;
+      const inner = document.createElement('div');
+      inner.style.width = '100%';
+      inner.style.height = '100%';
+      inner.style.transform = `rotate(${-14 + Math.random() * 28}deg)`;
+      inner.style.filter = `drop-shadow(0 0 ${d * 0.45}px ${glowColor}) drop-shadow(0 0 ${d * 0.9}px ${glowFaint})`;
+      inner.innerHTML = boltSvg(fillColor);
+      outer.appendChild(inner);
+      channel.appendChild(outer);
+      setTimeout(() => outer.remove(), durationMs + delayMs + 30);
+    };
+    // Hauptpartikel + kurzer Funken-Schweif: zwei kleinere, blassere Echos mit leichtem
+    // Zeitversatz direkt dahinter, dieselbe Bahn, etwas nach links/rechts versetzt.
+    makeBolt(diameter, 1, 0, leftPct);
+    makeBolt(diameter * 0.6, 0.45, 70, leftPct - 2 + Math.random() * 4);
+    makeBolt(diameter * 0.4, 0.25, 140, leftPct - 2 + Math.random() * 4);
+
+    setTimeout(() => {
+      const card = liveFlowCardRef.current;
+      const num = liveFlowNumberRef.current;
+      if (card) {
+        card.style.transition = 'border-color 0.25s, background-color 0.25s';
+        card.style.borderColor = big ? 'rgba(245,195,107,0.55)' : 'rgba(0,222,225,0.5)';
+        card.style.backgroundColor = big ? 'rgba(245,195,107,0.06)' : 'rgba(0,222,225,0.05)';
+        setTimeout(() => {
+          card.style.borderColor = '';
+          card.style.backgroundColor = '';
+        }, 260);
+      }
+      if (num) {
+        // transition kurz auf 'none', damit ein erneutes Antriggern mitten in der vorherigen
+        // Animation sauber neu startet, statt sie nur zu verlängern (siehe reflow-Trick unten).
+        num.style.animation = 'none';
+        void num.offsetWidth; // erzwingt einen Reflow, damit der Browser den Reset wirklich übernimmt
+        num.style.animation = 'tpRewardPulse 0.32s ease-out';
+      }
+      // Ankunfts-Ripple: ein sich ausbreitender, ausblendender Ring am unteren Kartenrand,
+      // genau dort, wo der Partikel "eintrifft" -- deutlich auffälliger als nur der Rand-/
+      // Hintergrund-Farbwechsel allein, liest sich wie ein kleiner Energiestoß statt einer
+      // reinen Farbänderung.
+      if (card) {
+        const ripple = document.createElement('div');
+        ripple.style.position = 'absolute';
+        ripple.style.left = '50%';
+        ripple.style.bottom = '-2px';
+        ripple.style.width = '10px';
+        ripple.style.height = '10px';
+        ripple.style.marginLeft = '-5px';
+        ripple.style.borderRadius = '50%';
+        ripple.style.border = `2px solid ${big ? '#F5C36B' : '#00DEE1'}`;
+        ripple.style.pointerEvents = 'none';
+        ripple.style.animation = 'tpArrivalRipple 0.55s ease-out forwards';
+        card.appendChild(ripple);
+        setTimeout(() => ripple.remove(), 600);
+      }
+    }, durationMs);
+  };
+
+  // Pollt regelmäßig die letzten Swaps und spawnt für jeden NEUEN (seit dem letzten Poll)
+  // einen Partikel UND bumpt live die 24h-Volumen-Zahl + den letzten Sparkline-Punkt. Läuft
+  // FÜR ALLE (nicht nur Nutzer mit getrackten Bond-Adressen) -- das Volumen-Kärtchen existiert
+  // unabhängig von Bond-Rewards, spawnSwapParticle() no-opt selbst still, wenn es keine
+  // Bond-Rewards-Karte zum Andocken gibt (liveFlowChannelRef.current wäre dann null). Läuft
+  // außerdem unabhängig vom aktiven Mobile-Tab weiter -- die Karten existieren immer im DOM,
+  // auf dem Handy nur ggf. gerade unsichtbar (display:none) -- so läuft es beim
+  // Zurückwechseln sofort weiter, statt erst wieder "aufzuwachen".
+  useEffect(() => {
+    const POLL_INTERVAL_MS = 7000;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        // Läuft jetzt über den eigenen Worker (/recent-swaps) statt direkt aus dem Browser
+        // gegen Midgard -- derselbe Grund wie bei fetchVolume24h weiter oben: kein
+        // serverseitiger Fallback/Cache bei einem Direktaufruf, Anfragen von unserem Worker aus
+        // sind von der Netzwerk-Einschränkung eines einzelnen Nutzers nicht betroffen. Der
+        // Worker hat zusätzlich einen eigenen kurzen Cache (4s), damit bei mehreren
+        // gleichzeitig aktiven Nutzern nicht jeder Poll einzeln bis zu Midgard durchgereicht
+        // wird.
+        const res = await fetchWithTimeout(`${PURCHASES_SYNC_BACKEND_BASE}/recent-swaps`, {}, 8000);
+        if (!res.ok) throw new Error('HTTP_' + res.status);
+        const json = await res.json();
+        if (cancelled) return;
+        const actions = Array.isArray(json && json.actions) ? json.actions : [];
+        if (!actions.length) return;
+        // Midgard liefert neueste zuerst -- für die Dedupe-Höhe interessiert nur die höchste.
+        const heights = actions.map(a => parseInt(a.height, 10)).filter(isFinite);
+        const maxHeight = heights.length ? Math.max(...heights) : null;
+        if (liveFlowFirstPollRef.current) {
+          // Erster Poll: NICHT alle 50 zurückliegenden Swaps als Partikel-Flut abfeuern (das
+          // wirkt wie ein Fehler, nicht wie ein Fluss), aber auch nicht STUMM nur die
+          // Startlinie setzen -- vorher sah man beim allerersten Laden der Seite dadurch
+          // schlicht NICHTS im Kanal, bis der nächste echte Swap kam (konnte je nach
+          // Netzwerkaktivität mehrere Minuten dauern). Stattdessen: ein kleiner "Willkommens"-
+          // Schwung aus den letzten paar echten Swaps, gestaffelt abgefeuert -- OHNE dabei das
+          // Live-Volumen zu bumpen (das steckt in der aktuellen volume24h-Zahl schon längst
+          // drin, ein zusätzlicher Bump würde doppelt zählen).
+          liveFlowFirstPollRef.current = false;
+          liveFlowLastHeightRef.current = maxHeight;
+          const welcome = actions.slice(0, 4);
+          welcome.forEach((action, i) => {
+            setTimeout(() => {
+              if (cancelled) return;
+              spawnSwapParticle(estimateSwapUsd(action));
+            }, i * 420);
+          });
+          return;
+        }
+        const since = liveFlowLastHeightRef.current;
+        const fresh = since != null ? actions.filter(a => parseInt(a.height, 10) > since) : [];
+        if (maxHeight != null) liveFlowLastHeightRef.current = maxHeight;
+        // Auf ein vernünftiges Maximum pro Poll begrenzen (Streaming-Swaps können sehr viele
+        // Teil-Aktionen auf einmal erzeugen) und über das Poll-Intervall verteilt abfeuern,
+        // statt alle im selben Frame -- sieht sonst wie ein einziger Klumpen statt einem
+        // fortlaufenden Fluss aus.
+        const batch = fresh.slice(0, 8);
+        batch.forEach((action, i) => {
+          setTimeout(() => {
+            if (cancelled) return;
+            const usd = estimateSwapUsd(action);
+            spawnSwapParticle(usd);
+            // Echte Liquidity-Fee dieses Swaps akkumulieren -- das speist jetzt sowohl die
+            // Textzeile ("Swap Fees Generated") ALS AUCH den Live-Chart direkt darüber (siehe
+            // ausführliche Begründung bei der Ref-Deklaration weiter oben: beide zeigen jetzt
+            // konsequent dieselbe Größe, vorher zeichnete der Chart eine ANDERE Zahl
+            // (Volumen) als der Text darunter auswies).
+            const feeRune = estimateSwapFeeRune(action);
+            if (feeRune != null) {
+              liveSwapFeeAccumRuneRef.current += feeRune;
+              setLiveFeeAccumRune(liveSwapFeeAccumRuneRef.current);
+              // Sofortiger Live-Sample-Push zusätzlich zum periodischen Heartbeat weiter unten
+              // -- damit der Chart nicht erst beim nächsten 5s-Takt reagiert, sondern in genau
+              // dem Moment einen sichtbaren Sprung macht, in dem der Partikel landet. 60
+              // Samples bei 5s-Takt = 5-Minuten-Fenster -- zusammen mit der weichen Kurve
+              // (siehe smoothLinePath) ein guter Mittelweg: 3 Minuten wirkte trotz Glättung
+              // noch zu abgehackt, 10-20 Minuten dagegen zu träge/flach.
+              setLiveVolumeSeries(prevSeries => [...prevSeries, {
+                t: Date.now(),
+                volumeRune: liveSwapFeeAccumRuneRef.current
+              }].slice(-60));
+              const numEl = liveVolumeNumberRef.current;
+              if (numEl) {
+                numEl.style.animation = 'none';
+                void numEl.offsetWidth; // Reflow erzwingen, damit ein erneutes Antriggern sauber neu startet
+                numEl.style.animation = 'tpRewardPulse 0.32s ease-out';
+              }
+            }
+            // volume24h/volumeHistory (die "24H VOLUME"-Kopfzahl + ihr Tages-Sparkline) --
+            // wird bewusst weiterhin lokal live hochgezählt, der nächste ECHTE
+            // fetchVolume24h()-Poll überschreibt das ohnehin wieder mit dem exakten
+            // Netzwerkwert, das Trickeln dazwischen ist rein fürs Auge. Läuft komplett
+            // unabhängig vom Fee-Akkumulator oben -- beeinflusst sich gegenseitig nicht.
+            //
+            // Funktionaler Updater statt liveFlowStateRef-Wert: mehrere Swaps im selben
+            // Poll-Batch feuern eng gestaffelt hintereinander (siehe oben) -- ohne den
+            // Updater könnte ein zweiter Bump kurz vor dem nächsten Render noch den alten
+            // Stand lesen und den ersten Bump dadurch überschreiben statt draufzuaddieren.
+            const {
+              activePrice: price
+            } = liveFlowStateRef.current;
+            let bumpedVol = null;
+            if (usd != null && price) {
+              setVolume24h(prev => {
+                if (prev == null) return prev;
+                bumpedVol = prev + usd / price;
+                return bumpedVol;
+              });
+            }
+            if (bumpedVol != null) {
+              setVolumeHistory(h => h ? patchLastVolumeWithLive(h, bumpedVol) : h);
+            }
+          }, i * (POLL_INTERVAL_MS / (batch.length + 1)));
+        });
+      } catch (e) {
+        // Nächster Poll versucht es einfach erneut -- rein kosmetische Zusatzanzeige, kein
+        // User-sichtbarer Fehler nötig.
+      }
+    };
+    poll();
+    const interval = setInterval(poll, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Herzschlag für den LIVE-Modus des Volumen-Sparklines (siehe VolumeSparkline weiter oben):
+  // trägt alle paar Sekunden einen Zeitstempel-Messwert nach, auch wenn GERADE kein Swap
+  // hereinkommt -- sonst stünde der Graph in ruhigen Momenten einfach still, statt sich wie ein
+  // "lebendiger" Live-Chart durchgehend nach links zu bewegen. Der eigentliche SPRUNG nach oben
+  // bei einem echten Swap kommt weiterhin aus dem sofortigen Push im Poll-Effekt oben -- dieser
+  // Herzschlag sorgt nur für die kontinuierliche Zeitachse dazwischen.
+  useEffect(() => {
+    const HEARTBEAT_MS = 5000;
+    const tick = () => {
+      // Trägt bewusst den (nur lokal, additiv wachsenden) liveSwapFeeAccumRuneRef nach --
+      // dieselbe Größe, die auch die Textzeile "Swap Fees Generated" unter dem Chart zeigt
+      // (siehe ausführliche Begründung bei der Ref-Deklaration weiter oben).
+      setLiveVolumeSeries(prevSeries => [...prevSeries, {
+        t: Date.now(),
+        volumeRune: liveSwapFeeAccumRuneRef.current
+      }].slice(-60));
+    };
+    const interval = setInterval(tick, HEARTBEAT_MS);
+    return () => clearInterval(interval);
+  }, []);
+
   // Automatisch rekonstruierte Einträge (aus THORNode-Höhenabfragen), über alle getrackten
   // Adressen zusammengefasst.
   const autoEventsAll = trackedAddresses.flatMap(a => autoRewardHistory[a] || []);
@@ -13004,6 +15515,18 @@ function ThorchainPortfolio() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  };
+
+  // CSV-Export der Wallet/Node-Bond-Übersicht -- eine Zeile je Wallet-Node-Kombination.
+  const exportWalletNodeBreakdownCsv = () => {
+    const header = ['wallet_address', 'node_address', 'node_status', 'bonded_rune'];
+    const lines = [header.join(',')];
+    for (const w of walletNodeBreakdown) {
+      for (const n of w.nodes) {
+        lines.push([w.addr, n.nodeAddress, n.status ?? '', n.bonded].join(','));
+      }
+    }
+    downloadTextFile(`bonded-wallets-nodes-${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'), 'text/csv');
   };
 
   // CSV-Export der Rewards-Historie -- eine Zeile pro Reward-Event, chronologisch aufsteigend
@@ -13165,6 +15688,1124 @@ function ThorchainPortfolio() {
     return rewardOnlyEvents.filter(e => e && Number.isFinite(e.amount) && e.amount > 0 && Number.isFinite(e.dateMs));
   }, [rewardOnlyEvents]);
 
+  // Historische Bond-APY je vergangenem Churn-Zeitraum (für das "Live-APY"-Badge -> Klick ->
+  // Historie-Modal). Verwendet dieselbe calculateAPR/calculateAPY-Formel wie die Live-APY oben,
+  // nur mit dem TATSÄCHLICHEN Reward-Betrag zwischen zwei aufeinanderfolgenden Reward-Events
+  // (statt Schätzung während eines laufenden Churns) und der Zeitspanne dazwischen als Nenner.
+  // Als Principal wird mangels historischer Bond-Snapshots der AKTUELLE kombinierte Bond-Betrag
+  // verwendet (personalBondSum) -- das ist eine Näherung (Bond kann sich über die Zeit geändert
+  // haben), aber dieselbe Größe, die auch die Live-APY-Anzeige nutzt, also konsistent.
+  const apyHistoryData = useMemo(() => {
+    // WICHTIG: hier bewusst autoEventsAll (UNGEFILTERT, inkl. 0-Reward-Churns) verwenden statt
+    // allRewardEntries (das amount>0 filtert) -- die 0-Reward-Churns (Node inaktiv/"churn out")
+    // werden zwar für die Bond-Fortschreibung durchlaufen (siehe unten), fließen aber NICHT in
+    // die APY-Berechnung selbst ein: es wird bewusst nur zwischen zwei UNMITTELBAR
+    // aufeinanderfolgenden AKTIVEN Churns eine Zeile berechnet. Läge dazwischen ein Churn-out,
+    // wird für diesen Übergang keine APY-Zeile erzeugt -- weder als eigene 0%-Zeile noch (wie in
+    // einer früheren Version) als künstlich über die Lücke gestreckte Periode der nächsten
+    // echten Auszahlung. Damit der Churn-out trotzdem nachvollziehbar bleibt, wird er separat
+    // als "churnOuts"-Marker zurückgegeben (siehe unten) -- rein informativ, fließt NICHT in die
+    // APY-Berechnung ein.
+    if (autoEventsAll.length < 2) return {
+      rows: [],
+      churnOuts: []
+    };
+    // Kapitalbewegungen (Bond/Unbond, TATSÄCHLICHE Ein-/Auszahlungen) über ALLE getrackten
+    // Adressen zusammen -- daraus + den (automatisch in den Bond compoundenden) Rewards wird
+    // unten der ECHTE Bond-Verlauf über die Zeit rekonstruiert. WICHTIG: hier NICHT einfach den
+    // heutigen Bond-Endstand für jeden vergangenen Zeitraum annehmen (das war der Bug in der
+    // vorherigen Version) -- der Bond ist seit jedem vergangenen Churn durch die seither
+    // gutgeschriebenen Rewards gewachsen, alte Perioden würden mit einem künstlich zu hohen
+    // Principal gerechnet und die historische APY damit systematisch zu niedrig ausgewiesen.
+    const flowEvents = trackedAddresses.flatMap(a => nodeRewardsData[a] && nodeRewardsData[a].transactions || []).filter(tx => tx && Number.isFinite(tx.dateMs) && Number.isFinite(tx.amount)).map(tx => ({
+      dateMs: tx.dateMs,
+      delta: tx.type === 'unbond' ? -tx.amount : tx.amount
+    })).sort((a, b) => a.dateMs - b.dateMs);
+
+    // Reward-Events nach Churn-Höhe gruppieren (dieselbe Höhe = derselbe echte Churn,
+    // netzwerkweit eindeutig) und je Höhe aufsummieren -- autoEventsAll mischt Events von ALLEN
+    // getrackten Adressen, ohne Gruppierung würde ein Churn mit Auszahlungen von mehreren
+    // eigenen Adressen fälschlich als mehrere separate (Mini-)Zeiträume gezählt. Churns, die für
+    // eine getrackte Adresse noch nicht geladen sind, fehlen hier einfach (kein Eintrag) statt
+    // fälschlich als 0 gezählt zu werden -- das kann kurzzeitig zu einer minimal unvollständigen
+    // Historie führen, während der Worker im Hintergrund noch nachlädt.
+    const byHeight = new Map();
+    for (const e of autoEventsAll) {
+      if (!e || e.height == null || !Number.isFinite(e.dateMs)) continue;
+      const amount = Number.isFinite(e.amount) ? e.amount : 0;
+      const key = `h${e.height}`;
+      const existing = byHeight.get(key);
+      if (existing) {
+        existing.amount += amount;
+        existing.dateMs = Math.max(existing.dateMs, e.dateMs);
+      } else {
+        byHeight.set(key, {
+          height: e.height,
+          dateMs: e.dateMs,
+          amount
+        });
+      }
+    }
+    const rewardEvents = [...byHeight.values()].sort((a, b) => (a.dateMs || 0) - (b.dateMs || 0));
+    if (rewardEvents.length < 2) return {
+      rows: [],
+      churnOuts: []
+    };
+    let flowIdx = 0;
+    let runningBalance = 0;
+    let prevEvent = null; // letzter Churn (egal ob aktiv oder Churn-out) -- nur für die Bond-Fortschreibung.
+    const rows = [];
+    const churnOuts = [];
+    for (const rw of rewardEvents) {
+      // Alle Kapitalbewegungen bis (einschließlich) zu diesem Reward-Zeitpunkt einarbeiten,
+      // bevor der Reward selbst dazugerechnet wird -- runningBalance entspricht damit dem
+      // Bond, der WÄHREND der Periode bis zu diesem Churn tatsächlich am Netzwerk beteiligt war.
+      while (flowIdx < flowEvents.length && flowEvents[flowIdx].dateMs <= rw.dateMs) {
+        runningBalance += flowEvents[flowIdx].delta;
+        flowIdx++;
+      }
+      if (rw.amount <= 0) {
+        // Churn-out: 0 Reward bei diesem Churn (Node inaktiv/rausrotiert) -- rein informativer
+        // Marker für die Anzeige, geht NICHT in die APY-Berechnung ein.
+        churnOuts.push({
+          dateMs: rw.dateMs,
+          height: rw.height
+        });
+      } else if (prevEvent != null && prevEvent.amount > 0 && runningBalance > 0) {
+        // Nur eine Zeile berechnen, wenn SOWOHL der vorherige ALS AUCH der aktuelle Churn aktiv
+        // waren -- lag ein Churn-out dazwischen, wird dieser Übergang bewusst übersprungen.
+        const periodSeconds = (rw.dateMs - prevEvent.dateMs) / 1000;
+        if (periodSeconds > 0) {
+          const apr = calculateAPR(rw.amount, runningBalance, periodSeconds);
+          const apy = calculateAPY(apr);
+          rows.push({
+            dateMs: rw.dateMs,
+            height: rw.height,
+            amount: rw.amount,
+            periodSeconds,
+            principal: runningBalance,
+            apr,
+            apy
+          });
+        }
+      }
+      runningBalance += rw.amount; // Reward compoundet automatisch in den Bond (auch 0 bei Churn-out).
+      prevEvent = rw;
+    }
+    return {
+      rows: rows.sort((a, b) => (b.dateMs || 0) - (a.dateMs || 0)),
+      // neueste zuerst
+      churnOuts: churnOuts.sort((a, b) => (b.dateMs || 0) - (a.dateMs || 0))
+    };
+  }, [autoEventsAll, trackedAddresses, nodeRewardsData]);
+  const apyHistory = apyHistoryData.rows;
+  const apyHistoryChurnOuts = apyHistoryData.churnOuts;
+  // Zeitraum-Filter für die Anzeige (1 Monat / 3 Monate / 1 Jahr / Volle Zeit) -- filtert NUR die
+  // Darstellung, nicht die zugrundeliegende Berechnung selbst (Bond-Rekonstruktion + Zuordnung
+  // "vorheriger aktiver Churn" läuft immer über die VOLLSTÄNDIGE Historie, siehe apyHistoryData
+  // oben -- sonst würde z.B. bei "1 Monat" der erste sichtbare Churn fälschlich keinen
+  // Vorgänger-Churn zum Vergleich finden, obwohl es außerhalb des Fensters einen gäbe).
+  const apyHistoryCutoffMs = apyHistoryRange != null ? Date.now() - apyHistoryRange * 24 * 60 * 60 * 1000 : null;
+  // Zeilen mit einer verschwindend kleinen (aber technisch von 0 verschiedenen) APY werden hier
+  // komplett aus der Anzeige UND aus dem Durchschnitt ausgeschlossen. Solche Werte (im Bereich
+  // von 0.000%-0.003%) sind praktisch nie ein plausibler realer Ertrag -- ein normaler Churn
+  // sollte, unabhängig von der Bond-Größe, ungefähr dem Netzwerk-APY entsprechen (siehe Live-APY
+  // oben). Ein derart winziger Wert deutet auf eine Dateneigenart bei der historischen
+  // Reward-Abfrage für genau diesen Churn hin (z.B. Node-Rotation/Leave rund um diesen Zeitpunkt),
+  // nicht auf einen echten, aussagekräftigen Ertrag -- und wird deshalb ausgeblendet statt
+  // verwirrend als "0%" angezeigt zu werden.
+  const APY_HISTORY_MIN_DISPLAYED_APY = 0.0001; // 0.01%
+  const apyHistoryFiltered = (apyHistoryCutoffMs != null ? apyHistory.filter(r => r.dateMs >= apyHistoryCutoffMs) : apyHistory).filter(r => r.apy >= APY_HISTORY_MIN_DISPLAYED_APY);
+  const apyHistoryChurnOutsFiltered = apyHistoryCutoffMs != null ? apyHistoryChurnOuts.filter(co => co.dateMs >= apyHistoryCutoffMs) : apyHistoryChurnOuts;
+  const apyHistoryAvg = apyHistoryFiltered.length ? apyHistoryFiltered.reduce((s, r) => s + r.apy, 0) / apyHistoryFiltered.length : null;
+  // Live-APY für den GERADE LAUFENDEN Churn (dieselbe Zahl wie das Badge selbst, siehe
+  // liveChurnApy oben) als eigene, klar markierte Zeile ganz oben in der Historie -- rein
+  // informativ (noch nicht abgeschlossener Churn), zählt NICHT in apyHistoryAvg mit rein.
+  const apyHistoryLiveItem = liveChurnApy && liveChurnApy.apy != null && personalBondSum ? {
+    dateMs: Date.now(),
+    amount: smoothAccruedAwardSum != null ? smoothAccruedAwardSum : accruedAwardSum,
+    principal: personalBondSum,
+    periodSeconds: liveChurnApy.effectivePeriodSeconds,
+    progressRatio: liveChurnApy.progressRatio,
+    apy: liveChurnApy.apy
+  } : null;
+  // Zeilen + Churn-out-Marker + Live-Zeile chronologisch (neueste zuerst) zu EINER Liste für die
+  // Anzeige gemischt -- Churn-out-Marker UND die Live-Zeile fließen dabei nur in die
+  // DARSTELLUNG ein, nicht in apyHistory/apyHistoryAvg selbst.
+  const apyHistoryDisplayItems = useMemo(() => {
+    const items = [...apyHistoryFiltered.map(row => ({
+      kind: 'row',
+      dateMs: row.dateMs,
+      row
+    })), ...apyHistoryChurnOutsFiltered.map(co => ({
+      kind: 'churnOut',
+      dateMs: co.dateMs,
+      churnOut: co
+    }))];
+    if (apyHistoryLiveItem) items.push({
+      kind: 'live',
+      dateMs: apyHistoryLiveItem.dateMs,
+      live: apyHistoryLiveItem
+    });
+    return items.sort((a, b) => (b.dateMs || 0) - (a.dateMs || 0));
+  }, [apyHistoryFiltered, apyHistoryChurnOutsFiltered, apyHistoryLiveItem]);
+
+  // Modal, das beim Klick auf das Live-APY-Badge aufgeht -- zeigt die Bond-APY-Historie (eine
+  // Zeile pro vergangenem Churn-Zeitraum), analog zum runePriceChartModal-Muster oben.
+  const apyHistoryModal = showApyHistoryModal && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowApyHistoryModal(false),
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      background: 'rgba(0,0,0,0.75)',
+      zIndex: 1000,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "tp-apy-history-scroll",
+    style: {
+      ...cardShellStyle,
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
+      width: '100%',
+      maxWidth: 700,
+      maxHeight: '92vh',
+      overflow: 'auto',
+      padding: '18px 20px 18px',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 17,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, t('networkApyHistoryTitle', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowApyCalculatorModal(true),
+    title: t('apyCalculatorHint', lang),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'rgba(0,222,225,0.1)',
+      border: '1px solid rgba(0,222,225,0.28)',
+      borderRadius: 999,
+      width: 30,
+      height: 30,
+      padding: 0,
+      cursor: 'pointer',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 15,
+    height: 15,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "#6FE3E5",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: 4,
+    y: 2,
+    width: 16,
+    height: 20,
+    rx: 2
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 8,
+    y1: 6,
+    x2: 16,
+    y2: 6
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 8,
+    y1: 11,
+    x2: 8,
+    y2: 11
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 12,
+    y1: 11,
+    x2: 12,
+    y2: 11
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 16,
+    y1: 11,
+    x2: 16,
+    y2: 11
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 8,
+    y1: 15,
+    x2: 8,
+    y2: 15
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 12,
+    y1: 15,
+    x2: 12,
+    y2: 15
+  }), /*#__PURE__*/React.createElement("line", {
+    x1: 16,
+    y1: 15,
+    x2: 16,
+    y2: 15
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowApyHistoryModal(false),
+    title: t('closeWord', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 7,
+      width: 30,
+      height: 30,
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 15,
+      lineHeight: 1,
+      flexShrink: 0
+    }
+  }, "✕"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4,
+      marginBottom: 12
+    }
+  }, APY_HISTORY_RANGES.map(r => /*#__PURE__*/React.createElement("button", {
+    key: r.key,
+    onClick: () => setApyHistoryRange(r.days),
+    style: {
+      background: apyHistoryRange === r.days ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: apyHistoryRange === r.days ? '#00DEE1' : '#A0BABC',
+      border: `1px solid ${apyHistoryRange === r.days ? 'rgba(0,222,225,0.3)' : '#1A3436'}`,
+      borderRadius: 7,
+      padding: '4px 10px',
+      fontSize: 11.5,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, t(r.key, lang)))), autoHistoryStatus === 'loading' && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      background: 'rgba(255,184,84,0.08)',
+      border: '1px solid rgba(255,184,84,0.25)',
+      borderRadius: 8,
+      padding: '6px 10px',
+      marginBottom: 10,
+      color: '#E0B268',
+      fontSize: 11.5,
+      lineHeight: 1.4
+    }
+  }, t('networkApyHistorySyncing', lang).replace('{progress}', autoHistoryProgress && autoHistoryProgress.total != null ? `${autoHistoryProgress.done}/${autoHistoryProgress.total}` : autoHistoryProgress ? `${autoHistoryProgress.done}` : '…')), apyHistoryAvg != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      background: 'rgba(0,222,225,0.08)',
+      border: '1px solid rgba(0,222,225,0.25)',
+      borderRadius: 10,
+      padding: '8px 12px',
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6FE3E5',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em'
+    }
+  }, t('networkApyHistoryAvg', lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#F5F5F5',
+      fontWeight: 800,
+      fontSize: 16,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, fmtApyPercent(apyHistoryAvg, lang))), apyHistoryFiltered.length > 1 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(ApyHistoryChart, {
+    data: apyHistoryFiltered,
+    avgApy: apyHistoryAvg,
+    lang: lang
+  })), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setApyHistoryListExpanded(v => !v),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      width: '100%',
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 8,
+      padding: '8px 12px',
+      color: '#A0BABC',
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif",
+      marginBottom: apyHistoryListExpanded ? 8 : 0
+    }
+  }, /*#__PURE__*/React.createElement("span", null, t('networkApyHistoryToggleList', lang), " (", apyHistoryDisplayItems.length, ")"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: 'inline-block',
+      fontSize: 10,
+      color: '#5C7274',
+      transform: apyHistoryListExpanded ? 'rotate(180deg)' : 'none'
+    }
+  }, "▾")), apyHistoryListExpanded && (apyHistoryDisplayItems.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 13,
+      textAlign: 'center',
+      padding: '30px 10px'
+    }
+  }, t('networkApyHistoryEmpty', lang)) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 1,
+      borderRadius: 10,
+      overflow: 'hidden',
+      border: '1px solid #142B2D'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '8px 12px',
+      background: '#0D2022',
+      color: '#6C8688',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.03em'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: '1 1 auto'
+    }
+  }, t('networkApyHistoryDate', lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 90,
+      textAlign: 'right'
+    }
+  }, t('networkApyHistoryReward', lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 92,
+      textAlign: 'right'
+    }
+  }, t('networkApyHistoryBond', lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 50,
+      textAlign: 'right'
+    }
+  }, t('networkApyHistoryPeriod', lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 64,
+      textAlign: 'right'
+    }
+  }, t('networkApyHistoryApy', lang))), apyHistoryDisplayItems.map((item, i) => item.kind === 'churnOut' ? /*#__PURE__*/React.createElement("div", {
+    key: item.churnOut.height != null ? `co-h${item.churnOut.height}` : `co-d${item.dateMs}-${i}`,
+    title: t('networkApyHistoryChurnOutHint', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      padding: '6px 12px 6px 9px',
+      background: '#0B1517',
+      borderLeft: '3px solid #3A5052'
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 10,
+    height: 10,
+    viewBox: "0 0 10 10",
+    fill: "none",
+    style: {
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: 2,
+    y: 1,
+    width: 2,
+    height: 8,
+    rx: 0.5,
+    fill: "#6C8688"
+  }), /*#__PURE__*/React.createElement("rect", {
+    x: 6,
+    y: 1,
+    width: 2,
+    height: 8,
+    rx: 0.5,
+    fill: "#6C8688"
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#8AA3A5',
+      fontSize: 11,
+      fontWeight: 600
+    }
+  }, t('networkApyHistoryChurnOut', lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: 'auto',
+      color: '#4D6062',
+      fontSize: 11
+    }
+  }, new Date(item.dateMs).toLocaleDateString(localeFor(lang), {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  }))) : item.kind === 'live' ? /*#__PURE__*/React.createElement("div", {
+    key: "live",
+    title: t('networkApyExact', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '9px 12px',
+      background: 'rgba(0,222,225,0.07)',
+      borderBottom: '1px solid rgba(0,222,225,0.18)',
+      color: '#C7DBDC',
+      fontSize: 12.5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: '1 1 auto',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: '#00DEE1',
+      display: 'inline-block',
+      boxShadow: '0 0 6px rgba(0,222,225,0.8)'
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6FE3E5',
+      fontWeight: 700,
+      fontSize: 11,
+      textTransform: 'uppercase',
+      letterSpacing: '0.03em'
+    }
+  }, t('networkApyHistoryLive', lang))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 90,
+      textAlign: 'right',
+      color: '#A0BABC'
+    }
+  }, hideValue ? '••••' : `+${fmtRunePrecise(item.live.amount, lang)}`), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 92,
+      textAlign: 'right',
+      color: '#7C9698'
+    },
+    title: `${item.live.principal} RUNE`
+  }, hideValue ? '••••' : fmtRune(item.live.principal, lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 50,
+      textAlign: 'right',
+      color: '#6C8688'
+    }
+  }, `${Math.max(1, Math.round(item.live.periodSeconds / 86400))}${t('networkApyHistoryDays', lang).replace('{n}', '')}`), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 64,
+      textAlign: 'right',
+      color: '#00DEE1',
+      fontWeight: 800
+    }
+  }, fmtApyPercentPrecise(item.live.apy, lang))) : /*#__PURE__*/React.createElement("div", {
+    key: item.row.height != null ? `h${item.row.height}` : `d${item.row.dateMs}-${i}`,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '9px 12px',
+      background: i % 2 === 0 ? '#0A1B1D' : '#0D2224',
+      color: '#C7DBDC',
+      fontSize: 12.5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: '1 1 auto'
+    }
+  }, new Date(item.row.dateMs).toLocaleDateString(localeFor(lang), {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 90,
+      textAlign: 'right',
+      color: '#A0BABC'
+    }
+  }, hideValue ? '••••' : `+${fmtRunePrecise(item.row.amount, lang)}`), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 92,
+      textAlign: 'right',
+      color: '#7C9698'
+    },
+    title: `${item.row.principal} RUNE`
+  }, hideValue ? '••••' : fmtRune(item.row.principal, lang)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 50,
+      textAlign: 'right',
+      color: '#6C8688'
+    }
+  }, `${Math.max(1, Math.round(item.row.periodSeconds / 86400))}${t('networkApyHistoryDays', lang).replace('{n}', '')}`), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 64,
+      textAlign: 'right',
+      color: '#00DEE1',
+      fontWeight: 700
+    }
+  }, fmtApyPercentPrecise(item.row.apy, lang))))))));
+
+  // Modal, das beim Klick auf die Volumen-Karte aufgeht -- zeigt die Swap-Volumen-Historie mit
+  // wählbarem Zeitraum (1M/3M/1J/2J/3J) und Durchschnitts-/Summen-Kennzahl für den gewählten
+  // Zeitraum. Analog zum apyHistoryModal-Muster oben.
+  const volumeHistoryEntry = volumeHistoryCache[volumeHistoryRangeDays];
+  // Solange die aktuell gewählte Range noch WIRKLICH lädt (und noch keine eigenen Daten hat),
+  // auf die zuletzt erfolgreich geladenen Daten zurückfallen (auch wenn die zu einer ANDEREN
+  // Range gehören) -- verhindert, dass der Chart beim Wechseln kurz komplett verschwindet/springt.
+  // WICHTIG: das gilt NUR während des Ladens (entry.loading === true). Ist die Anfrage
+  // bereits fehlgeschlagen (entry.error gesetzt, loading false), NICHT mehr auf die alten Daten
+  // zurückfallen -- sonst würde ein fehlgeschlagener Request für z.B. "2J" stillschweigend
+  // weiter die (identischen) Daten von "1J" zeigen, ohne dass der Fehler sichtbar wird.
+  const volumeHistoryDisplayData = volumeHistoryEntry && volumeHistoryEntry.data ? volumeHistoryEntry.data : volumeHistoryEntry && volumeHistoryEntry.loading && volumeHistoryDisplay ? volumeHistoryDisplay.data : null;
+  const volumeHistoryIsRefreshing = !!(volumeHistoryEntry && volumeHistoryEntry.loading && volumeHistoryDisplayData);
+  const volumeHistoryModal = showVolumeHistoryModal && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowVolumeHistoryModal(false),
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      background: 'rgba(0,0,0,0.75)',
+      zIndex: 1000,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "tp-apy-history-scroll",
+    style: {
+      ...cardShellStyle,
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
+      width: '100%',
+      maxWidth: 720,
+      maxHeight: '92vh',
+      overflow: 'auto',
+      padding: '18px 20px 18px',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 17,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, t('volumeHistoryTitle', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowVolumeHistoryModal(false),
+    title: t('closeWord', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 7,
+      width: 30,
+      height: 30,
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 15,
+      lineHeight: 1,
+      flexShrink: 0
+    }
+  }, "✕")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4,
+      marginBottom: 10
+    }
+  }, VOLUME_HISTORY_RANGES.map(r => /*#__PURE__*/React.createElement("button", {
+    key: r.key,
+    onClick: () => setVolumeHistoryRangeDays(r.days),
+    style: {
+      background: volumeHistoryRangeDays === r.days ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: volumeHistoryRangeDays === r.days ? '#00DEE1' : '#A0BABC',
+      border: `1px solid ${volumeHistoryRangeDays === r.days ? 'rgba(0,222,225,0.3)' : '#1A3436'}`,
+      borderRadius: 7,
+      padding: '4px 10px',
+      fontSize: 11.5,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, t(r.key, lang)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: 'relative',
+      minHeight: 340,
+      opacity: volumeHistoryIsRefreshing ? 0.55 : 1,
+      transition: 'opacity 0.15s ease'
+    }
+  }, volumeHistoryDisplayData && volumeHistoryDisplayData.length > 1 ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginBottom: 10,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1 1 160px',
+      background: 'rgba(0,222,225,0.08)',
+      border: '1px solid rgba(0,222,225,0.25)',
+      borderRadius: 10,
+      padding: '8px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#6FE3E5',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 2
+    }
+  }, t('volumeHistoryAvg', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontWeight: 800,
+      fontSize: 15,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, hideValue ? '••••' : activePrice != null ? fmtUSDCompact(volumeHistoryDisplayData.reduce((s, d) => s + d.volumeRune, 0) / volumeHistoryDisplayData.length * activePrice, lang, currency) : `${fmtRune(volumeHistoryDisplayData.reduce((s, d) => s + d.volumeRune, 0) / volumeHistoryDisplayData.length, lang)} RUNE`)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1 1 160px',
+      background: '#0D2022',
+      border: '1px solid #1A3436',
+      borderRadius: 10,
+      padding: '8px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 2
+    }
+  }, t('volumeHistoryTotal', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontWeight: 800,
+      fontSize: 15,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, hideValue ? '••••' : activePrice != null ? fmtUSDCompact(volumeHistoryDisplayData.reduce((s, d) => s + d.volumeRune, 0) * activePrice, lang, currency) : `${fmtRune(volumeHistoryDisplayData.reduce((s, d) => s + d.volumeRune, 0), lang)} RUNE`))), /*#__PURE__*/React.createElement(VolumeHistoryChart, {
+    data: volumeHistoryDisplayData,
+    activePrice: activePrice,
+    lang: lang,
+    currency: currency,
+    hideValue: hideValue
+  })) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 13,
+      textAlign: 'center',
+      padding: '40px 10px'
+    }
+  }, volumeHistoryEntry && volumeHistoryEntry.error ? t('volumeHistoryEmpty', lang) : t('loading', lang) + '…'))));
+
+  // Bond-Wachstumsrechner: hochgerechneter RUNE-Endbetrag bei verschiedenen APY-Szenarien,
+  // ausgehend von einem (editierbaren) Startbetrag über einen wählbaren Zeitraum -- entweder
+  // per Preset-Button ODER per frei gewähltem Zieldatum. Reines Zinseszins-Modell (APY bereits
+  // als effektiver Jahreszins verstanden, siehe calculateAPY weiter oben) -- keine
+  // Berücksichtigung von zukünftigen Ein-/Auszahlungen oder Churn-outs, rein "was wäre wenn
+  // dieser Zinssatz über die ganze Zeit konstant bliebe".
+  const calcProjected = (start, apyPercent, days) => {
+    if (start == null || apyPercent == null || !isFinite(apyPercent) || !isFinite(days)) return null;
+    const years = days / 365;
+    return start * Math.pow(1 + apyPercent / 100, years);
+  };
+  // Start-/APY-Werte werden bewusst als ROHER TEXT im State gehalten (nicht als Zahl) -- würde
+  // man bei jedem Tastendruck sofort zu einer Zahl parsen und zurückschreiben, könnte man z.B.
+  // nach "5" keinen Punkt mehr tippen ("5." wird sofort wieder zu "5"), was das Eingeben von
+  // Kommazahlen unmöglich macht. Erst bei der eigentlichen Berechnung wird geparst.
+  const calcEffectiveStart = calcStartAmountStr.trim() !== '' ? parseFloat(calcStartAmountStr) || 0 : personalBondSum || 0;
+  const calcTodayIso = new Date().toISOString().slice(0, 10);
+  const calcEffectiveDays = calcCustomDate ? Math.max(1, Math.round((new Date(`${calcCustomDate}T00:00:00`).getTime() - Date.now()) / 86400000)) : calcPeriodDays;
+  const apyCalculatorScenarioRows = [liveChurnApy && liveChurnApy.apy != null ? {
+    key: 'live',
+    label: t('apyCalculatorLiveApy', lang),
+    apyPercent: liveChurnApy.apy * 100,
+    editable: false
+  } : null, apyHistoryAvg != null ? {
+    key: 'avg',
+    label: t('apyCalculatorHistoricalAvg', lang),
+    apyPercent: apyHistoryAvg * 100,
+    editable: false
+  } : null, ...calcCustomApyStrs.map((v, i) => ({
+    key: `custom-${i}`,
+    label: `${t('apyCalculatorCustom', lang)} ${i + 1}`,
+    apyPercent: parseFloat(v) || 0,
+    editable: true,
+    idx: i
+  }))].filter(Boolean);
+  const apyCalculatorBestApy = apyCalculatorScenarioRows.length > 1 ? Math.max(...apyCalculatorScenarioRows.map(r => r.apyPercent)) : null;
+  const apyCalculatorModal = showApyCalculatorModal && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowApyCalculatorModal(false),
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      background: 'rgba(0,0,0,0.75)',
+      zIndex: 1000,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "tp-calc-scroll",
+    style: {
+      ...cardShellStyle,
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
+      width: '100%',
+      maxWidth: 560,
+      maxHeight: '92vh',
+      overflow: 'auto',
+      padding: '14px 16px 14px',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 16,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, t('apyCalculatorTitle', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowApyCalculatorModal(false),
+    title: t('closeWord', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 7,
+      width: 30,
+      height: 30,
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 15,
+      lineHeight: 1,
+      flexShrink: 0
+    }
+  }, "✕")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 4
+    }
+  }, t('apyCalculatorStartAmount', lang)), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    className: "tp-calc-input",
+    placeholder: personalBondSum != null ? personalBondSum.toFixed(2) : '0.00',
+    value: calcStartAmountStr,
+    onChange: e => setCalcStartAmountStr(e.target.value),
+    style: {
+      width: '100%',
+      boxSizing: 'border-box',
+      background: '#0D2022',
+      border: '1px solid #1A3436',
+      borderRadius: 10,
+      padding: '9px 11px',
+      color: '#F5F5F5',
+      fontSize: 15,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 4
+    }
+  }, t('apyCalculatorPeriod', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 4,
+      flexWrap: 'wrap',
+      marginBottom: 6
+    }
+  }, APY_CALCULATOR_PERIODS.map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.key,
+    onClick: () => {
+      setCalcPeriodDays(p.days);
+      setCalcCustomDate('');
+    },
+    style: {
+      background: !calcCustomDate && calcPeriodDays === p.days ? 'rgba(0,222,225,0.14)' : 'transparent',
+      color: !calcCustomDate && calcPeriodDays === p.days ? '#00DEE1' : '#A0BABC',
+      border: `1px solid ${!calcCustomDate && calcPeriodDays === p.days ? 'rgba(0,222,225,0.3)' : '#1A3436'}`,
+      borderRadius: 7,
+      padding: '5px 10px',
+      fontSize: 11,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, t(p.key, lang)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#5C7274',
+      fontSize: 10.5
+    }
+  }, t('apyCalculatorCustomDate', lang)), /*#__PURE__*/React.createElement(SimpleDatePicker, {
+    value: calcCustomDate,
+    onChange: setCalcCustomDate,
+    min: calcTodayIso,
+    lang: lang,
+    placeholder: t('apyCalculatorPickDate', lang)
+  }), calcCustomDate && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#6FE3E5',
+      fontSize: 10.5,
+      fontWeight: 600
+    }
+  }, `(${calcEffectiveDays} ${t('apyCalculatorDays', lang)})`))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, apyCalculatorScenarioRows.map((row, i) => {
+    const total = calcProjected(calcEffectiveStart, row.apyPercent, calcEffectiveDays);
+    const gained = total != null ? total - calcEffectiveStart : null;
+    const isBest = apyCalculatorBestApy != null && row.apyPercent === apyCalculatorBestApy;
+    return /*#__PURE__*/React.createElement("div", {
+      key: row.key,
+      style: {
+        background: isBest ? 'rgba(0,222,225,0.07)' : i % 2 === 0 ? '#0A1B1D' : '#0D2224',
+        border: isBest ? '1px solid rgba(0,222,225,0.3)' : '1px solid #142B2D',
+        borderRadius: 10,
+        padding: '8px 10px'
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        marginBottom: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#C7DBDC',
+        fontSize: 12,
+        fontWeight: 600
+      }
+    }, row.label), row.editable ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 3
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      inputMode: "decimal",
+      className: "tp-calc-input",
+      value: calcCustomApyStrs[row.idx],
+      onChange: e => setCalcCustomApyStrs(prev => prev.map((v, idx) => idx === row.idx ? e.target.value : v)),
+      style: {
+        width: 60,
+        boxSizing: 'border-box',
+        textAlign: 'right',
+        background: '#0D2022',
+        border: '1px solid #1A3436',
+        borderRadius: 6,
+        padding: '4px 6px',
+        color: '#00DEE1',
+        fontWeight: 700,
+        fontSize: 13
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#00DEE1',
+        fontWeight: 700,
+        fontSize: 13
+      }
+    }, "%"), calcCustomApyStrs.length > 1 && /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      onClick: () => setCalcCustomApyStrs(prev => prev.filter((_, idx) => idx !== row.idx)),
+      title: t('apyCalculatorRemoveScenario', lang),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'transparent',
+        border: 'none',
+        color: '#5C7274',
+        cursor: 'pointer',
+        fontSize: 13,
+        padding: '0 0 0 2px',
+        lineHeight: 1
+      }
+    }, "✕")) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#00DEE1',
+        fontWeight: 700,
+        fontSize: 13
+      }
+    }, `${row.apyPercent.toFixed(2)}%`)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        gap: 14,
+        flexWrap: 'wrap'
+      }
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#5C7274',
+        fontSize: 9.5,
+        textTransform: 'uppercase',
+        letterSpacing: '0.03em',
+        marginBottom: 1
+      }
+    }, t('apyCalculatorTotal', lang)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#F5F5F5',
+        fontWeight: 700,
+        fontSize: 13,
+        fontFamily: "'Space Grotesk', sans-serif"
+      }
+    }, hideValue ? '••••' : total != null ? fmtRune(total, lang) : '—')), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#5C7274',
+        fontSize: 9.5,
+        textTransform: 'uppercase',
+        letterSpacing: '0.03em',
+        marginBottom: 1
+      }
+    }, t('apyCalculatorGained', lang)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        color: '#00DEE1',
+        fontWeight: 700,
+        fontSize: 13,
+        fontFamily: "'Space Grotesk', sans-serif"
+      }
+    }, hideValue ? '••••' : gained != null ? `+${fmtRune(gained, lang)}` : '—'))));
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setCalcCustomApyStrs(prev => [...prev, '']),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 5,
+      background: 'transparent',
+      border: '1px dashed #1A3436',
+      borderRadius: 10,
+      padding: '8px 12px',
+      color: '#6FE3E5',
+      fontSize: 12,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, "+ ", t('apyCalculatorAddScenario', lang)))));
 
   // Gewichteter Durchschnittspreis über die "Average Cost Basis"-Methode: Käufe erhöhen
   // gehaltene Menge + Kostenbasis, Verkäufe reduzieren beides proportional zum Ø-Preis der
@@ -13264,6 +16905,278 @@ function ThorchainPortfolio() {
       rewardAmountTotal
     };
   }, [purchases, allRewardEntries, costBasisMethod, rewardValuationMethod]);
+  // Deutsche Steuerfrei-Berechnung (private Veräußerungsgeschäfte, §23 EStG): Kryptowährung
+  // ist nach einem Jahr Haltefrist steuerfrei verkaufbar. Das lässt sich NUR mit FIFO korrekt
+  // bestimmen (die Durchschnittsmethode kennt gar keine einzelnen Kaufdaten mehr) --
+  // deshalb hier UNABHÄNGIG von der oben gewählten Anzeige-Methode (costBasisMethod) immer
+  // FIFO gerechnet, exakt dieselbe Abbau-Logik wie oben, nur zusätzlich mit Kaufdatum je Posten.
+  // WICHTIG: keine Steuerberatung -- FIFO ist die von deutschen Finanzämtern im Regelfall
+  // akzeptierte (Standard-)Annahme, wenn keine lückenlose Einzel-Zuordnung dokumentiert ist,
+  // aber die tatsächliche Behandlung hängt vom Einzelfall ab.
+  const deTaxLots = useMemo(() => {
+    const rewardTx = allRewardEntries.map(e => ({
+      date: e.dateMs,
+      amount: e.amount,
+      type: 'buy'
+    }));
+    const combined = [...purchases, ...rewardTx];
+    if (!combined.length) return null;
+    const sorted = combined.slice().sort((a, b) => a.date - b.date);
+    const lots = [];
+    for (const p of sorted) {
+      const amt = Number(p.amount);
+      if (!Number.isFinite(amt) || amt <= 0) continue;
+      if (p.type === 'sell') {
+        let remaining = amt;
+        while (remaining > 1e-12 && lots.length) {
+          const lot = lots[0];
+          const consumed = Math.min(lot.amount, remaining);
+          lot.amount -= consumed;
+          remaining -= consumed;
+          if (lot.amount <= 1e-12) lots.shift();
+        }
+      } else {
+        lots.push({
+          amount: amt,
+          date: p.date
+        });
+      }
+    }
+    if (!lots.length) return null;
+    const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    let taxFreeAmount = 0;
+    let taxableAmount = 0;
+    const upcoming = [];
+    for (const lot of lots) {
+      const freeAt = lot.date + ONE_YEAR_MS;
+      if (freeAt <= now) {
+        taxFreeAmount += lot.amount;
+      } else {
+        taxableAmount += lot.amount;
+        upcoming.push({
+          amount: lot.amount,
+          freeAt
+        });
+      }
+    }
+    upcoming.sort((a, b) => a.freeAt - b.freeAt);
+    return {
+      taxFreeAmount,
+      taxableAmount,
+      totalAmount: taxFreeAmount + taxableAmount,
+      upcoming
+    };
+  }, [purchases, allRewardEntries]);
+
+  // Modal für den deutschen Steuerfrei-Status (§23 EStG, Spekulationsfrist) -- zeigt, wie viel
+  // vom aktuell gehaltenen RUNE nach FIFO-Logik schon länger als ein Jahr gehalten wird (und
+  // damit privat steuerfrei verkauft werden könnte) und wie viel noch innerhalb der Ein-Jahres-
+  // Frist liegt, plus eine Vorschau, wann die nächsten Posten steuerfrei werden.
+  const deTaxModal = showDeTaxModal && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowDeTaxModal(false),
+    style: {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      width: '100vw',
+      height: '100vh',
+      background: 'rgba(0,0,0,0.75)',
+      zIndex: 1000,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 20,
+      overscrollBehavior: 'none',
+      touchAction: 'none'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    className: "tp-apy-history-scroll",
+    style: {
+      ...cardShellStyle,
+      overscrollBehavior: 'none',
+      touchAction: 'pan-y',
+      width: '100%',
+      maxWidth: 560,
+      maxHeight: '92vh',
+      overflow: 'auto',
+      padding: '14px 16px 14px',
+      position: 'relative'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 10,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontSize: 16,
+      fontWeight: 700,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, t('deTaxTitle', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowDeTaxModal(false),
+    title: t('closeWord', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'transparent',
+      border: '1px solid #1A3436',
+      borderRadius: 7,
+      width: 30,
+      height: 30,
+      color: '#7C9698',
+      cursor: 'pointer',
+      fontSize: 15,
+      lineHeight: 1,
+      flexShrink: 0
+    }
+  }, "✕")), !deTaxLots ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 13,
+      textAlign: 'center',
+      padding: '30px 10px'
+    }
+  }, t('deTaxEmpty', lang)) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      gap: 8,
+      marginBottom: 12,
+      flexWrap: 'wrap'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1 1 160px',
+      background: 'rgba(79,216,122,0.08)',
+      border: '1px solid rgba(79,216,122,0.3)',
+      borderRadius: 10,
+      padding: '10px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#00DEE1',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 3
+    }
+  }, t('deTaxFreeNow', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontWeight: 800,
+      fontSize: 17,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, hideValue ? '••••' : `${fmtRune(deTaxLots.taxFreeAmount, lang)} RUNE`), activePrice != null && !hideValue && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#5C7274',
+      fontSize: 10.5,
+      marginTop: 2
+    }
+  }, fmtUSDRounded(deTaxLots.taxFreeAmount * activePrice, lang, currency))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: '1 1 160px',
+      background: '#0D2022',
+      border: '1px solid #1A3436',
+      borderRadius: 10,
+      padding: '10px 12px'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#E0B268',
+      fontSize: 10,
+      fontWeight: 700,
+      textTransform: 'uppercase',
+      letterSpacing: '0.04em',
+      marginBottom: 3
+    }
+  }, t('deTaxStillTaxable', lang)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5F5F5',
+      fontWeight: 800,
+      fontSize: 17,
+      fontFamily: "'Space Grotesk', sans-serif"
+    }
+  }, hideValue ? '••••' : `${fmtRune(deTaxLots.taxableAmount, lang)} RUNE`), activePrice != null && !hideValue && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#5C7274',
+      fontSize: 10.5,
+      marginTop: 2
+    }
+  }, fmtUSDRounded(deTaxLots.taxableAmount * activePrice, lang, currency)))), deTaxLots.totalAmount > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 6,
+      borderRadius: 999,
+      overflow: 'hidden',
+      display: 'flex',
+      marginBottom: 14,
+      background: '#0D2022'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: `${deTaxLots.taxFreeAmount / deTaxLots.totalAmount * 100}%`,
+      background: '#00DEE1'
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: `${deTaxLots.taxableAmount / deTaxLots.totalAmount * 100}%`,
+      background: '#3A3020'
+    }
+  })), deTaxLots.upcoming.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6
+    }
+  }, deTaxLots.upcoming.slice(0, 12).map((u, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      background: i % 2 === 0 ? '#0A1B1D' : '#0D2224',
+      border: '1px solid #142B2D',
+      borderRadius: 8,
+      padding: '7px 10px',
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#96AEB0'
+    }
+  }, t('deTaxUpcoming', lang), ": ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#DCE7E8',
+      fontWeight: 600
+    }
+  }, new Date(u.freeAt).toLocaleDateString(localeFor(lang), {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#F5F5F5',
+      fontWeight: 600
+    }
+  }, hideValue ? '••••' : `${fmtRune(u.amount, lang)} RUNE`))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#4C6062',
+      fontSize: 9.5,
+      lineHeight: 1.4,
+      marginTop: 14
+    }
+  }, t('deTaxDisclaimer', lang))));
   // --- Chart-Höhe automatisch an das 24h-Volumen-Kärtchen angleichen ---
   // Statt eine feste Pixelhöhe zu raten (die je nach Schriftart, Sprache und Zeilenumbrüchen
   // nie exakt passt), wird die tatsächliche Höhe des Volumen-Kärtchens im Browser gemessen und
@@ -13310,7 +17223,10 @@ function ThorchainPortfolio() {
         const current = prev != null ? prev : 193;
         // Ober-/Untergrenze, damit der Chart bei ungewöhnlichen Fensterhöhen weder zu einem
         // Strich zusammenfällt noch die Seite unnötig in die Länge zieht.
-        const next = Math.round(Math.min(520, Math.max(140, current + diff)));
+        // Untergrenze bewusst niedrig (110px): mit der zusätzlichen Swap-Vorschau-Karte in
+        // derselben Spalte muss der Chart weiter schrumpfen können, sonst bleibt die linke
+        // Spalte dauerhaft höher als die rechte.
+        const next = Math.round(Math.min(520, Math.max(110, current + diff)));
         return next === current ? prev : next;
       });
       setMatchedCardHeight(null); // Chart-Karte darf frei mitwachsen
@@ -13337,31 +17253,31 @@ function ThorchainPortfolio() {
   // dank flexWrap in tp-content-row einfach mit ein (rutscht bei zu wenig Platz automatisch in
   // eine neue Zeile), auf dem Handy wird sie zur dritten wischbaren Tab-Seite (siehe
   // mobileTab/tp-swap-panel weiter oben und die zugehörigen CSS-Regeln in index.html).
-  // Kompaktes Trigger-Kärtchen in der Kachel-Struktur; das eigentliche Fenster wird per
-  // Portal mittig über der Seite geöffnet (siehe swapModal weiter unten).
-  // Trigger-Kaertchen sitzt jetzt IN der Seitenspalte (zusammen mit Bond Rewards und
-  // 24h-Volumen), statt in einer eigenen dritten Spalte -- dort stand es allein neben viel
-  // leerem Raum und wirkte verloren.
+  // Kompaktes Vorschau-Kärtchen in der Kachel-Struktur (nicht-interaktive "You send"/"You
+  // receive"-Anzeige, siehe SwapTriggerCard weiter oben); das eigentliche Interface öffnet sich
+  // per Klick auf die Karte als zentriertes Popup-Fenster (siehe swapModal weiter unten) --
+  // genau wie ursprünglich, nicht mehr als aufklappbarer Bereich in der Spalte selbst.
   const swapTriggerCard = /*#__PURE__*/React.createElement(SwapTriggerCard, {
     lang,
+    fromAsset: swapFromAsset,
+    toAsset: swapToAsset,
+    amount: swapAmount,
+    quote: swapQuote,
     onOpen: () => {
       resetSwapFlow();
       setSwapModalOpen(true);
     }
   });
 
-  const swapModal = /*#__PURE__*/React.createElement(SwapModal, {
-    isOpen: swapModalOpen,
-    onClose: () => {
-      setSwapModalOpen(false);
-      resetSwapFlow();
-    },
+  const swapSharedProps = {
     lang,
     step: swapStep,
     memolessAssets: swapMemolessAssets,
     memolessAssetsLoading: swapMemolessAssetsLoading,
     memolessAssetsError: swapMemolessAssetsError,
     pools: swapPools,
+    haltedChains: swapHaltedChains,
+    globalHalt: swapGlobalHalt,
     fromAsset: swapFromAsset,
     setFromAsset: setSwapFromAsset,
     toAsset: swapToAsset,
@@ -13389,6 +17305,24 @@ function ThorchainPortfolio() {
     onStartNew: () => {
       resetSwapFlow();
     }
+  };
+
+  // PC: Fenster, das über den Button geöffnet wird.
+  const swapModal = /*#__PURE__*/React.createElement(SwapModal, {
+    ...swapSharedProps,
+    isOpen: swapModalOpen,
+    onClose: () => {
+      setSwapModalOpen(false);
+      resetSwapFlow();
+    }
+  });
+
+  // Handy: das vollständige Interface füllt direkt die Tab-Seite -- dort ist der Platz da,
+  // ein zusätzlicher Zwischenschritt über eine kleine Karte mit Button wäre nur im Weg.
+  const swapInline = /*#__PURE__*/React.createElement(SwapModal, {
+    ...swapSharedProps,
+    inline: true,
+    isOpen: true
   });
 
   const purchaseTrackerBox = /*#__PURE__*/React.createElement("div", {
@@ -13434,6 +17368,7 @@ function ThorchainPortfolio() {
       maxWidth: '92vw',
       maxHeight: '80vh',
       overflowY: 'auto',
+      overscrollBehavior: 'contain',
       boxShadow: '0 16px 40px rgba(0,0,0,0.55)',
       borderRadius: 14
     }
@@ -13475,7 +17410,7 @@ function ThorchainPortfolio() {
       padding: 0,
       cursor: purchasesSyncStatus === 'syncing' ? 'default' : 'pointer',
       fontFamily: "'Inter', sans-serif",
-      color: purchasesSyncStatus === 'error' ? '#C97A7A' : purchasesSyncStatus === 'syncing' ? '#7C9698' : '#5C9EA0',
+      color: purchasesSyncStatus === 'error' ? '#E0B268' : purchasesSyncStatus === 'syncing' ? '#7C9698' : '#5C9EA0',
       textDecoration: purchasesSyncStatus === 'syncing' ? 'none' : 'underline',
       textUnderlineOffset: 2
     }
@@ -13572,7 +17507,26 @@ function ThorchainPortfolio() {
       padding: '3px 8px',
       fontFamily: "'Inter', sans-serif"
     }
-  }, t('includesRewardsShort', lang))), /*#__PURE__*/React.createElement("div", {
+  }, t('includesRewardsShort', lang))), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setPurchaseSettingsOpen(v => !v),
+    title: t('costBasisMethodHint', lang),
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      marginTop: 6,
+      background: purchaseSettingsOpen ? 'rgba(0,222,225,0.12)' : 'transparent',
+      border: `1px solid ${purchaseSettingsOpen ? 'rgba(0,222,225,0.35)' : '#1A3436'}`,
+      borderRadius: 6,
+      padding: '3px 8px',
+      color: purchaseSettingsOpen ? '#00DEE1' : '#7C9698',
+      fontSize: 9.5,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, "\u2699 ", t(purchaseSettingsOpen ? 'purchaseSettingsHide' : 'purchaseSettingsShow', lang)), purchaseSettingsOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     title: t('costBasisMethodHint', lang),
     style: {
       display: 'inline-flex',
@@ -13641,7 +17595,7 @@ function ThorchainPortfolio() {
       cursor: 'pointer',
       fontFamily: "'Inter', sans-serif"
     }
-  }, t(opt.labelKey, lang))))), rewardValuationMethod === 'free' && purchaseStats.rewardAmountTotal > 0 && purchaseStats.rewardAmountTotal >= purchaseStats.everBoughtAmount - 1e-6 && /*#__PURE__*/React.createElement("div", {
+  }, t(opt.labelKey, lang)))))), rewardValuationMethod === 'free' && purchaseStats.rewardAmountTotal > 0 && purchaseStats.rewardAmountTotal >= purchaseStats.everBoughtAmount - 1e-6 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 6,
       padding: '6px 9px',
@@ -13694,7 +17648,7 @@ function ThorchainPortfolio() {
         marginTop: 4,
         fontSize: 11.5,
         fontWeight: 700,
-        color: pos ? '#6FBF8F' : '#C97A7A'
+        color: pos ? '#6FE3E5' : '#E0B268'
       }
     }, t('profitLoss', lang), ": ", pos ? '+' : '', fmtUSDRounded(pnl, lang, 'usd'), " (", pos ? '+' : '', pnlPct.toFixed(1), "%)");
   })(), Math.abs(purchaseStats.realizedPnlUsd) >= 0.01 && (() => {
@@ -13704,7 +17658,7 @@ function ThorchainPortfolio() {
         marginTop: 2,
         fontSize: 10.5,
         fontWeight: 600,
-        color: pos ? '#6FBF8F' : '#C97A7A'
+        color: pos ? '#6FE3E5' : '#E0B268'
       }
     }, t('realizedPnl', lang), ": ", pos ? '+' : '', fmtUSDRounded(purchaseStats.realizedPnlUsd, lang, 'usd'));
   })(), /*#__PURE__*/React.createElement("button", {
@@ -13749,7 +17703,7 @@ function ThorchainPortfolio() {
   }, t('cleanupDuplicates', lang)), dedupeResultCount != null && /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 10,
-      color: dedupeResultCount > 0 ? '#6FBF8F' : '#7C9698'
+      color: dedupeResultCount > 0 ? '#6FE3E5' : '#7C9698'
     }
   }, dedupeResultCount > 0 ? t('duplicatesRemoved', lang).replace('{n}', String(dedupeResultCount)) : t('noDuplicatesFound', lang))), /*#__PURE__*/React.createElement("button", {
     onClick: () => setSelectedPurchaseIds(selectedPurchaseIds.length === purchases.length ? [] : purchases.map(p => p.id)),
@@ -13771,8 +17725,8 @@ function ThorchainPortfolio() {
       gap: 8,
       marginTop: 8,
       padding: '5px 7px',
-      background: 'rgba(201,122,122,0.12)',
-      border: '1px solid rgba(201,122,122,0.4)',
+      background: 'rgba(224,178,104,0.12)',
+      border: '1px solid rgba(224,178,104,0.4)',
       borderRadius: 6
     }
   }, /*#__PURE__*/React.createElement("span", {
@@ -13805,7 +17759,7 @@ function ThorchainPortfolio() {
       onConfirm: deleteSelectedPurchases
     }),
     style: {
-      background: '#C97A7A',
+      background: '#E0B268',
       color: '#1A0A0A',
       border: 'none',
       borderRadius: 5,
@@ -13822,7 +17776,8 @@ function ThorchainPortfolio() {
       flexDirection: 'column',
       gap: 5,
       maxHeight: 180,
-      overflowY: 'auto'
+      overflowY: 'auto',
+      overscrollBehavior: 'contain'
     }
   }, purchases.slice().sort((a, b) => b.date - a.date).map(p => /*#__PURE__*/React.createElement("div", {
     key: p.id,
@@ -13866,7 +17821,7 @@ function ThorchainPortfolio() {
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
-      color: p.type === 'sell' ? '#C97A7A' : '#6FBF8F'
+      color: p.type === 'sell' ? '#E0B268' : '#6FE3E5'
     }
   }, p.type === 'sell' ? '−' : '+'), Number(p.amount).toLocaleString(localeFor(lang), {
     maximumFractionDigits: 2
@@ -13911,7 +17866,7 @@ function ThorchainPortfolio() {
     style: {
       background: 'transparent',
       border: 'none',
-      color: '#C97A7A',
+      color: '#E0B268',
       cursor: 'pointer',
       fontSize: 11,
       padding: 2
@@ -13945,7 +17900,7 @@ function ThorchainPortfolio() {
     style: {
       marginTop: 8,
       fontSize: 10.5,
-      color: '#C97A7A'
+      color: '#E0B268'
     }
   }, purchaseImportError), purchaseFormOpen && /*#__PURE__*/React.createElement(PurchaseForm, {
     lang: lang,
@@ -14018,7 +17973,7 @@ function ThorchainPortfolio() {
     style: {
       background: 'transparent',
       border: 'none',
-      color: '#C97A7A',
+      color: '#E0B268',
       cursor: 'pointer',
       fontSize: 11,
       padding: '2px 4px',
@@ -14149,7 +18104,7 @@ function ThorchainPortfolio() {
     style: {
       background: 'transparent',
       border: 'none',
-      color: '#C97A7A',
+      color: '#E0B268',
       cursor: 'pointer',
       fontSize: 11,
       padding: 0,
@@ -14163,8 +18118,8 @@ function ThorchainPortfolio() {
     style: {
       marginTop: 8,
       padding: '7px 9px',
-      background: 'rgba(111,191,143,0.06)',
-      border: '1px solid rgba(111,191,143,0.25)',
+      background: 'rgba(111,227,229,0.06)',
+      border: '1px solid rgba(111,227,229,0.25)',
       borderRadius: 7
     }
   }, /*#__PURE__*/React.createElement("div", {
@@ -14177,7 +18132,7 @@ function ThorchainPortfolio() {
   }, /*#__PURE__*/React.createElement("span", {
     title: t('exactSuggestionsHint', lang),
     style: {
-      color: '#6FBF8F',
+      color: '#6FE3E5',
       fontSize: 10.5,
       fontWeight: 700,
       letterSpacing: '0.03em',
@@ -14192,12 +18147,12 @@ function ThorchainPortfolio() {
       gap: 5,
       flexShrink: 0,
       background: 'transparent',
-      border: '1px solid rgba(111,191,143,0.4)',
+      border: '1px solid rgba(111,227,229,0.4)',
       borderRadius: 6,
       padding: '3px 8px',
       fontSize: 10.5,
       fontWeight: 600,
-      color: suggestedPurchasesLoading ? '#4C6062' : '#6FBF8F',
+      color: suggestedPurchasesLoading ? '#4C6062' : '#6FE3E5',
       cursor: suggestedPurchasesLoading ? 'default' : 'pointer',
       fontFamily: "'Inter', sans-serif"
     }
@@ -14218,7 +18173,8 @@ function ThorchainPortfolio() {
       flexDirection: 'column',
       gap: 3,
       maxHeight: 150,
-      overflowY: 'auto'
+      overflowY: 'auto',
+      overscrollBehavior: 'contain'
     }
   }, suggestedPurchases.map(s => /*#__PURE__*/React.createElement("div", {
     key: s.txId,
@@ -14270,10 +18226,10 @@ function ThorchainPortfolio() {
     onClick: () => acceptSuggestion(s),
     title: t('acceptSuggestion', lang),
     style: {
-      background: 'rgba(111,191,143,0.16)',
+      background: 'rgba(111,227,229,0.16)',
       border: 'none',
       borderRadius: 5,
-      color: '#6FBF8F',
+      color: '#6FE3E5',
       cursor: 'pointer',
       fontSize: 11,
       padding: '3px 5px',
@@ -14352,7 +18308,8 @@ function ThorchainPortfolio() {
       flexDirection: 'column',
       gap: 3,
       maxHeight: 150,
-      overflowY: 'auto'
+      overflowY: 'auto',
+      overscrollBehavior: 'contain'
     }
   }, suggestedTransfers.map(s => /*#__PURE__*/React.createElement("div", {
     key: s.txId,
@@ -14404,10 +18361,10 @@ function ThorchainPortfolio() {
     onClick: () => acceptTransferSuggestion(s),
     title: t('acceptSuggestion', lang),
     style: {
-      background: 'rgba(111,191,143,0.16)',
+      background: 'rgba(111,227,229,0.16)',
       border: 'none',
       borderRadius: 5,
-      color: '#6FBF8F',
+      color: '#6FE3E5',
       cursor: 'pointer',
       fontSize: 11,
       padding: '3px 5px',
@@ -14435,7 +18392,8 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: 20
+      padding: 20,
+      touchAction: 'none'
     }
   }, /*#__PURE__*/React.createElement("div", {
     onClick: e => e.stopPropagation(),
@@ -14478,7 +18436,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       setConfirmDialog(null);
     },
     style: {
-      background: '#C97A7A',
+      background: '#E0B268',
       color: '#1A0A0A',
       border: 'none',
       borderRadius: 8,
@@ -14490,9 +18448,19 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     }
   }, t('confirmDeleteButton', lang))))), document.body)))));
   const nodeRewardsBox = hasAnyNodeRewardsData && /*#__PURE__*/React.createElement("div", {
+    ref: liveFlowCardRef,
     className: "tp-side-card tp-main-card",
     style: {
       ...cardShellStyle,
+      // Bewusst eigene, akzentuierte Hülle statt der reinen cardShellStyle-Basis: diese Karte
+      // ist DIE zentrale, "lebendige" Kennzahl der App (siehe Live-Flow-Partikel weiter oben)
+      // und soll sich optisch von den umliegenden, eher ruhigen Info-Kacheln (Portfolio-Wert,
+      // Volumen) abheben, statt gleichrangig im Sidebar-Stapel unterzugehen. Radialer Teal-
+      // Schimmer oben rechts + akzentuierter Rand + sanfter äußerer Halo-Schatten -- dieselbe
+      // Akzentfarbe (#00DEE1), die auch sonst in der App für "live"/aktiv steht.
+      background: 'radial-gradient(130% 95% at 100% 0%, rgba(0,222,225,0.13), transparent 60%), linear-gradient(165deg, #0C1F21 0%, #0A0A0A 100%)',
+      border: '1px solid rgba(0,222,225,0.32)',
+      boxShadow: '0 1px 0 rgba(255,255,255,0.05) inset, 0 14px 28px -18px rgba(0,0,0,0.7), 0 0 36px -16px rgba(0,222,225,0.45)',
       padding: '22px 24px 22px',
       position: 'relative'
     }
@@ -14512,21 +18480,50 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#96AEB0',
-      fontSize: 12,
-      fontWeight: 600,
-      letterSpacing: '0.04em',
-      textTransform: 'uppercase',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
       marginBottom: 18
     }
-  }, t('bondRewards', lang)), nodeRewardsLoading && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#E7F6F6',
+      fontSize: 13,
+      fontWeight: 700,
+      letterSpacing: '0.03em',
+      textTransform: 'uppercase'
+    }
+  }, t('bondRewards', lang)), !nodeRewardsLoading && !nodeRewardsAllFailed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      color: '#00DEE1',
+      fontSize: 11,
+      fontWeight: 700,
+      background: 'rgba(0,222,225,0.1)',
+      border: '1px solid rgba(0,222,225,0.3)',
+      borderRadius: 999,
+      padding: '3px 10px 3px 8px',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: '#00DEE1',
+      animation: 'pulse 1.6s ease-in-out infinite'
+    }
+  }), t('liveWord', lang))), nodeRewardsLoading && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#7C9698',
       fontSize: 12
     }
   }, t('loading', lang)), !nodeRewardsLoading && nodeRewardsAllFailed && /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#F0A0A0',
+      color: '#F5C36B',
       fontSize: 12
     }
   }, t('couldNotLoadRewardHistory', lang), (() => {
@@ -14571,20 +18568,20 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'center',
       gap: 5,
-      color: '#F0A0A0',
-      background: 'rgba(240,160,160,0.1)',
-      border: '1px solid rgba(240,160,160,0.25)',
+      color: '#F5C36B',
+      background: 'rgba(245,195,107,0.1)',
+      border: '1px solid rgba(245,195,107,0.3)',
       borderRadius: 999,
-      padding: '3px 9px 3px 7px',
+      padding: '3px 10px 3px 8px',
       fontSize: 11,
       fontWeight: 700
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
-      width: 5,
-      height: 5,
+      width: 6,
+      height: 6,
       borderRadius: '50%',
-      background: '#F0A0A0',
+      background: '#F5C36B',
       display: 'inline-block'
     }
   }), t('churningHalted', lang)) : nextRewardForecast.nextChurnEstimateMs != null && /*#__PURE__*/React.createElement("div", {
@@ -14600,31 +18597,42 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       flexWrap: 'wrap'
     }
   }, /*#__PURE__*/React.createElement("div", {
+    ref: liveFlowNumberRef,
     style: {
-      color: '#F5F5F5',
-      fontSize: 21,
+      // Deutlich größer und in der Akzentfarbe statt reinem Weiß -- soll auf einen Blick als
+      // DIE Kennzahl dieser Karte erkennbar sein, nicht nur eine von mehreren Zeilen. Der
+      // dezente Textschatten in derselben Akzentfarbe verstärkt den "es lebt gerade"-Eindruck,
+      // ohne zu übertreiben (kein Neon, nur ein sehr sanftes Leuchten).
+      color: '#EAFFFE',
+      fontSize: 30,
       fontWeight: 700,
       fontFamily: "'Space Grotesk', sans-serif",
       display: 'flex',
       alignItems: 'center',
-      gap: 6
+      gap: 7,
+      textShadow: '0 0 18px rgba(0,222,225,0.35)'
     }
   }, hideValue ? '••••' : /*#__PURE__*/React.createElement(React.Fragment, null, "+", fmtRune(nextRewardForecast.accruedAward, lang), /*#__PURE__*/React.createElement(IconRuneR, {
-    size: 7,
+    size: 9,
     gradientId: "runeRGradForecast"
   }))), nextRewardForecast.accruedAwardUsd != null && /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#A8D8B9',
+      color: '#6FE3E5',
       fontSize: 13.5
     }
   }, hideValue ? '••••' : `+${fmtUSD(nextRewardForecast.accruedAwardUsd, lang, currency)}`)), liveChurnApy && liveChurnApy.apy != null && /*#__PURE__*/React.createElement("div", {
     style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
       marginTop: 12,
       paddingTop: 12,
       borderTop: '1px solid #172E30'
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    title: t('networkApyExact', lang),
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setShowApyHistoryModal(true),
+    title: `${t('networkApyExact', lang)} — ${t('networkApyHistoryHint', lang)}`,
     style: {
       display: 'inline-flex',
       alignItems: 'center',
@@ -14632,7 +18640,9 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       background: 'rgba(0,222,225,0.12)',
       border: '1px solid rgba(0,222,225,0.3)',
       borderRadius: 999,
-      padding: '5px 12px 5px 9px'
+      padding: '5px 12px 5px 9px',
+      cursor: 'pointer',
+      font: 'inherit'
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -14658,7 +18668,39 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       fontSize: 15,
       fontFamily: "'Space Grotesk', sans-serif"
     }
-  }, fmtApyPercent(liveChurnApy.apy, lang))))), /*#__PURE__*/React.createElement("div", {
+  }, fmtApyPercent(liveChurnApy.apy, lang)), /*#__PURE__*/React.createElement("svg", {
+    width: 12,
+    height: 12,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "#6FE3E5",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    style: {
+      marginLeft: 1,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M3 3v5h5"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M3.05 13A9 9 0 1 0 6 5.3L3 8"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M12 7v5l4 2"
+  }))))), /*#__PURE__*/React.createElement("div", {
+    // Eigene, der Next-Reward-Box optisch gleichrangige Kachel für die Gesamtsumme -- vorher
+    // stand "Total" nur als nackter Text/Zahl direkt unter der umrandeten Next-Reward-Box im
+    // Leerraum der Karte, ohne eigene visuelle Fassung. Dadurch wirkten Next Reward, Total und
+    // der Rewards-History-Umschalter wie drei lose aneinandergereihte Zeilen statt klar
+    // getrennter Abschnitte -- genau das ließ die Karte insgesamt unstrukturiert wirken.
+    style: {
+      background: '#0D2022',
+      border: '1px solid #172E30',
+      borderRadius: 12,
+      padding: '14px 16px',
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#96AEB0',
       fontSize: 10.5,
@@ -14697,21 +18739,26 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'center',
       flexShrink: 0,
-      color: '#8FE0AC',
-      background: 'rgba(143,224,172,0.1)',
-      border: '1px solid rgba(143,224,172,0.25)',
+      color: '#00DEE1',
+      background: 'rgba(0,222,225,0.1)',
+      border: '1px solid rgba(0,222,225,0.3)',
       borderRadius: 999,
-      padding: '2px 8px',
+      padding: '3px 10px 3px 10px',
       fontSize: 10.5,
       fontWeight: 700,
       whiteSpace: 'nowrap'
     }
-  }, hideValue ? '••••' : `+${fmtUSD(combinedRewardsUsd, lang, currency)}`)), /*#__PURE__*/React.createElement("div", {
+  }, hideValue ? '••••' : `+${fmtUSD(combinedRewardsUsd, lang, currency)}`))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
       width: '100%',
+      // Dezenter Trenner nach oben -- markiert den Übergang von den beiden Kennzahl-Kacheln
+      // (Next Reward / Total) zum Verlaufs-Bereich als eigenen Abschnitt, statt dass der Link
+      // einfach direkt an die Zahlen anschließt.
+      borderTop: '1px solid #172E30',
+      paddingTop: 14,
       marginBottom: rewardsListExpanded ? 4 : 0
     }
   }, /*#__PURE__*/React.createElement("button", {
@@ -14847,6 +18894,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     style: {
       maxHeight: 220,
       overflowY: 'auto',
+      overscrollBehavior: 'contain',
       display: 'flex',
       flexDirection: 'column',
       paddingRight: 4
@@ -14886,7 +18934,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     }, t('atWord', lang), " ", fmtUSDPrecise(priceForCurrency, lang, currency))));
   }), rewardOnlyEvents.length === 0 && autoHistoryStatus === 'error' && /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#F0A0A0',
+      color: '#F5C36B',
       fontSize: 11
     }
   }, t('couldNotVerifyIndividual', lang)), rewardOnlyEvents.length === 0 && autoHistoryStatus !== 'error' && autoHistoryStatus !== 'loading' && /*#__PURE__*/React.createElement("div", {
@@ -14901,8 +18949,25 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       background: 'radial-gradient(ellipse 900px 480px at 50% -8%, rgba(0, 222, 225, 0.14), transparent 62%), #000000',
       padding: '32px 20px',
       display: 'flex',
-      justifyContent: 'center'
-    }
+      justifyContent: 'center',
+      // WICHTIG: Solange ein Modal offen ist, hier "touchAction: 'none'" statt 'pan-y' --
+      // 'pan-y' lädt den Browser aktiv ein, auf DIESEM Element (der ganzen Seite dahinter)
+      // eine native Wisch-Geste zu erkennen. Das passiert unabhängig davon, ob document.body
+      // per position:fixed gesperrt ist, denn dieser Wrapper ist ein eigenes Element mit
+      // eigener touch-action-Deklaration -- genau das führte dazu, dass die Seite hinter
+      // offenen Charts/Modals trotz Scroll-Sperre noch sichtbar mitwischte.
+      touchAction: anyModalOpen ? 'none' : 'pan-y',
+      overscrollBehaviorX: 'none'
+    },
+    // Wischen wird auf der GANZEN Seite erkannt, nicht nur über dem Inhaltsbereich. Sonst
+    // reagierte die Geste nicht, sobald man unterhalb einer kurzen Seite (etwa der Swap-Karte)
+    // wischt -- dort liegt bereits Leerraum bzw. der Fußbereich.
+    //
+    // ref statt onTouchStart/onTouchMove/onTouchEnd als JSX-Props: die Handler werden über den
+    // useEffect bei swipeContentRef NATIV am Element registriert (mit {passive:false} für
+    // touchmove), da React onTouch*-Props sonst standardmäßig als passiv einhängt und
+    // e.preventDefault() darin wirkungslos bliebe.
+    ref: swipeContentRef
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       width: '100%',
@@ -15021,6 +19086,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       padding: 6,
       maxHeight: 260,
       overflowY: 'auto',
+      overscrollBehavior: 'contain',
       width: 180,
       boxShadow: '0 8px 24px rgba(0,0,0,0.5)'
     }
@@ -15088,6 +19154,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       padding: 6,
       maxHeight: 280,
       overflowY: 'auto',
+      overscrollBehavior: 'contain',
       width: 160,
       boxShadow: '0 8px 24px rgba(0,0,0,0.5)'
     }
@@ -15250,33 +19317,98 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       gap: 6,
       marginBottom: 8
     }
-  }, wallets.map(w => /*#__PURE__*/React.createElement("div", {
-    key: w,
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      background: '#0D2022',
-      border: '1px solid #172E30',
-      borderRadius: 6,
-      padding: '4px 6px 4px 10px',
-      fontSize: 10,
-      fontFamily: "'JetBrains Mono', monospace",
-      color: '#7C9698'
-    }
-  }, /*#__PURE__*/React.createElement("span", null, hideValue ? '••••••…•••••' : `${w.slice(0, 8)}…${w.slice(-5)}`), /*#__PURE__*/React.createElement("button", {
-    onClick: () => removeWallet(w),
-    title: t('removeWallet', lang),
-    style: {
-      background: 'transparent',
-      border: 'none',
-      color: '#5C7274',
-      cursor: 'pointer',
-      fontSize: 13,
-      lineHeight: 1,
-      padding: '0 2px'
-    }
-  }, "×")))), /*#__PURE__*/React.createElement("div", {
+  }, wallets.map((w, idx) => {
+    const isEditing = editingWalletAddr === w;
+    const displayName = walletLabels[w] || `${t('walletDefaultName', lang)} ${idx + 1}`;
+    return /*#__PURE__*/React.createElement("div", {
+      key: w,
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        background: '#0D2022',
+        border: '1px solid #172E30',
+        borderRadius: 6,
+        padding: '4px 6px 4px 10px',
+        fontSize: 10,
+        fontFamily: "'JetBrains Mono', monospace",
+        color: '#7C9698'
+      }
+    }, isEditing ? /*#__PURE__*/React.createElement("input", {
+      autoFocus: true,
+      value: editingWalletValue,
+      onChange: e => setEditingWalletValue(e.target.value),
+      onKeyDown: e => {
+        if (e.key === 'Enter') {
+          renameWallet(w, editingWalletValue);
+          setEditingWalletAddr(null);
+        }
+        if (e.key === 'Escape') setEditingWalletAddr(null);
+      },
+      onBlur: () => {
+        renameWallet(w, editingWalletValue);
+        setEditingWalletAddr(null);
+      },
+      placeholder: `${t('walletDefaultName', lang)} ${idx + 1}`,
+      style: {
+        background: 'transparent',
+        border: 'none',
+        outline: 'none',
+        color: '#EAF6F6',
+        fontFamily: "'Inter', sans-serif",
+        fontSize: 11,
+        width: 110,
+        padding: 0
+      }
+    }) : /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: 'flex',
+        flexDirection: 'column',
+        lineHeight: 1.3,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: '#C3D5D6',
+        fontFamily: "'Inter', sans-serif",
+        fontSize: 11,
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        maxWidth: 130
+      }
+    }, displayName), /*#__PURE__*/React.createElement("span", null, hideValue ? '••••••…•••••' : `${w.slice(0, 8)}…${w.slice(-5)}`)), !isEditing && /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        setEditingWalletAddr(w);
+        setEditingWalletValue(walletLabels[w] || '');
+      },
+      title: t('renameWallet', lang),
+      style: {
+        background: 'transparent',
+        border: 'none',
+        color: '#5C7274',
+        cursor: 'pointer',
+        fontSize: 12,
+        lineHeight: 1,
+        padding: '0 2px',
+        flexShrink: 0
+      }
+    }, "\u270E"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => removeWallet(w),
+      title: t('removeWallet', lang),
+      style: {
+        background: 'transparent',
+        border: 'none',
+        color: '#5C7274',
+        cursor: 'pointer',
+        fontSize: 13,
+        lineHeight: 1,
+        padding: '0 2px',
+        flexShrink: 0
+      }
+    }, "\u00D7"));
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       gap: 8
@@ -15325,13 +19457,13 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     size: 13
   }) : /*#__PURE__*/React.createElement(IconSearch, {
     size: 13
-  }), loading ? t('loading', lang) : t('addWallet', lang))))), nodeBreakdown.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), loading ? t('loading', lang) : t('addWallet', lang))))), walletNodeBreakdown.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       maxWidth: 420,
       position: 'relative'
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setNodeBreakdownExpanded(v => !v),
+    onClick: () => setWalletOverviewExpanded(v => !v),
     style: {
       background: 'transparent',
       border: 'none',
@@ -15345,13 +19477,13 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       alignItems: 'center',
       gap: 5
     }
-  }, t(typeof window !== 'undefined' && window.innerWidth < 640 ? 'showNodeBreakdownShort' : 'showNodeBreakdown', lang), " (", nodeBreakdown.length, ")", /*#__PURE__*/React.createElement("span", {
+  }, t('walletNodeOverview', lang), " (", walletNodeBreakdown.reduce((s, w) => s + w.nodes.length, 0), ")", /*#__PURE__*/React.createElement("span", {
     style: {
       display: 'inline-block',
       fontSize: 9,
-      transform: nodeBreakdownExpanded ? 'rotate(180deg)' : 'none'
+      transform: walletOverviewExpanded ? 'rotate(180deg)' : 'none'
     }
-  }, "▾")), nodeBreakdownExpanded && /*#__PURE__*/React.createElement("div", {
+  }, "▾")), walletOverviewExpanded && /*#__PURE__*/React.createElement("div", {
     style: {
       position: 'absolute',
       top: '100%',
@@ -15359,8 +19491,11 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       marginTop: 6,
       zIndex: 30,
       width: 'max-content',
-      minWidth: 200,
+      minWidth: 260,
       maxWidth: 'calc(100vw - 32px)',
+      maxHeight: 360,
+      overflowY: 'auto',
+      overscrollBehavior: 'contain',
       boxSizing: 'border-box',
       background: '#0A1516',
       border: '1px solid #1A3436',
@@ -15368,13 +19503,54 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       padding: 10,
       display: 'flex',
       flexDirection: 'column',
-      gap: 4
+      gap: 8
     }
-  }, nodeBreakdown.map(n => /*#__PURE__*/React.createElement("div", {
-    key: n.nodeAddress,
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: exportWalletNodeBreakdownCsv,
     style: {
       display: 'flex',
       alignItems: 'center',
+      justifyContent: 'center',
+      gap: 5,
+      alignSelf: 'flex-end',
+      background: 'rgba(0,222,225,0.1)',
+      border: '1px solid rgba(0,222,225,0.28)',
+      borderRadius: 7,
+      padding: '4px 10px',
+      color: '#6FE3E5',
+      fontSize: 10.5,
+      fontWeight: 600,
+      cursor: 'pointer',
+      fontFamily: "'Inter', sans-serif"
+    }
+  }, t('exportCsv', lang)), walletNodeBreakdown.map(w => /*#__PURE__*/React.createElement("div", {
+    key: w.addr,
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 10,
+      color: '#5C7274',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", null, w.addr.slice(0, 10), "…", w.addr.slice(-6)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: '#A0BABC',
+      fontWeight: 600
+    }
+  }, hideValue ? '••••' : fmtRune(w.nodes.reduce((s, n) => s + n.bonded, 0), lang), " R")), w.nodes.map(n => /*#__PURE__*/React.createElement("div", {
+    key: `${w.addr}-${n.nodeAddress}`,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
       gap: 12,
       fontSize: 10.5,
       color: '#7C9698',
@@ -15394,9 +19570,10 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       fontWeight: 600,
       whiteSpace: 'nowrap'
     }
-  }, hideValue ? '••••' : fmtRune(n.bonded, lang), " R"))))))), /*#__PURE__*/React.createElement("div", {
+  }, hideValue ? '••••' : fmtRune(n.bonded, lang), " R"))))))))), /*#__PURE__*/React.createElement("div", {
     className: "tp-nodestats-mobile"
   }, nodeStatsBox)), priceRowBox && /*#__PURE__*/React.createElement("div", {
+
     className: "tp-price-top",
     style: {
       marginTop: 10,
@@ -15407,17 +19584,17 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'flex-start',
       gap: 10,
-      background: '#1F0F0F',
-      border: '1px solid #4A2A2A',
+      background: '#1F160A',
+      border: '1px solid #4A3818',
       borderRadius: 10,
       padding: '12px 14px',
       marginBottom: 24,
-      color: '#F0A0A0',
+      color: '#F5C36B',
       fontSize: 13
     }
   }, /*#__PURE__*/React.createElement(IconAlert, null), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", null, error), autoRetryPending && /*#__PURE__*/React.createElement("div", {
     style: {
-      color: '#C97A7A',
+      color: '#E0B268',
       fontSize: 11.5,
       marginTop: 3
     }
@@ -15462,7 +19639,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setMobileTab('chart'),
+    onClick: () => goToMobileTab('chart'),
     style: {
       flex: 1,
       minWidth: 0,
@@ -15480,7 +19657,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       textOverflow: 'ellipsis'
     }
   }, t('chartTab', lang)), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setMobileTab('details'),
+    onClick: () => goToMobileTab('details'),
     style: {
       flex: 1,
       minWidth: 0,
@@ -15497,8 +19674,8 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       overflow: 'hidden',
       textOverflow: 'ellipsis'
     }
-  }, t('detailsTab', lang)), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setMobileTab('swap'),
+  }, t('bondRewards', lang)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => goToMobileTab('swap'),
     style: {
       flex: 1,
       minWidth: 0,
@@ -15516,6 +19693,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       textOverflow: 'ellipsis'
     }
   }, t('swapTitle', lang))), /*#__PURE__*/React.createElement("div", {
+    ref: swipeRowRef,
     className: "tp-content-row",
     style: {
       display: 'flex',
@@ -15525,11 +19703,12 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       touchAction: 'pan-y',
       overscrollBehaviorX: 'none'
     },
-    onTouchStart: handleContentTouchStart,
-    onTouchEnd: handleContentTouchEnd
+    /* Die Wischerkennung sitzt jetzt am äußeren Seitencontainer, nicht mehr hier -- siehe
+       dort. Grund: unterhalb kurzer Seiteninhalte (z.B. der kompakten Swap-Karte) lag der
+       Finger gar nicht mehr über diesem Bereich, und die Geste kam nie an. */
   }, /*#__PURE__*/React.createElement("div", {
     ref: mainColRef,
-    className: `tp-chart-panel ${mobileTab === 'chart' ? 'tp-panel-active' : ''}`,
+    className: `tp-chart-panel ${mobileTab === 'chart' ? `tp-panel-active ${tabEnterFromRight ? 'tp-enter-right' : 'tp-enter-left'}` : ''}`,
     style: {
       flex: '1 1 420px',
       minWidth: 0,
@@ -15587,7 +19766,43 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       gap: 8,
       flexShrink: 0
     }
-  }, purchaseTrackerBox, /*#__PURE__*/React.createElement("button", {
+  }, purchaseTrackerBox, lang === 'de' && /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setShowDeTaxModal(true),
+    title: t('deTaxHint', lang),
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      height: 30,
+      background: 'rgba(79,216,122,0.08)',
+      border: '1px solid rgba(79,216,122,0.28)',
+      borderRadius: 7,
+      padding: '0 9px',
+      color: '#00DEE1',
+      cursor: 'pointer',
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: 14,
+    height: 14,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round",
+    strokeLinejoin: "round"
+  }, /*#__PURE__*/React.createElement("path", {
+    d: "M12 2 20 5v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V5z"
+  }), /*#__PURE__*/React.createElement("polyline", {
+    points: "8.5 12 11 14.5 15.5 9.5"
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10.5,
+      fontWeight: 700,
+      letterSpacing: '0.03em'
+    }
+  }, "DE")), /*#__PURE__*/React.createElement("button", {
     onClick: () => setHideValue(v => !v),
     title: hideValue ? t('showValues', lang) : t('hideValues', lang),
     style: {
@@ -15655,9 +19870,9 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'center',
       gap: 5,
-      color: isPositive ? '#8FE0AC' : '#F0A0A0',
-      background: isPositive ? 'rgba(143,224,172,0.1)' : 'rgba(240,160,160,0.1)',
-      border: `1px solid ${isPositive ? 'rgba(143,224,172,0.25)' : 'rgba(240,160,160,0.25)'}`,
+      color: isPositive ? '#6FE3E5' : '#F5C36B',
+      background: isPositive ? 'rgba(111,227,229,0.1)' : 'rgba(245,195,107,0.1)',
+      border: `1px solid ${isPositive ? 'rgba(111,227,229,0.25)' : 'rgba(245,195,107,0.25)'}`,
       borderRadius: 999,
       padding: '4px 10px 4px 8px',
       fontSize: 12.5,
@@ -15767,14 +19982,14 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'center',
       gap: 4,
-      color: '#3DDC84'
+      color: '#00DEE1'
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
       width: 6,
       height: 6,
       borderRadius: '50%',
-      background: '#3DDC84',
+      background: '#00DEE1',
       animation: 'pulse 1.6s ease-in-out infinite'
     }
   }), t('liveWord', lang)))), /*#__PURE__*/React.createElement("div", {
@@ -15877,6 +20092,10 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     // Höhe wird zur Laufzeit am 24h-Volumen-Kärtchen ausgemessen (siehe matchedChartHeight
     // weiter oben). Solange noch nicht gemessen wurde (erster Frame, kein Volumen-Kärtchen
     // sichtbar, Mobilansicht), gilt der statische Standardwert.
+    // Desktop-Standardwert deutlich kleiner als zuvor (war 193) -- mit dem jetzt vollständig
+    // eingebetteten Swap-Interface darunter (statt der kompakten Trigger-Karte) braucht der
+    // Chart von vornherein weniger Raum; die automatische Höhen-Angleichung (siehe
+    // matchedChartHeight-Effekt weiter oben) übernimmt danach die Feinjustierung.
     height: matchedChartHeight != null ? matchedChartHeight : typeof window !== 'undefined' && window.innerWidth < 640 ? 190 : 193,
     allowDrawing: false,
     restrictHoverToLine: true,
@@ -15886,9 +20105,13 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 20
     }
+    // Zurück zur einfachen Vorschau-Karte (siehe SwapTriggerCard weiter oben) -- ein Zwischen-
+    // stand mit aufklappbarem Mini-Interface direkt in der Spalte (ScaledBox) wirkte wie ein
+    // halbfertiges eigenständiges Interface und öffnete sich nicht mehr zentriert wie zuvor.
+    // Klick auf die Karte öffnet stattdessen wieder das zentrierte Popup-Fenster (swapModal).
   }, swapTriggerCard)), /*#__PURE__*/React.createElement("div", {
     ref: sidebarColRef,
-    className: `tp-sidebar-col tp-details-panel ${mobileTab === 'details' ? 'tp-panel-active' : ''}`,
+    className: `tp-sidebar-col tp-details-panel ${mobileTab === 'details' ? `tp-panel-active ${tabEnterFromRight ? 'tp-enter-right' : 'tp-enter-left'}` : ''}`,
     style: {
       // Breiter als zuvor (max. 300px), damit die Karten rechts nicht deutlich kleiner
       // wirken als die linken. Die linke Spalte bleibt mit 420px Basis/640px Maximum die
@@ -15903,12 +20126,49 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
     }
   }, priceRowBox && /*#__PURE__*/React.createElement("div", {
     className: "tp-price-sidebar"
-  }, priceRowBox), nodeRewardsBox, volume24h != null && /*#__PURE__*/React.createElement("div", {
+  }, priceRowBox), nodeRewardsBox, hasAnyNodeRewardsData && volume24h != null && /*#__PURE__*/React.createElement("div", {
+    // Der Kanal, durch den die Swap-Partikel von der Volumen-Kachel HOCH in die
+    // Bond-Rewards-Karte darüber wandern (siehe spawnSwapParticle/liveFlowChannelRef weiter
+    // oben). Deutlich höher als die erste Fassung (war 22px mit -9px Margin -- dadurch blieb
+    // durch overflow:hidden kaum sichtbare Laufstrecke übrig, die Partikel waren fast nicht zu
+    // erkennen). Die leichte negative Margin zieht ihn nur noch MINIMAL in den bestehenden
+    // Kartenabstand hinein, statt ihn fast komplett zu verschlucken.
+    ref: liveFlowChannelRef,
+    style: {
+      position: 'relative',
+      height: 64,
+      margin: '-4px 0',
+      pointerEvents: 'none',
+      overflow: 'hidden'
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    // Leitspur mit permanentem, sanftem Schimmer (siehe .tp-flow-track/tpTrackShimmer in
+    // index.html) -- macht den Kanal SOFORT beim Laden als aktive Verbindung erkennbar, statt
+    // erst beim ersten echten Partikel sichtbar zu werden. Kräftiger als die erste, fast
+    // unsichtbare Fassung (Opazität 0.28 -- da verschwand die Linie optisch fast komplett
+    // zwischen den beiden Karten).
+    className: "tp-flow-track",
+    style: {
+      position: 'absolute',
+      left: '50%',
+      top: 2,
+      bottom: 2,
+      width: 3,
+      transform: 'translateX(-50%)',
+      background: 'linear-gradient(180deg, rgba(0,222,225,0), rgba(0,222,225,0.55) 25%, rgba(0,222,225,0.55) 75%, rgba(0,222,225,0))',
+      borderRadius: 3,
+      boxShadow: '0 0 6px rgba(0,222,225,0.35)'
+    }
+  })), /*#__PURE__*/React.createElement("div", {
     ref: volCardRef,
     className: "tp-side-card",
     style: {
       ...cardShellStyle,
-      padding: '18px 20px'
+      padding: '18px 20px',
+      // Nötig, damit die Live/7D/30D-Buttons in VolumeSparkline weiter unten absolut relativ
+      // zu DIESER Karte (statt zum nächsten positionierten Vorfahren irgendwo weiter oben)
+      // oben rechts einrasten können.
+      position: 'relative'
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -15925,7 +20185,8 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       letterSpacing: '0.04em',
       textTransform: 'uppercase'
     }
-  }, t('volume24h', lang))), /*#__PURE__*/React.createElement("div", {
+  }, t('volume24h', lang))), volume24h != null && /*#__PURE__*/React.createElement("div", {
+    ref: liveVolumeNumberRef,
     style: {
       color: '#FFFFFF',
       fontFamily: "'Space Grotesk', sans-serif",
@@ -15933,25 +20194,86 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       fontSize: 24,
       lineHeight: 1.2
     }
-  }, fmtUSDCompact(volume24h * (activePrice || 0), lang, currency)), /*#__PURE__*/React.createElement("div", {
+  }, hideValue ? '••••' : fmtUSDCompact(volume24h * (activePrice || 0), lang, currency)), volume24h != null && /*#__PURE__*/React.createElement("div", {
     style: {
       color: '#5C7274',
       fontSize: 10.5,
       marginTop: 2
     }
-  }, t('swapVolumeLabel', lang)), /*#__PURE__*/React.createElement(VolumeSparkline, {
+    // Verlaufs-Button steht jetzt NICHT mehr hier, sondern zusammen mit den Live/7D/30D-
+    // Buttons in EINER gemeinsamen, sauber ausgerichteten Zeile innerhalb von VolumeSparkline
+    // (siehe onOpenHistory-Prop weiter unten) -- vorher wurden beide unabhängig voneinander
+    // positioniert, was oben rechts gedrängt/unsymmetrisch wirkte.
+  }, t('swapVolumeLabel', lang)), volume24h != null && /*#__PURE__*/React.createElement(VolumeSparkline, {
     data: volumeHistory,
+    liveData: liveVolumeSeries,
+    liveFeeRune: liveFeeAccumRune,
+    onOpenHistory: () => setShowVolumeHistoryModal(true),
     activePrice: activePrice,
     lang: lang,
-    currency: currency
-  })))), isNarrowViewport && /*#__PURE__*/React.createElement("div", {
-    className: `tp-swap-panel ${mobileTab === 'swap' ? 'tp-panel-active' : ''}`,
+    currency: currency,
+    hideValue: hideValue
+  }), volume24h == null && volume24hFailed && /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: '1 1 240px',
-      maxWidth: 300,
-      minWidth: 240
+      marginTop: 4
     }
-  }, swapTriggerCard)), swapModal, runePriceChartModal, compareChartModal, /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#F5C36B',
+      fontSize: 12
+    }
+  }, t('couldNotLoadVolume', lang)), volume24hErrorDetail && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: '#7C9698',
+      fontSize: 11,
+      marginTop: 4,
+      wordBreak: 'break-word'
+    }
+  }, volume24hErrorDetail)), volume24h == null && !volume24hFailed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 2
+    }
+    // Sichtbarer Lade-Zustand für die kurze Phase, bevor der erste Ladeversuch durch ist ODER
+    // (nach zwei Fehlschlägen) die Fehlermeldung oben erscheint -- vorher war die Karte in
+    // dieser Zeit komplett unsichtbar (weder Zahl noch Chart noch irgendein Hinweis), was wie
+    // ein Darstellungsfehler wirkte, obwohl im Hintergrund einfach noch geladen wurde. Gleiche
+    // Maße wie der eigentliche Inhalt (u.a. 96px Chart-Höhe), damit beim Eintreffen der Daten
+    // kein Layout-Sprung entsteht.
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 96,
+      height: 24,
+      borderRadius: 6,
+      background: '#132B2D',
+      animation: 'pulse 1.6s ease-in-out infinite',
+      marginBottom: 8
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 150,
+      height: 11,
+      borderRadius: 4,
+      background: '#132B2D',
+      animation: 'pulse 1.6s ease-in-out infinite',
+      marginBottom: 16
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: '100%',
+      height: 96,
+      borderRadius: 10,
+      background: '#0D2022',
+      animation: 'pulse 1.6s ease-in-out infinite'
+    }
+  }))))), isNarrowViewport && /*#__PURE__*/React.createElement("div", {
+    className: `tp-swap-panel ${mobileTab === 'swap' ? `tp-panel-active ${tabEnterFromRight ? 'tp-enter-right' : 'tp-enter-left'}` : ''}`,
+    style: {
+      // Volle Breite: hier steht das komplette Interface, keine schmale Karte mehr.
+      flex: '1 1 100%',
+      width: '100%',
+      minWidth: 0
+    }
+  }, swapInline)), swapModal, runePriceChartModal, compareChartModal, apyHistoryModal, volumeHistoryModal, apyCalculatorModal, deTaxModal, /*#__PURE__*/React.createElement("div", {
     className: "tp-footer",
     style: {
       marginTop: 40,
@@ -16105,7 +20427,8 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: 20
+      padding: 20,
+      touchAction: 'none'
     }
   }, /*#__PURE__*/React.createElement("div", {
     onClick: e => e.stopPropagation(),
@@ -16242,11 +20565,11 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
         display: 'flex',
         alignItems: 'center',
         gap: 5,
-        background: copied ? 'rgba(111,191,143,0.16)' : 'rgba(0,222,225,0.1)',
-        border: `1px solid ${copied ? 'rgba(111,191,143,0.45)' : 'rgba(0,222,225,0.35)'}`,
+        background: copied ? 'rgba(111,227,229,0.16)' : 'rgba(0,222,225,0.1)',
+        border: `1px solid ${copied ? 'rgba(111,227,229,0.45)' : 'rgba(0,222,225,0.35)'}`,
         borderRadius: 7,
         padding: '6px 10px',
-        color: copied ? '#6FBF8F' : '#00DEE1',
+        color: copied ? '#6FE3E5' : '#00DEE1',
         fontSize: 10.5,
         fontWeight: 600,
         fontFamily: "'Inter', sans-serif",
@@ -16262,7 +20585,7 @@ confirmDialog && ReactDOM.createPortal(/*#__PURE__*/React.createElement("div", {
         alignItems: 'center',
         gap: 8,
         background: '#0E2426',
-        border: `1px solid ${copied ? 'rgba(111,191,143,0.45)' : '#1A3436'}`,
+        border: `1px solid ${copied ? 'rgba(111,227,229,0.45)' : '#1A3436'}`,
         borderRadius: 9,
         padding: '8px 8px 8px 12px',
         transition: 'border-color 0.2s'
