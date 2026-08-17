@@ -10,6 +10,93 @@
 // FIX 6: /balance cached erfolgreiche Antworten in D1 (balance_cache) und fällt bei einem
 //        Liquify-Ausfall/Timeout auf den letzten bekannten Stand zurück (bis zu 1h alt),
 //        statt sofort einen Fehler an den Client zu liefern.
+// FIX 7: getThornodeBases() enthielt bisher AUSSCHLIESSLICH Liquify (einmal mit, einmal ohne
+//        eigenen API-Key -- aber beides derselbe Anbieter/dieselbe Infrastruktur!). Fiel Liquify
+//        aus, gab es serverseitig KEINEN echten Fallback, egal was clientseitig gemacht wird.
+//        Ergänzt um public-thornode.nativeswap.io (kein Key nötig, laut rune.tools-Projekt eine
+//        zuverlässig funktionierende, echte Alternative) und als letzten Versuch
+//        thornode.thorchain.network. WICHTIG: diese beiden Alternativen unterstützen KEINE
+//        historischen ?height=N-Abfragen (nur aktueller Stand) -- deshalb NUR für
+//        Nicht-Height-Anfragen (fetchNodes, fetchBalance) aktiv, NICHT für fetchNodeAtHeight
+//        (Reward-Berechnung pro Churn-Höhe). Würde man sie dort auch zulassen, könnte bei einem
+//        Liquify-Ausfall still und leise der AKTUELLE Node-Stand statt der historische
+//        eingelesen werden -- falsche Reward-Zahlen, ohne dass es auffällt.
+// FIX 8 (PERFORMANCE / Core Web Vitals): fetchFromBases probierte die Fallback-Quellen bisher
+//        STRIKT NACHEINANDER, jede mit vollen 10s Timeout -- im schlimmsten Fall (erste Quelle(n)
+//        hängen statt sauber zu antworten) warteten Client-Requests bis zu ~30s auf eine Antwort,
+//        was sich 1:1 in den LCP/FCP-Ausreißern auf 15-25s widerspiegelt. Ersetzt durch ein
+//        "Hedged Request"-Muster: Quelle 1 startet sofort; antwortet sie nicht innerhalb von
+//        STAGGER_MS, startet zusätzlich (nicht ANSTATT) Quelle 2 parallel dazu, danach ggf.
+//        Quelle 3 usw. Es gewinnt schlicht die erste Antwort, unabhängig davon, welche Quelle sie
+//        liefert -- alle bereits laufenden Requests werden dabei NICHT abgebrochen (nur die noch
+//        nicht gestarteten Quellen werden übersprungen, sobald irgendeine Quelle erfolgreich war).
+//        Reduziert die Worst-Case-Wartezeit von ~30s auf ~STAGGER_MS * (Anzahl Quellen - 1) +
+//        einen einzelnen Timeout (bei 3 Quellen z.B. ~2.5s*2 + 6s = ~11s statt 30s), ohne die
+//        bevorzugte Quelle (Liquify mit eigenem Key) bei normalem Betrieb zu benachteiligen, da
+//        sie in aller Regel deutlich schneller als STAGGER_MS antwortet. Gilt jetzt einheitlich
+//        für THORNode- UND Midgard-Anfragen (vorher hatte Midgard eine eigene, komplett
+//        sequenzielle Kopie derselben Logik).
+// FIX 9: /purchases synchronisiert jetzt zusätzlich zur Kaufliste auch die
+//        Berechnungs-Einstellungen (costBasisMethod: 'average'|'fifo', rewardValuationMethod:
+//        'free'|'market'). Ohne das rechnete jedes Gerät mit seinen eigenen, nur lokal
+//        gespeicherten Einstellungen und zeigte einen ANDEREN Ø-Kaufpreis für dieselben Daten.
+//
+//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
+//
+//          ALTER TABLE user_purchases ADD COLUMN settings TEXT;
+//
+//        Die Spalte darf NULL sein -- Adressen ohne gespeicherte Einstellungen verhalten sich
+//        exakt wie bisher (der Client behält dann seinen lokalen Stand und schreibt ihn beim
+//        nächsten Push hoch).
+// FIX 10: Drei Midgard-Anfragen liefen bisher DIREKT AUS DEM BROWSER gegen
+//        gateway.liquify.com/midgard.thorchain.network -- ohne jeden serverseitigen
+//        Fallback/Cache, im Unterschied zu allen anderen Daten (Balance, Bond-Historie), die
+//        längst über diesen Worker laufen. Blockiert das Netzwerk eines einzelnen Nutzers (z.B.
+//        eine Firewall/ein Proxy, der bestimmte Domains sperrt) BEIDE Midgard-Basen, blieb die
+//        betroffene Karte ohne jede Ausweichmöglichkeit dauerhaft leer/fehlerhaft -- ein
+//        klassischer Single-Point-of-Failure auf Client-Seite, den kein Fallback im Frontend
+//        beheben kann, weil das Problem beim NUTZER liegt, nicht bei Midgard selbst. Server-zu-
+//        Server-Anfragen (von HIER aus) sind von dieser Einschränkung nicht betroffen, exakt wie
+//        schon bei /balance und /bond-history.
+//
+//        Drei neue Routen, alle nach demselben bewährten Muster (fetchFromBases/Hedging,
+//        kurzlebiger In-Memory-Cache gegen Lastspitzen bei vielen gleichzeitigen Nutzern):
+//
+//        - /volume         -- 24h- und 30-Tage-Swap-Volumen (löst fetchVolume24h/
+//                              fetchVolumeHistory im Frontend ab)
+//        - /recent-swaps   -- die letzten Swaps für die Live-Partikel-/Live-Chart-Anzeige
+//                              (wird alle 7s gepollt, deshalb mit eigenem kurzem Cache, damit
+//                              nicht jeder gleichzeitig online Nutzer einen eigenen
+//                              Midgard-Request auslöst)
+//        - /bond-ledger    -- die vollständige Bond/Unbond-Transaktionsliste samt Kapital
+//                              (Principal) für eine Adresse (löst fetchActionsForType/
+//                              fetchBondLedger im Frontend ab). Nutzt dieselbe
+//                              fetchActionsForType-Funktion, die auch der bestehende
+//                              Cron-Refresh für /bond-history verwendet -- jetzt erweitert um
+//                              die volle Transaktionsliste (items), die das Frontend für die
+//                              Anzeige einzelner Bond/Unbond-Ereignisse braucht.
+// FIX 16 (NEU): /wallets -- synchronisiert jetzt auch die getrackte WALLET-LISTE selbst
+//        geräteübergreifend, nicht mehr nur die Kaufliste (/purchases). Vorher tauchte eine auf
+//        einem Gerät zusätzlich hinzugefügte oder entfernte Wallet-Adresse auf einem anderen
+//        Gerät nicht auf, weil es dafür überhaupt keinen Sync-Mechanismus gab. Nutzt exakt
+//        denselben Anker wie /purchases: die ERSTE getrackte Wallet-Adresse (wallets[0]) als
+//        Schlüssel -- setzt also voraus, dass diese auf allen Geräten identisch eingetragen ist.
+//        Gleiches additiv-mergendes Tombstone-Muster wie bei /purchases (siehe dort), nur mit
+//        Adressen statt Kauf-IDs als Einträge.
+//
+//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
+//
+//          CREATE TABLE IF NOT EXISTS user_wallet_lists (
+//            address TEXT PRIMARY KEY,
+//            wallets TEXT,
+//            updated_at INTEGER
+//          );
+//          CREATE TABLE IF NOT EXISTS user_wallet_lists_deleted (
+//            address TEXT NOT NULL,
+//            deleted_wallet TEXT NOT NULL,
+//            deleted_at INTEGER,
+//            PRIMARY KEY (address, deleted_wallet)
+//          );
 // ============================================================================
 
 // Der Liquify-API-Key liegt NICHT mehr im Klartext-Code, sondern als Secret in den
@@ -19,11 +106,18 @@
 // fetch()/scheduled() ganz unten) und getThornodeBases() baut die Liste daraus dynamisch.
 let currentEnv = null;
 
-function getThornodeBases() {
+// needsHeight: true  -> NUR Quellen, die historische ?height=N-Abfragen unterstützen (Liquify).
+// needsHeight: false (Standard) -> volle Liste inkl. NativeSwap/thornode.thorchain.network als
+//              Fallback für aktuelle (nicht-historische) Abfragen.
+function getThornodeBases({ needsHeight = false } = {}) {
   const key = currentEnv && currentEnv.LIQUIFY_API_KEY;
   const bases = [];
   if (key) bases.push(`https://gateway.liquify.com/api=${key}`);
   bases.push('https://gateway.liquify.com/chain/thorchain_api');
+  if (!needsHeight) {
+    bases.push('https://public-thornode.nativeswap.io');
+    bases.push('https://thornode.thorchain.network');
+  }
   return bases;
 }
 
@@ -42,24 +136,76 @@ async function fetchWithTimeout(url, { timeoutMs = 10000, ...options } = {}) {
   }
 }
 
-async function fetchFromBases(bases, path, options = {}) {
-  let lastError = null;
-  for (const base of bases) {
-    try {
-      const res = await fetchWithTimeout(`${base}${path}`, {
-        headers: { 'x-client-id': 'rune-rewards-backend', ...(options.headers || {}) },
-        ...options,
-      });
-      if (!res.ok) {
-        lastError = new Error(`HTTP_${res.status} (${base})`);
-        continue;
+// ----------------------------------------------------------------------------
+// FIX 8: Hedged-Request-Helfer (siehe Kommentar oben). PER_BASE_TIMEOUT_MS ist der Timeout für
+// EINE einzelne Quelle (nicht mehr 10s), STAGGER_MS die Wartezeit, bevor zusätzlich die nächste
+// Quelle danebengestartet wird. Beide bewusst so gewählt, dass eine normal schnelle Primärquelle
+// (typischerweise < 1s) niemals eine zweite parallele Anfrage auslöst -- die Staffelung greift
+// wirklich nur, wenn eine Quelle spürbar hängt.
+//
+// FIX 13: STAGGER_MS von 2500ms auf 800ms reduziert. War Liquify (immer die erste Quelle in den
+// jeweiligen BASES-Arrays) spürbar langsam, aber nicht komplett down, ergab sich WORST CASE
+// bisher ~2x 2500ms = 5s, bis die zweite Quelle überhaupt eine Antwort zurückgegeben hatte --
+// exakt die gemeldete 5s-Verzögerung beim ersten Laden der Live-Swap-Anzeige. Ein kürzerer
+// Stagger kann NIEMALS schaden: ist die Primärquelle wie üblich schnell (<800ms), ändert sich
+// gar nichts (die zweite Quelle wird ohnehin nie gebraucht, siehe settled-Flag in attempt()
+// weiter unten). Nur wenn die Primärquelle TATSÄCHLICH langsam ist, startet die zweite Quelle
+// jetzt deutlich früher parallel dazu -- reduziert die Worst-Case-Wartezeit über ALLE gehedgten
+// Endpunkte hinweg (Balance, Bond-Ledger, Volumen, Recent-Swaps), nicht nur diesen einen.
+const PER_BASE_TIMEOUT_MS = 6000;
+const STAGGER_MS = 800;
+
+async function fetchJsonHedged(bases, pathForBase, options = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pending = bases.length;
+    const errors = [];
+    let timers = [];
+
+    const clearAllTimers = () => {
+      for (const t of timers) clearTimeout(t);
+      timers = [];
+    };
+
+    const attempt = async (base, index) => {
+      try {
+        const res = await fetchWithTimeout(pathForBase(base), {
+          timeoutMs: PER_BASE_TIMEOUT_MS,
+          headers: { 'x-client-id': 'rune-rewards-backend', ...(options.headers || {}) },
+          ...options,
+        });
+        if (!res.ok) throw new Error(`HTTP_${res.status} (${base})`);
+        const data = await res.json();
+        if (!settled) {
+          settled = true;
+          clearAllTimers();
+          resolve(data);
+        }
+      } catch (e) {
+        errors[index] = e;
+        pending -= 1;
+        if (!settled && pending === 0) {
+          settled = true;
+          clearAllTimers();
+          reject(errors.find(Boolean) || new Error('ALL_BASES_FAILED'));
+        }
       }
-      return await res.json();
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  throw lastError || new Error('ALL_BASES_FAILED');
+    };
+
+    // Erste Quelle startet sofort. Jede weitere Quelle startet entweder STAGGER_MS nach der
+    // vorherigen ODER sofort, sobald ihre linke(n) Nachbar-Quelle(n) bereits fehlgeschlagen sind
+    // (kein Grund zu warten, wenn eh schon feststeht, dass wir sie brauchen).
+    bases.forEach((base, index) => {
+      const timer = setTimeout(() => {
+        if (!settled) attempt(base, index);
+      }, index * STAGGER_MS);
+      timers.push(timer);
+    });
+  });
+}
+
+async function fetchFromBases(bases, path, options = {}) {
+  return fetchJsonHedged(bases, (base) => `${base}${path}`, options);
 }
 
 // Kurzlebiger Cache (2s) für die komplette Node-Liste: mehrere getrackte Adressen (oder
@@ -76,12 +222,19 @@ function fetchNodes() {
     return nodesCache.promise;
   }
   const promise = fetchFromBases(getThornodeBases(), '/thorchain/nodes');
+  // Siehe ausführliche Begründung bei fetchRecentSwapActionsCached (FIX 11): ein
+  // fehlgeschlagenes Promise darf nicht für die volle Cache-Dauer an nachfolgende Aufrufer
+  // weitergereicht werden, sonst wiederholt sich ein einzelner Fehlschlag unnötig oft.
+  promise.catch(() => {
+    if (nodesCache && nodesCache.promise === promise) nodesCache = null;
+  });
   nodesCache = { promise, atMs: Date.now() };
   return promise;
 }
 
 function fetchNodeAtHeight(nodeAddress, height) {
-  return fetchFromBases(getThornodeBases(), `/thorchain/node/${nodeAddress}?height=${height}`);
+  // needsHeight: true -- siehe FIX 7 oben. Nur Liquify-Basen, kein NativeSwap/thornode.network.
+  return fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/node/${nodeAddress}?height=${height}`);
 }
 
 function fetchChurns() {
@@ -93,23 +246,383 @@ function fetchBalance(address) {
 }
 
 async function fetchMidgardActionsPage(address, txType, offset) {
-  let lastError = null;
-  for (const base of MIDGARD_BASES) {
-    const url = `${base}/actions?address=${address}&type=${txType}&limit=50&offset=${offset}`;
+  return fetchFromBases(MIDGARD_BASES, `/actions?address=${address}&type=${txType}&limit=50&offset=${offset}`);
+}
+
+// ----------------------------------------------------------------------------
+// FIX 10: /volume -- 24h- und 30-Tage-Swap-Volumen. Kurzlebiger Cache (5s): das Frontend pollt
+// alle 30s, bei mehreren gleichzeitig aktiven Nutzern würde sonst trotzdem jeder Request einzeln
+// bis zu Midgard durchgereicht, obwohl die Antwort für alle identisch ist.
+// ----------------------------------------------------------------------------
+function fetchVolumeInterval(interval, count) {
+  return fetchFromBases(MIDGARD_BASES, `/history/swaps?interval=${interval}&count=${count}`);
+}
+
+let volumeCache = null; // { promise, atMs }
+const VOLUME_CACHE_MS = 5000;
+
+function fetchVolumeBundle() {
+  if (volumeCache && Date.now() - volumeCache.atMs < VOLUME_CACHE_MS) {
+    return volumeCache.promise;
+  }
+  const promise = (async () => {
+    const [hourResult, dayResult] = await Promise.allSettled([
+      fetchVolumeInterval('hour', 24),
+      fetchVolumeInterval('day', 30),
+    ]);
+    return {
+      hour: hourResult.status === 'fulfilled' ? hourResult.value : null,
+      hourError: hourResult.status === 'rejected' ? (hourResult.reason?.message || String(hourResult.reason)) : null,
+      day: dayResult.status === 'fulfilled' ? dayResult.value : null,
+      dayError: dayResult.status === 'rejected' ? (dayResult.reason?.message || String(dayResult.reason)) : null,
+    };
+  })();
+  volumeCache = { promise, atMs: Date.now() };
+  return promise;
+}
+
+async function handleVolume(request, env) {
+  const data = await fetchVolumeBundle();
+  return json(data, env);
+}
+
+// ----------------------------------------------------------------------------
+// FIX 10: /recent-swaps -- die letzten Swaps für die Live-Fee-Ticker-Anzeige im Frontend. Wird
+// dort alle 7s gepollt -- kurzlebiger Cache (4s), damit bei mehreren gleichzeitig aktiven
+// Nutzern nicht jeder einen eigenen Midgard-Request alle 7s auslöst, sondern sich mehrere
+// Polls dieselbe, ganz frische Antwort teilen.
+//
+// FIX 11 (weiterhin 502 trotz limit=50->20 + Cache-Fix): noch zwei Stufen robuster gemacht.
+// 1) limit weiter auf 10 reduziert und der Anfrage über die options-Weiterreichung in
+//    fetchFromBases ein LÄNGERER, eigener Timeout gegeben (12s statt der globalen 6s in
+//    PER_BASE_TIMEOUT_MS) -- der unfilterte netzwerkweite /actions-Endpunkt scheint bei Midgard
+//    grundsätzlich langsamer zu sein als adressgefilterte oder aggregierte Endpunkte
+//    (/history/swaps, /actions?address=X), vermutlich weil er nicht denselben Weg über
+//    vorberechnete/indexierte Daten nehmen kann. Der Timeout gilt NUR für diese eine Anfrage
+//    (options.timeoutMs überschreibt in fetchJsonHedged gezielt den Default), alle anderen
+//    Endpunkte bleiben bei den bisherigen 6s.
+// 2) WICHTIGER: schlagen trotzdem beide Quellen fehl, wird jetzt NIE MEHR ein harter 502-Fehler
+//    an den Client zurückgegeben -- stattdessen eine leere, aber gültige Antwort ({actions:[]}).
+//    Für eine Live-Anzeige, die ohnehin alle 7s erneut pollt, ist "dieser eine Zyklus zeigt
+//    nichts Neues" ein völlig unauffälliger Zustand, "ein Request schlägt sichtbar fehl" dagegen
+//    nicht -- das eine ist harmlos, das andere wirkt wie ein kaputtes Feature.
+// ----------------------------------------------------------------------------
+function fetchRecentSwapActions() {
+  return fetchFromBases(MIDGARD_BASES, '/actions?type=swap&limit=10', {
+    timeoutMs: 12000
+  });
+}
+
+let recentSwapsCache = null; // { promise, atMs }
+const RECENT_SWAPS_CACHE_MS = 4000;
+
+function fetchRecentSwapActionsCached() {
+  if (recentSwapsCache && Date.now() - recentSwapsCache.atMs < RECENT_SWAPS_CACHE_MS) {
+    return recentSwapsCache.promise;
+  }
+  const promise = fetchRecentSwapActions();
+  // Bei Fehlschlag den Cache SOFORT wieder leeren (nicht die volle Cache-Dauer stehen lassen)
+  // -- verhindert, dass ein einzelner Fehlschlag an nachfolgende Aufrufer innerhalb des
+  // 4s-Fensters weitergereicht wird, statt dass diese einen eigenen, frischen Versuch starten.
+  promise.catch(() => {
+    if (recentSwapsCache && recentSwapsCache.promise === promise) {
+      recentSwapsCache = null;
+    }
+  });
+  recentSwapsCache = { promise, atMs: Date.now() };
+  return promise;
+}
+
+// FIX 14: /recent-swaps zeigte beim allerersten Laden der Seite regelmäßig spürbar lange
+// "Collecting live data..." -- selbst mit kürzerem STAGGER_MS (siehe FIX 13) bleibt eine
+// Live-Anfrage an Midgard grundsätzlich unberechenbar (mal <1s, mal mehrere Sekunden). Statt
+// den Nutzer JEDES Mal auf eine live Antwort warten zu lassen, wird jetzt zusätzlich eine
+// Momentaufnahme der letzten Swaps in D1 vorgehalten -- geschrieben vom ohnehin laufenden
+// Cron-Job (siehe collectSwapPairStats weiter unten), der sowieso regelmäßig frische
+// Swap-Daten abruft.
+//
+// VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console), zusätzlich zu den bereits bestehenden
+// swap_events/swap_collector_state-Tabellen:
+//
+//   CREATE TABLE IF NOT EXISTS recent_swaps_snapshot (
+//     id INTEGER PRIMARY KEY CHECK (id = 1),
+//     payload TEXT NOT NULL,
+//     updated_at INTEGER NOT NULL
+//   );
+//
+// FIX 15 (KORREKTUR von FIX 14): die erste Fassung wartete bei JEDEM Aufruf bis zu 1.5s auf
+// eine Live-Antwort, bevor sie auf den Snapshot auswich (Promise.race) -- das Problem: der
+// kurzlebige In-Memory-Cache (RECENT_SWAPS_CACHE_MS = 4s) ist KÜRZER als der 7s-Poll-Rhythmus
+// des Frontends. Der Cache war beim NÄCHSTEN Poll also praktisch IMMER schon wieder abgelaufen
+// -- wodurch sich die künstliche 1.5s-Wartezeit auf JEDEN einzelnen Poll anwendete, nicht nur
+// den allerersten. Das machte die Anzeige spürbar LANGSAMER als vorher, nicht schneller.
+//
+// Jetzt richtig: eine reine In-Memory-Markierung (recentSwapsWarmedUp, NICHT an die 4s-
+// Cache-Dauer gekoppelt) merkt sich pro Worker-Isolat, ob überhaupt schon einmal eine echte
+// Live-Antwort zurückgegeben wurde. NUR beim allerersten Aufruf seit einem (Kalt-)Start dieses
+// Isolats wird sofort der Snapshot genutzt, während die Live-Anfrage parallel im Hintergrund
+// weiterläuft (ctx.waitUntil). AB DEM ZWEITEN Aufruf -- egal wie viel Zeit seitdem vergangen
+// ist -- läuft es ganz normal live, ohne jede künstliche Wartezeit, exakt wie vor FIX 14.
+let recentSwapsWarmedUp = false;
+
+async function readRecentSwapsSnapshot(env) {
+  const row = await env.DB.prepare('SELECT payload FROM recent_swaps_snapshot WHERE id = 1').first();
+  if (!row || !row.payload) return null;
+  try {
+    return JSON.parse(row.payload);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function handleRecentSwaps(request, env, ctx) {
+  if (!recentSwapsWarmedUp) {
+    // Allererster Aufruf seit (Kalt-)Start dieses Isolats: sofort Snapshot versuchen, Live
+    // läuft parallel im Hintergrund weiter (wärmt zugleich den In-Memory-Cache für den
+    // nächsten Poll vor) und markiert "ab jetzt normal live" für alle folgenden Aufrufe.
+    const livePromise = fetchRecentSwapActionsCached().then(data => {
+      recentSwapsWarmedUp = true;
+      return data;
+    }).catch(e => {
+      recentSwapsWarmedUp = true; // auch bei Fehlschlag nicht wieder-wieder versuchen zu warten
+      throw e;
+    });
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(livePromise.catch(() => {}));
+    }
     try {
-      const res = await fetchWithTimeout(url, {
-        headers: { 'x-client-id': 'rune-rewards-backend' },
-      });
-      if (!res.ok) {
-        lastError = new Error(`HTTP_${res.status} (${base})`);
-        continue;
-      }
-      return await res.json();
+      const snapshot = await readRecentSwapsSnapshot(env);
+      if (snapshot) return json(snapshot, env);
     } catch (e) {
-      lastError = e;
+      console.warn('[rune-rewards-backend] Snapshot-Lesen fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
+    }
+    // Kein Snapshot vorhanden (z.B. ganz am Anfang, bevor der Cron das erste Mal gelaufen ist)
+    // -- dann eben doch auf die Live-Antwort warten.
+    try {
+      const data = await livePromise;
+      return json(data, env);
+    } catch (e) {
+      console.warn('[rune-rewards-backend] /recent-swaps fehlgeschlagen (beide Quellen):', e?.message || String(e));
+      return json({ actions: [] }, env);
     }
   }
-  throw lastError || new Error('ALL_BASES_FAILED');
+
+  try {
+    const data = await fetchRecentSwapActionsCached();
+    return json(data, env);
+  } catch (e) {
+    console.warn('[rune-rewards-backend] /recent-swaps fehlgeschlagen (beide Quellen):', e?.message || String(e));
+    // Bewusst KEIN 502 mehr -- eine leere, aber gültige Antwort. Die Live-Anzeige pollt ohnehin
+    // alle 7s erneut; "dieser eine Zyklus zeigt nichts Neues" fällt nicht auf, ein sichtbarer
+    // Fehler dagegen schon.
+    return json({
+      actions: []
+    }, env);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// FIX 12: Top-5-Swap-Paare der letzten 12h/24h ("welche Paare wurden am häufigsten
+// geswapt"). Das lässt sich NICHT live pro Anfrage berechnen -- dafür bräuchte man
+// potenziell tausende Swap-Actions der letzten 24h von Midgard, seitenweise paginiert, bei
+// jeder einzelnen Anfrage. Stattdessen sammelt der ohnehin laufende Cron-Job (siehe
+// runRefreshCycle) bei JEDEM Durchlauf neue Swaps ein und schreibt sie in eine eigene
+// D1-Tabelle -- die eigentliche Abfrage (/top-pairs) liest dann nur noch aus dieser bereits
+// gesammelten, kleinen Tabelle, dauert also nur Millisekunden statt Sekunden.
+//
+// FIX 13 (WICHTIGE KORREKTUR): die ERSTE Fassung holte pro Cron-Durchlauf pauschal nur die
+// LETZTEN 50 Swaps -- unabhängig davon, wie viele seit dem letzten Durchlauf tatsächlich
+// passiert waren. Bei mehr als 50 Swaps zwischen zwei Durchläufen (netzwerkweit über THORChain
+// bei normaler/hoher Aktivität durchaus real) fielen die überzähligen komplett unter den Tisch
+// -- "12h"/"24h" stimmte dann schlicht nicht, es war nur eine zufällige Stichprobe, keine
+// vollständige Erfassung. Jetzt lückenlos: swap_collector_state merkt sich die höchste bereits
+// erfasste Block-Höhe, jeder Durchlauf paginiert (offset-basiert) so lange weiter nach hinten,
+// bis er entweder eine bereits bekannte Höhe erreicht (= alles Neue seit letztem Mal erfasst)
+// oder das Seiten-Limit greift (Sicherheitsnetz gegen einen durchgehend hängenden Cron, der
+// sonst unbegrenzt nachpaginieren würde). Mit MAX_PAGES=10 * 50 = bis zu 500 Swaps pro
+// Durchlauf nachholbar -- selbst bei sehr hoher Aktivität zwischen zwei Cron-Ticks realistisch
+// ausreichend.
+//
+// WICHTIGE EINSCHRÄNKUNG, die bleibt: Daten gibt es nur ab dem Zeitpunkt, an dem dieses
+// Feature deployed wurde -- kein rückwirkendes Auffüllen der Stunden davor. Direkt nach dem
+// Deploy zeigt "24h" deshalb zunächst nur die tatsächlich seither vergangene, kürzere Zeit.
+//
+// VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
+//
+//   CREATE TABLE IF NOT EXISTS swap_events (
+//     tx_id TEXT PRIMARY KEY,
+//     pair TEXT NOT NULL,
+//     volume_usd REAL,
+//     ts INTEGER NOT NULL
+//   );
+//   CREATE INDEX IF NOT EXISTS idx_swap_events_ts ON swap_events(ts);
+//   CREATE TABLE IF NOT EXISTS swap_collector_state (
+//     id INTEGER PRIMARY KEY CHECK (id = 1),
+//     last_height INTEGER
+//   );
+//
+// Bereits bestehende Installationen (swap_events existiert schon): NUR die neue
+// swap_collector_state-Tabelle zusätzlich anlegen, swap_events bleibt unverändert.
+//
+// tx_id als Primärschlüssel sorgt zusätzlich automatisch für Deduplizierung (INSERT OR
+// IGNORE) als zweite Sicherheitsebene, falls sich Seiten aus irgendeinem Grund überlappen.
+// ----------------------------------------------------------------------------
+
+// Serverseitiges Äquivalent zu swapAssetLabel im Frontend (app.js) -- absichtlich eigenständig
+// dupliziert statt geteilt, da Worker und Frontend getrennt deploybar sind. Baut aus einem
+// Midgard-Asset-Bezeichner ein kurzes Anzeige-Label: bei nativen Assets (Chain=Ticker, z.B.
+// "BTC.BTC") nur der Ticker, bei Token-Assets (z.B. "TRX.USDT") Chain UND Ticker kombiniert,
+// da der Ticker allein mehrdeutig wäre (USDT gibt es auf mehreren Chains).
+function deriveAssetLabel(identifier) {
+  if (!identifier) return '?';
+  const raw = String(identifier);
+  const sep = Math.max(raw.indexOf('.'), raw.indexOf('~'));
+  const chain = sep > 0 ? raw.slice(0, sep) : raw;
+  const rest = sep > 0 ? raw.slice(sep + 1) : '';
+  const tickerRaw = (rest.split('-')[0] || chain).toUpperCase();
+  const chainClean = String(chain).split('-')[0].slice(0, 8);
+  const tickerClean = String(tickerRaw).split('-')[0].slice(0, 8);
+  return chainClean && chainClean !== tickerClean ? `${chainClean}.${tickerClean}` : tickerClean;
+}
+
+function buildSwapEventRow(a) {
+  if (a.status && a.status !== 'success') return null;
+  const txId = a.in && a.in[0] && a.in[0].txID;
+  if (!txId) return null;
+  const inCoin = a.in && a.in[0] && a.in[0].coins && a.in[0].coins[0];
+  const inAsset = inCoin && inCoin.asset;
+  const outAsset = (a.out && a.out[0] && a.out[0].coins && a.out[0].coins[0] && a.out[0].coins[0].asset) || (a.pools && a.pools[a.pools.length - 1]);
+  const pair = `${deriveAssetLabel(inAsset)} \u2192 ${deriveAssetLabel(outAsset)}`;
+  const swap = a.metadata && a.metadata.swap;
+  const priceUsd = swap ? parseFloat(swap.inPriceUSD) : NaN;
+  const amountBase = inCoin ? parseInt(inCoin.amount, 10) : NaN;
+  let volumeUsd = null;
+  if (isFinite(priceUsd) && isFinite(amountBase) && amountBase > 0) {
+    volumeUsd = (amountBase / 1e8) * priceUsd;
+  }
+  const ts = a.date ? Math.floor(Number(a.date) / 1e6) : Date.now();
+  return { txId, pair, volumeUsd, ts };
+}
+
+const SWAP_COLLECT_MAX_PAGES = 10; // Sicherheitsnetz: max. 10*50 = 500 Swaps pro Cron-Durchlauf
+
+async function collectSwapPairStats(env) {
+  let lastHeight = null;
+  try {
+    const stateRow = await env.DB.prepare('SELECT last_height FROM swap_collector_state WHERE id = 1').first();
+    lastHeight = stateRow ? stateRow.last_height : null;
+  } catch (e) {
+    // swap_collector_state existiert evtl. noch nicht (siehe SQL-Migration oben) -- dann läuft
+    // dieser Durchlauf einfach OHNE Höhen-Filter (holt nur eine Seite), bis die Tabelle
+    // angelegt ist und ab dem nächsten Durchlauf lückenlos weitergemacht werden kann.
+    console.warn('[rune-rewards-backend] swap_collector_state nicht lesbar (Migration ausgeführt?):', e?.message || String(e));
+  }
+
+  const collectedRows = [];
+  let maxHeightSeen = lastHeight;
+  let reachedKnownHeight = false;
+  let firstPageActions = null; // für die Momentaufnahme (FIX 14) -- unabhängig vom Höhen-Filter
+
+  for (let page = 0; page < SWAP_COLLECT_MAX_PAGES; page++) {
+    let data;
+    try {
+      data = await fetchFromBases(MIDGARD_BASES, `/actions?type=swap&limit=50&offset=${page * 50}`, {
+        timeoutMs: 12000,
+      });
+    } catch (e) {
+      console.warn('[rune-rewards-backend] Swap-Paar-Sammlung fehlgeschlagen (Seite', page, '):', e?.message || String(e));
+      break; // was bisher gesammelt wurde, wird trotzdem gespeichert -- besser als nichts
+    }
+    const actions = (data && Array.isArray(data.actions)) ? data.actions : [];
+    if (page === 0) firstPageActions = actions;
+    if (!actions.length) break;
+
+    for (const a of actions) {
+      const height = parseInt(a.height, 10);
+      // Midgard liefert neueste zuerst -- sobald eine Höhe auftaucht, die wir beim letzten
+      // Durchlauf schon erfasst hatten, ist ALLES Neue seit damals vollständig eingesammelt,
+      // weiteres Paginieren würde nur bereits bekannte, ältere Swaps erneut anfassen.
+      if (lastHeight != null && isFinite(height) && height <= lastHeight) {
+        reachedKnownHeight = true;
+        break;
+      }
+      const row = buildSwapEventRow(a);
+      if (row) collectedRows.push(row);
+      if (isFinite(height) && (maxHeightSeen == null || height > maxHeightSeen)) {
+        maxHeightSeen = height;
+      }
+    }
+
+    if (reachedKnownHeight || actions.length < 50) break; // fertig bzw. letzte Seite erreicht
+  }
+
+  // FIX 14: Momentaufnahme der aktuellsten Swaps (Seite 0, UNGEFILTERT nach Höhe -- die
+  // Live-Anzeige im Frontend will immer die neuesten paar Swaps sehen, unabhängig davon, ob
+  // sie für die Paar-Statistik oben schon "bekannt" waren) für den sofortigen Fallback in
+  // /recent-swaps speichern. Läuft unabhängig davon, ob es NEUE Swaps für die Statistik gab.
+  if (firstPageActions && firstPageActions.length) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO recent_swaps_snapshot (id, payload, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+      ).bind(JSON.stringify({ actions: firstPageActions.slice(0, 20) }), Date.now()).run();
+    } catch (e) {
+      console.warn('[rune-rewards-backend] Momentaufnahme-Schreiben fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
+    }
+  }
+
+  if (!collectedRows.length) return;
+
+  try {
+    const stmt = env.DB.prepare(
+      'INSERT OR IGNORE INTO swap_events (tx_id, pair, volume_usd, ts) VALUES (?, ?, ?, ?)'
+    );
+    await env.DB.batch(collectedRows.map((r) => stmt.bind(r.txId, r.pair, r.volumeUsd, r.ts)));
+
+    if (maxHeightSeen != null) {
+      await env.DB.prepare(
+        `INSERT INTO swap_collector_state (id, last_height) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET last_height = excluded.last_height`
+      ).bind(maxHeightSeen).run();
+    }
+
+    // Alte Einträge (älter als 25h, etwas Puffer über die maximal abgefragten 24h hinaus)
+    // aufräumen, damit die Tabelle nicht unbegrenzt wächst.
+    const cutoff = Date.now() - 25 * 60 * 60 * 1000;
+    await env.DB.prepare('DELETE FROM swap_events WHERE ts < ?').bind(cutoff).run();
+  } catch (e) {
+    // Tabelle(n) evtl. noch nicht angelegt (siehe SQL oben) -- Sammlung einfach beim nächsten
+    // Cron-Durchlauf erneut versuchen, kein harter Fehler nötig.
+    console.warn('[rune-rewards-backend] Swap-Paar-Sammlung: D1-Schreibfehler (Migration ausgeführt?):', e?.message || String(e));
+  }
+}
+
+async function handleTopPairs(request, env) {
+  const url = new URL(request.url);
+  // 12h-Option entfernt -- fest auf 24h. Stattdessen jetzt zwei Ranglisten wählbar: nach
+  // Häufigkeit (Standard, wie bisher) oder nach Handelsvolumen sortiert -- beide Werte wurden
+  // ohnehin schon aufsummiert, es fehlte nur eine zweite Sortierreihenfolge.
+  const sortByVolume = url.searchParams.get('sort') === 'volume';
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const orderClause = sortByVolume ? 'vol DESC' : 'cnt DESC';
+  try {
+    const rows = await env.DB.prepare(
+      `SELECT pair, COUNT(*) as cnt, SUM(COALESCE(volume_usd, 0)) as vol
+       FROM swap_events
+       WHERE ts >= ?
+       GROUP BY pair
+       ORDER BY ${orderClause}
+       LIMIT 5`
+    ).bind(cutoff).all();
+    return json({
+      hours: 24,
+      sort: sortByVolume ? 'volume' : 'count',
+      pairs: (rows.results || []).map((r) => ({ pair: r.pair, count: r.cnt, volumeUsd: r.vol })),
+    }, env);
+  } catch (e) {
+    console.error('[rune-rewards-backend] /top-pairs fehlgeschlagen (Tabelle angelegt?):', e?.message || String(e));
+    return json({ hours: 24, sort: sortByVolume ? 'volume' : 'count', pairs: [] }, env);
+  }
 }
 
 function sleep(ms) {
@@ -135,12 +648,18 @@ function computeAddressAwardFromNode(node, bondAddress) {
 
 const MAX_PAGES_PER_TYPE = 12;
 
+// FIX 10: erweitert um "items" -- die volle Transaktionsliste (dateMs/amount/txId/height/
+// nodeAddress je Bond-/Unbond-Ereignis). Vorher wurde nur die AGGREGIERTE Summe
+// zurückgegeben (ausreichend für den Cron-Refresh/refreshOneAddress), das neue /bond-ledger
+// weiter unten braucht aber die einzelnen Einträge, um sie im Frontend als Liste anzuzeigen --
+// exakt das, was vorher das Frontend selbst direkt gegen Midgard berechnet hat.
 async function fetchActionsForType(address, txType) {
   let offset = 0;
   let totalBase = 0;
   let earliestDateMs = null;
   const nodeAddresses = new Set();
   let matchedAny = false;
+  const items = [];
 
   for (let page = 0; page < MAX_PAGES_PER_TYPE; page++) {
     const body = await fetchMidgardActionsPage(address, txType, offset);
@@ -149,6 +668,11 @@ async function fetchActionsForType(address, txType) {
 
     for (const a of actions) {
       if (a.type !== txType) continue;
+      // WICHTIG: fehlgeschlagene/erstattete Bond-Versuche (status !== 'success') tauchen in
+      // Midgard trotzdem als Aktion vom Typ "bond"/"unbond" auf, haben aber nie tatsächlich den
+      // Bond verändert -- ohne diesen Filter würde jeder gescheiterte Versuch fälschlich als
+      // echte Ein-/Auszahlung gezählt (siehe gleicher Fix im Frontend, fetchActionsForType).
+      if (a.status && a.status !== 'success') continue;
       matchedAny = true;
       let amountBase = 0;
       const coinsGroups = txType === 'bond' ? (a.in || []) : (a.out?.length ? a.out : (a.in || []));
@@ -164,13 +688,21 @@ async function fetchActionsForType(address, txType) {
       if (dateMs && (earliestDateMs === null || dateMs < earliestDateMs)) earliestDateMs = dateMs;
       const nodeAddress = a.metadata?.bond?.nodeAddress || null;
       if (nodeAddress) nodeAddresses.add(nodeAddress);
+      items.push({
+        dateMs,
+        amount: amountBase / 1e8,
+        type: txType,
+        txId: a.in?.[0]?.txID || null,
+        height: parseInt(a.height, 10) || null,
+        nodeAddress,
+      });
     }
 
     if (actions.length < 50) break;
     offset += 50;
   }
 
-  return { totalBase, earliestDateMs, found: matchedAny, nodeAddresses: [...nodeAddresses] };
+  return { totalBase, earliestDateMs, found: matchedAny, nodeAddresses: [...nodeAddresses], items };
 }
 
 async function fetchBondLedger(address) {
@@ -188,10 +720,29 @@ async function fetchBondLedger(address) {
       principal: (bondRes.totalBase - unbondRes.totalBase) / 1e8,
       earliestDateMs: bondRes.earliestDateMs,
       nodeAddresses: allNodeAddresses,
+      // FIX 10: volle Transaktionsliste durchreichen, siehe handleBondLedger weiter unten.
+      transactions: [...bondRes.items, ...unbondRes.items].sort((a, b) => (b.dateMs || 0) - (a.dateMs || 0)),
     };
   } catch (e) {
     return { success: false, errorDetail: e?.message || String(e) };
   }
+}
+
+// ----------------------------------------------------------------------------
+// FIX 10: /bond-ledger -- löst die Midgard-Direktabfrage im Frontend (fetchActionsForType/
+// fetchBondLedger dort) ab. Nutzt dieselbe fetchBondLedger-Funktion, die auch der bestehende
+// Cron-Refresh (refreshOneAddress) für /bond-history verwendet -- EIN einziger, gemeinsamer,
+// bereits gehedgeter Code-Pfad statt zwei getrennter Implementierungen (eine hier, eine im
+// Frontend), die beide dieselbe Aufgabe lösen.
+// ----------------------------------------------------------------------------
+async function handleBondLedger(request, env) {
+  const url = new URL(request.url);
+  const address = url.searchParams.get('address');
+  if (!isValidThorAddress(address)) {
+    return json({ error: 'INVALID_ADDRESS' }, env, 400);
+  }
+  const result = await fetchBondLedger(address);
+  return json(result, env);
 }
 
 const MAX_ADDRESSES_PER_CRON_RUN = 2;
@@ -204,7 +755,7 @@ const isValidThorAddress = (addr) => /^thor1[0-9a-z]{20,60}$/.test(String(addr |
 function corsHeaders(env) {
   return {
     'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   };
 }
@@ -212,7 +763,7 @@ function corsHeaders(env) {
 function json(data, env, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders(env) },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(env) },
   });
 }
 
@@ -251,11 +802,17 @@ async function handleBondHistory(request, env, ctx) {
     .bind(address)
     .all();
 
-  const entries = (rows.results || []).map((r) => ({
-    height: r.churn_height,
-    dateMs: r.churn_timestamp,
-    amount: r.reward_amount,
-  }));
+  const entries = (rows.results || [])
+    // reward_amount IS NULL bedeutet: für diese Höhe konnten wir keine verwertbaren
+    // Provider-Daten ermitteln (siehe refreshOneAddress/hasProviderData) -- das ist NICHT
+    // dasselbe wie ein bestätigter 0-Reward-Churn und wird dem Frontend daher gar nicht erst
+    // als Datenpunkt gezeigt (kein Reward, kein Churn-out-Marker).
+    .filter((r) => r.reward_amount != null)
+    .map((r) => ({
+      height: r.churn_height,
+      dateMs: r.churn_timestamp,
+      amount: r.reward_amount,
+    }));
   const total = entries.reduce((sum, e) => sum + e.amount, 0);
 
   return json({
@@ -458,21 +1015,648 @@ async function handleBalance(request, env, ctx) {
 }
 
 // ----------------------------------------------------------------------------
+// FIX 17 (NEU): Leichtgewichtiges Retention-Tracking für /wallets und /purchases.
+// Zählt NICHT jeden einzelnen Request (das wäre nur "Visits", genauso ungenau wie
+// Cloudflare Web Analytics -- zehn Aufrufe derselben Adresse am selben Tag wären dort
+// zehn "Visits"), sondern für welche KALENDERTAGE (UTC) eine Adresse mindestens einmal
+// synchronisiert hat. Daraus lässt sich echte Wiederkehrer-Rate ableiten ("kam die
+// Adresse an mehr als einem Tag wieder"), ohne mehr als die Adresse selbst zu
+// speichern (die für den Sync ohnehin schon als Schlüssel dient).
+//
+// Läuft über ctx.waitUntil() -- blockiert nie die eigentliche GET/POST-Antwort an den
+// Client, egal ob die Schreiboperation selbst schnell oder langsam ist. Schlägt sie
+// fehl, wird das nur geloggt, nie an den Client durchgereicht -- rein statistisch, darf
+// den eigentlichen Sync niemals gefährden.
+//
+// Muss vorher per SQL angelegt werden:
+//
+//   CREATE TABLE IF NOT EXISTS sync_activity_days (
+//     address TEXT NOT NULL,
+//     day TEXT NOT NULL,
+//     first_seen_at INTEGER,
+//     PRIMARY KEY (address, day)
+//   );
+//   CREATE INDEX IF NOT EXISTS idx_sync_activity_days_day ON sync_activity_days(day);
+// ----------------------------------------------------------------------------
+
+function utcDayString(ms) {
+  return new Date(ms).toISOString().slice(0, 10); // 'YYYY-MM-DD'
+}
+
+// Eigene Test-/Vorschau-Adressen sollen die Statistik nicht verfälschen. Kommt bewusst
+// NICHT als Klartext-Liste im Code, sondern als Secret (EXCLUDED_SYNC_ADDRESSES,
+// kommagetrennt) in den Worker-Settings -- so bleibt der Quellcode selbst frei von
+// konkreten Adressen, auch wenn er mal geteilt oder in ein Repo gelegt wird.
+function getExcludedAddresses(env) {
+  const raw = (env && env.EXCLUDED_SYNC_ADDRESSES) || '';
+  return raw.split(',').map((a) => a.trim()).filter(Boolean);
+}
+
+function recordSyncActivity(env, ctx, address) {
+  if (!env.DB || !ctx || typeof ctx.waitUntil !== 'function') return; // Sicherheitsnetz: nie den Hauptpfad blockieren/abbrechen
+  if (getExcludedAddresses(env).includes(address)) return; // eigene Adresse -- nicht mitzählen
+  const now = Date.now();
+  const day = utcDayString(now);
+  const task = env.DB
+    .prepare('INSERT OR IGNORE INTO sync_activity_days (address, day, first_seen_at) VALUES (?, ?, ?)')
+    .bind(address, day, now)
+    .run()
+    .catch((e) => {
+      console.error('[rune-rewards-backend] recordSyncActivity failed:', e && e.message || e);
+    });
+  ctx.waitUntil(task);
+}
+
+// ----------------------------------------------------------------------------
+// Kaufliste (Ø-Kaufpreis-Feature) geräteübergreifend speichern/laden, verknüpft mit der
+// THORChain-Adresse -- damit dieselben Käufe/Verkäufe auf jedem Gerät sichtbar sind, sobald
+// dort dieselbe Adresse eingetragen wird (bisher nur lokal im Browser gespeichert).
+//
+// Muss vorher per SQL angelegt werden:
+//
+//   CREATE TABLE IF NOT EXISTS user_purchases (
+//     address TEXT PRIMARY KEY,
+//     data TEXT,
+//     updated_at INTEGER
+//   );
+//   CREATE TABLE IF NOT EXISTS user_purchases_deleted (
+//     address TEXT NOT NULL,
+//     deleted_id TEXT NOT NULL,
+//     deleted_at INTEGER,
+//     PRIMARY KEY (address, deleted_id)
+//   );
+//
+// FIX 9 -- zusätzlich einmalig ausführen (siehe Kopfkommentar):
+//
+//   ALTER TABLE user_purchases ADD COLUMN settings TEXT;
+//
+// Die zweite Tabelle ist eine "Tombstone"-Liste: merkt sich dauerhaft, welche Einträge bewusst
+// gelöscht wurden. Ohne sie würde ein reiner additiver Merge gelöschte Einträge von einem
+// anderen Gerät, das sie noch kennt, bei der nächsten Synchronisierung wieder zurückholen.
+//
+// Sicherheitshinweis: genau wie /bond-history und /balance gibt es hier KEINE Authentifizierung
+// über einen privaten Schlüssel -- die THORChain-Adresse selbst ist der Zugriffsschlüssel (wie
+// bei den bestehenden Endpunkten auch). Das ist für dieses Feature vertretbar (kein Zugriff auf
+// echte Wallet-Funktionen, nur auf selbst eingetragene Kauf-/Verkaufsnotizen), aber wer die
+// Adresse kennt, könnte theoretisch die dazu gespeicherte Kaufliste einsehen/überschreiben.
+// ----------------------------------------------------------------------------
+
+const MAX_PURCHASES_PAYLOAD_BYTES = 2_000_000; // Sicherheitsnetz gegen versehentlich riesige Payloads
+
+// FIX 9: Nur bekannte Werte durchlassen -- verhindert, dass irgendein Client beliebigen Unsinn
+// in die Spalte schreibt, den die anderen Geräte dann nicht interpretieren können.
+function sanitizeSettings(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  if (raw.costBasisMethod === 'fifo' || raw.costBasisMethod === 'average') {
+    out.costBasisMethod = raw.costBasisMethod;
+  }
+  if (raw.rewardValuationMethod === 'market' || raw.rewardValuationMethod === 'free') {
+    out.rewardValuationMethod = raw.rewardValuationMethod;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function handlePurchases(request, env, ctx) {
+  const url = new URL(request.url);
+  const address = url.searchParams.get('address');
+  if (!isValidThorAddress(address)) {
+    return json({ error: 'INVALID_ADDRESS' }, env, 400);
+  }
+  recordSyncActivity(env, ctx, address);
+
+  if (request.method === 'GET') {
+    const row = await env.DB
+      .prepare('SELECT data, settings, updated_at FROM user_purchases WHERE address = ?')
+      .bind(address)
+      .first();
+    let purchases = [];
+    if (row && row.data) {
+      try { purchases = JSON.parse(row.data); } catch (e) { purchases = []; }
+    }
+    let settings = null;
+    if (row && row.settings) {
+      try { settings = sanitizeSettings(JSON.parse(row.settings)); } catch (e) { settings = null; }
+    }
+    const deletedRows = await env.DB
+      .prepare('SELECT deleted_id FROM user_purchases_deleted WHERE address = ?')
+      .bind(address)
+      .all();
+    const deletedIds = new Set((deletedRows.results || []).map((r) => r.deleted_id));
+    // Defensiv nochmal gegen die Tombstone-Liste filtern (falls ein alter Stand vor Einführung
+    // dieser Tabelle noch tombstonete IDs enthält).
+    if (deletedIds.size) purchases = purchases.filter((p) => !p.id || !deletedIds.has(p.id));
+    return json({
+      address,
+      purchases,
+      deletedIds: [...deletedIds],
+      settings,
+      updatedAt: row ? row.updated_at : null,
+    }, env);
+  }
+
+  if (request.method === 'POST') {
+    let body;
+    try {
+      body = await request.json();
+    } catch (e) {
+      return json({ error: 'INVALID_BODY' }, env, 400);
+    }
+    const incoming = Array.isArray(body.purchases) ? body.purchases : null;
+    if (!incoming) {
+      return json({ error: 'INVALID_PURCHASES' }, env, 400);
+    }
+    // FIX 9: Anders als bei der Kaufliste gibt es bei den Einstellungen bewusst KEIN additives
+    // Zusammenführen -- eine Einstellung ist ein einzelner Wert, kein Datensatz. Hier gilt
+    // schlicht "zuletzt geschrieben gewinnt": wer zuletzt umschaltet, bestimmt die Methode für
+    // alle Geräte. Sonst könnte ein Gerät mit altem Stand die gerade bewusst geänderte
+    // Einstellung eines anderen Geräts stillschweigend zurücksetzen.
+    const incomingSettings = sanitizeSettings(body.settings);
+
+    // deletedIds: IDs, die der Client seit dem letzten Sync selbst gelöscht hat (siehe
+    // Frontend: deletedPurchaseIds, wird bei jedem Push mitgeschickt). Werden dauerhaft als
+    // Tombstone gespeichert, damit sie bei KEINEM zukünftigen Merge (von irgendeinem Gerät)
+    // wieder auftauchen können.
+    const newlyDeletedIds = Array.isArray(body.deletedIds) ? body.deletedIds.filter(Boolean) : [];
+
+    if (newlyDeletedIds.length) {
+      const now0 = Date.now();
+      const stmt = env.DB.prepare(
+        'INSERT OR IGNORE INTO user_purchases_deleted (address, deleted_id, deleted_at) VALUES (?, ?, ?)'
+      );
+      await env.DB.batch(newlyDeletedIds.map((id) => stmt.bind(address, id, now0)));
+    }
+
+    const deletedRows = await env.DB
+      .prepare('SELECT deleted_id FROM user_purchases_deleted WHERE address = ?')
+      .bind(address)
+      .all();
+    const deletedIds = new Set((deletedRows.results || []).map((r) => r.deleted_id));
+
+    // WICHTIG: hier NICHT einfach überschreiben (`data = excluded.data`), sondern serverseitig
+    // mit dem bereits gespeicherten Stand additiv zusammenführen UND danach gegen die
+    // Tombstone-Liste filtern. Sonst könnte ein Gerät, das kurz nach einem anderen Gerät
+    // synchronisiert, dessen Änderungen versehentlich überschreiben (Race Condition) -- z.B.
+    // wenn Gerät A gerade neue Käufe importiert hat und Gerät B kurz danach (noch mit älterem
+    // lokalem Stand) synchronisiert.
+    const existingRow = await env.DB
+      .prepare('SELECT data, settings FROM user_purchases WHERE address = ?')
+      .bind(address)
+      .first();
+    let existing = [];
+    if (existingRow && existingRow.data) {
+      try { existing = JSON.parse(existingRow.data); } catch (e) { existing = []; }
+    }
+    // FIX 9: Bereits gespeicherte Einstellungen als Rückfall behalten, falls dieser Push gar
+    // keine (gültigen) Einstellungen mitschickt -- z.B. von einem noch nicht aktualisierten
+    // Client. Ohne das würde ein alter Client die Einstellungen bei jedem Push löschen.
+    let existingSettings = null;
+    if (existingRow && existingRow.settings) {
+      try { existingSettings = sanitizeSettings(JSON.parse(existingRow.settings)); } catch (e) { existingSettings = null; }
+    }
+    const finalSettings = incomingSettings || existingSettings;
+
+    // WICHTIG: Beim Zusammenführen NUR über die eindeutige ID abgleichen, NICHT mehr über
+    // Datum+Menge+Preis. Bei Börsendaten (z.B. Binance/KuCoin) können mehrere echte,
+    // unterschiedliche Trades zufällig exakt dieselbe Minute/Menge/Preis haben (z.B. ein Order,
+    // der in mehreren gleich großen Teilen zum selben Preis gefüllt wurde) -- ein inhaltlicher
+    // Vergleich hätte solche echten, unterschiedlichen Einträge fälschlich als Duplikat verworfen
+    // und beim Sync "verschluckt". Der inhaltliche Vergleich bleibt bewusst NUR beim CSV-Import
+    // selbst (verhindert dort ein versehentliches doppeltes Hochladen derselben Datei), nicht
+    // beim laufenden Geräte-Sync.
+    const merged = [...existing];
+    for (const row of incoming) {
+      if (!row || !Number.isFinite(row.amount) || !Number.isFinite(row.priceUsd)) continue;
+      if (row.id && deletedIds.has(row.id)) continue; // bewusst gelöscht -- nicht wieder aufnehmen
+      const alreadyThere = row.id ? merged.some((p) => p.id === row.id) : false;
+      if (!alreadyThere) merged.push(row);
+    }
+    const finalList = deletedIds.size ? merged.filter((p) => !p.id || !deletedIds.has(p.id)) : merged;
+
+    const serialized = JSON.stringify(finalList);
+    if (serialized.length > MAX_PURCHASES_PAYLOAD_BYTES) {
+      return json({ error: 'TOO_LARGE' }, env, 413);
+    }
+    const now = Date.now();
+    await env.DB
+      .prepare(
+        `INSERT INTO user_purchases (address, data, settings, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(address) DO UPDATE SET
+           data = excluded.data,
+           settings = excluded.settings,
+           updated_at = excluded.updated_at`
+      )
+      .bind(address, serialized, finalSettings ? JSON.stringify(finalSettings) : null, now)
+      .run();
+    return json({ address, updatedAt: now, purchases: finalList, settings: finalSettings }, env);
+  }
+
+  return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
+}
+
+// ----------------------------------------------------------------------------
+// FIX 16: Wallet-LISTE (nicht Kaufliste) geräteübergreifend speichern/laden -- siehe
+// ausführliche Begründung im Kopfkommentar der Datei. Bewusst als exakte Schwester-Funktion zu
+// handlePurchases oben gehalten (gleiches Tombstone-/Merge-Muster, gleicher Adress-Anker),
+// damit beide Routen sich konsistent verhalten und man nur eine Logik im Kopf behalten muss.
+//
+// Muss vorher per SQL angelegt werden (siehe auch Kopfkommentar):
+//
+//   CREATE TABLE IF NOT EXISTS user_wallet_lists (
+//     address TEXT PRIMARY KEY,
+//     wallets TEXT,
+//     updated_at INTEGER
+//   );
+//   CREATE TABLE IF NOT EXISTS user_wallet_lists_deleted (
+//     address TEXT NOT NULL,
+//     deleted_wallet TEXT NOT NULL,
+//     deleted_at INTEGER,
+//     PRIMARY KEY (address, deleted_wallet)
+//   );
+// ----------------------------------------------------------------------------
+
+const MAX_WALLETS_PAYLOAD_BYTES = 200_000; // eine reine Adressliste bleibt immer winzig -- großzügiges Sicherheitsnetz
+
+async function handleWallets(request, env, ctx) {
+  const url = new URL(request.url);
+  const address = url.searchParams.get('address');
+  if (!isValidThorAddress(address)) {
+    return json({ error: 'INVALID_ADDRESS' }, env, 400);
+  }
+  recordSyncActivity(env, ctx, address);
+
+  if (request.method === 'GET') {
+    const row = await env.DB
+      .prepare('SELECT wallets, updated_at FROM user_wallet_lists WHERE address = ?')
+      .bind(address)
+      .first();
+    let wallets = [];
+    if (row && row.wallets) {
+      try { wallets = JSON.parse(row.wallets); } catch (e) { wallets = []; }
+    }
+    const deletedRows = await env.DB
+      .prepare('SELECT deleted_wallet FROM user_wallet_lists_deleted WHERE address = ?')
+      .bind(address)
+      .all();
+    const deletedAddrs = new Set((deletedRows.results || []).map((r) => r.deleted_wallet));
+    if (deletedAddrs.size) wallets = wallets.filter((w) => !deletedAddrs.has(w));
+    return json({
+      address,
+      wallets,
+      deletedAddrs: [...deletedAddrs],
+      updatedAt: row ? row.updated_at : null,
+    }, env);
+  }
+
+  if (request.method === 'POST') {
+    let body;
+    try {
+      body = await request.json();
+    } catch (e) {
+      return json({ error: 'INVALID_BODY' }, env, 400);
+    }
+    const incoming = Array.isArray(body.wallets) ? body.wallets.filter((w) => typeof w === 'string' && w.trim()) : null;
+    if (!incoming) {
+      return json({ error: 'INVALID_WALLETS' }, env, 400);
+    }
+    const newlyDeleted = Array.isArray(body.deletedAddrs) ? body.deletedAddrs.filter((w) => typeof w === 'string' && w.trim()) : [];
+
+    if (newlyDeleted.length) {
+      const now0 = Date.now();
+      const stmt = env.DB.prepare(
+        'INSERT OR IGNORE INTO user_wallet_lists_deleted (address, deleted_wallet, deleted_at) VALUES (?, ?, ?)'
+      );
+      await env.DB.batch(newlyDeleted.map((w) => stmt.bind(address, w, now0)));
+    }
+
+    const deletedRows = await env.DB
+      .prepare('SELECT deleted_wallet FROM user_wallet_lists_deleted WHERE address = ?')
+      .bind(address)
+      .all();
+    const deletedAddrs = new Set((deletedRows.results || []).map((r) => r.deleted_wallet));
+
+    // Additiv mit dem bereits gespeicherten Stand zusammenführen (nicht hart überschreiben) --
+    // gleicher Grund wie bei handlePurchases: verhindert, dass ein Gerät mit älterem lokalem
+    // Stand die zwischenzeitlich von einem anderen Gerät hinzugefügte Wallet überschreibt.
+    const existingRow = await env.DB
+      .prepare('SELECT wallets FROM user_wallet_lists WHERE address = ?')
+      .bind(address)
+      .first();
+    let existing = [];
+    if (existingRow && existingRow.wallets) {
+      try { existing = JSON.parse(existingRow.wallets); } catch (e) { existing = []; }
+    }
+
+    const merged = [...new Set([...existing, ...incoming])].filter((w) => !deletedAddrs.has(w));
+
+    const serialized = JSON.stringify(merged);
+    if (serialized.length > MAX_WALLETS_PAYLOAD_BYTES) {
+      return json({ error: 'TOO_LARGE' }, env, 413);
+    }
+    const now = Date.now();
+    await env.DB
+      .prepare(
+        `INSERT INTO user_wallet_lists (address, wallets, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(address) DO UPDATE SET
+           wallets = excluded.wallets,
+           updated_at = excluded.updated_at`
+      )
+      .bind(address, serialized, now)
+      .run();
+    return json({ address, updatedAt: now, wallets: merged, deletedAddrs: [...deletedAddrs] }, env);
+  }
+
+  return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
+}
+
+// ----------------------------------------------------------------------------
+// FIX 17 (Fortsetzung): /stats -- aggregierte Kennzahlen aus sync_activity_days.
+// Es werden keinerlei einzelne Adressen zurückgegeben, nur Summen -- unproblematisch,
+// auch wenn die URL mal geteilt wird. Trotzdem hinter einem einfachen Zugriffsschlüssel
+// (Query-Parameter ?key=..., verglichen mit dem Secret STATS_ACCESS_KEY in den
+// Worker-Settings), damit nicht jeder x-beliebige Besucher der App diese Zahl mitlesen
+// kann.
+//
+// "active"    = Adresse hat an mindestens einem Tag im jeweiligen Fenster synchronisiert.
+// "returning" = Adresse hat an MEHR ALS EINEM unterschiedlichen Kalendertag im
+//               30-Tage-Fenster synchronisiert -- das ist die eigentliche
+//               Wiederkehrer-Kennzahl, die mit reinen "Visits" (siehe Cloudflare Web
+//               Analytics) nicht abbildbar ist, weil die keine Tage unterscheiden.
+// ----------------------------------------------------------------------------
+
+async function handleStats(request, env) {
+  const url = new URL(request.url);
+  const key = url.searchParams.get('key');
+  if (!env.STATS_ACCESS_KEY || key !== env.STATS_ACCESS_KEY) {
+    return json({ error: 'UNAUTHORIZED' }, env, 401);
+  }
+
+  const now = Date.now();
+  const day1 = utcDayString(now - 1 * 24 * 60 * 60 * 1000);
+  const day7 = utcDayString(now - 7 * 24 * 60 * 60 * 1000);
+  const day30 = utcDayString(now - 30 * 24 * 60 * 60 * 1000);
+
+  // Eigene Adressen (siehe getExcludedAddresses weiter oben) auch aus bereits
+  // gespeicherten Zeilen rausfiltern -- nicht nur bei künftigen Syncs übersprungen
+  // (recordSyncActivity), sondern hier zusätzlich per NOT IN abgezogen, damit auch
+  // schon vorhandene Test-/Vorschau-Einträge nicht in die Zahlen einfließen.
+  const excluded = getExcludedAddresses(env);
+  const notInClause = excluded.length ? `AND address NOT IN (${excluded.map(() => '?').join(',')})` : '';
+  const notInClauseNoWhere = excluded.length ? `WHERE address NOT IN (${excluded.map(() => '?').join(',')})` : '';
+
+  const [totalRow, active1Row, active7Row, active30Row, returning30Row] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days ${notInClauseNoWhere}`)
+      .bind(...excluded).first(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ? ${notInClause}`)
+      .bind(day1, ...excluded).first(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ? ${notInClause}`)
+      .bind(day7, ...excluded).first(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ? ${notInClause}`)
+      .bind(day30, ...excluded).first(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT address FROM sync_activity_days
+         WHERE day >= ? ${notInClause}
+         GROUP BY address
+         HAVING COUNT(DISTINCT day) >= 2
+       )`
+    ).bind(day30, ...excluded).first(),
+  ]);
+
+  const active30 = active30Row?.n || 0;
+  const returning30 = returning30Row?.n || 0;
+
+  const stats = {
+    totalUniqueAddressesEver: totalRow?.n || 0,
+    activeLast1d: active1Row?.n || 0,
+    activeLast7d: active7Row?.n || 0,
+    activeLast30d: active30,
+    returningLast30d: returning30,
+    // Anteil der in den letzten 30 Tagen aktiven Adressen, die an >=2 verschiedenen
+    // Tagen wiederkamen -- die eigentliche Retention-Quote.
+    retentionRate30d: active30 > 0 ? Math.round((returning30 / active30) * 1000) / 10 : null,
+  };
+
+  // Browser (z.B. beim manuellen Aufrufen der URL) bekommen eine schlichte, lesbare
+  // HTML-Kachel-Ansicht statt rohem JSON -- erkannt am Accept-Header, den normale
+  // Adressleisten-Navigation immer mitschickt ("text/html" an erster Stelle). Jeder
+  // andere Aufrufer (curl, fetch() aus Code, Monitoring-Tools) schickt das für gewöhnlich
+  // nicht und bekommt weiterhin sauberes JSON zum Weiterverarbeiten -- exakt dasselbe
+  // Prinzip wie bei den restlichen Endpunkten hier, nur mit einem Format-Zweig mehr.
+  const wantsHtml = (request.headers.get('Accept') || '').includes('text/html');
+  if (!wantsHtml) {
+    return json(stats, env);
+  }
+
+  const tile = (key, label, value, hint) => `
+    <div class="tile">
+      <div class="tile-value" id="v-${key}">${value == null ? '—' : value}</div>
+      <div class="tile-label">${label}</div>
+      ${hint ? `<div class="tile-hint">${hint}</div>` : ''}
+    </div>`;
+
+  const html = `<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>rune.watch — Stats</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px;
+    background: #0b0f14; color: #e7ecf0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  }
+  h1 {
+    font-size: 15px; font-weight: 600; letter-spacing: 0.02em;
+    color: #8fa3b0; text-transform: uppercase; margin: 0 0 4px;
+  }
+  .subtitle { font-size: 12.5px; color: #5f7480; margin-bottom: 22px; }
+  .grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
+    max-width: 480px;
+  }
+  .tile {
+    background: linear-gradient(165deg, #131a22 0%, #0e141b 100%);
+    border: 1px solid #1f2b35; border-radius: 14px; padding: 16px 14px;
+  }
+  .tile-value {
+    font-size: 28px; font-weight: 700; font-family: 'Space Grotesk', -apple-system, sans-serif;
+    color: #2dd4bf; line-height: 1.1;
+    transition: opacity 0.15s ease;
+  }
+  .tile-label { font-size: 12px; color: #93a5b1; margin-top: 6px; }
+  .tile-hint { font-size: 10.5px; color: #52646f; margin-top: 3px; }
+  .tile.wide { grid-column: 1 / -1; }
+  .refresh {
+    margin-top: 22px; font-size: 11.5px; color: #4c5c66;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%; background: #2dd4bf; flex-shrink: 0;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+  <h1>rune.watch — Sync-Aktivität</h1>
+  <div class="subtitle">Adressbasiert, geräteübergreifend (nicht Cloudflare "Visits")</div>
+  <div class="grid">
+    ${tile('1d', 'Aktiv – 24h', stats.activeLast1d)}
+    ${tile('7d', 'Aktiv – 7 Tage', stats.activeLast7d)}
+    ${tile('30d', 'Aktiv – 30 Tage', stats.activeLast30d)}
+    ${tile('total', 'Adressen insgesamt', stats.totalUniqueAddressesEver, 'seit Einführung des Trackings')}
+    ${tile('returning', 'Wiederkehrer – 30 Tage', stats.returningLast30d, '≥2 verschiedene Tage synchronisiert')}
+    ${tile('rate', 'Retention-Quote', stats.retentionRate30d == null ? '—' : stats.retentionRate30d + '%', 'Anteil Wiederkehrer an aktiven Adressen (30T)')}
+  </div>
+  <div class="refresh"><span class="dot"></span><span id="stamp">Stand: ${new Date().toLocaleString('de-DE', { timeZone: 'UTC' })} UTC · aktualisiert live</span></div>
+<script>
+  // Holt die Zahlen jede Sekunde per fetch() im Hintergrund und tauscht nur die
+  // Ziffern-Texte aus -- keine volle Seiten-Neuladung, kein Flackern. Explizit
+  // Accept: application/json setzen, damit der Worker hier NICHT wieder die HTML-
+  // Ansicht zurückgibt (sonst würde man sich selbst rekursiv die ganze Seite laden).
+  const REFRESH_MS = 1000;
+  async function refreshStats() {
+    try {
+      const res = await fetch(location.href, { headers: { Accept: 'application/json' }, cache: 'no-store' });
+      if (!res.ok) return;
+      const s = await res.json();
+      const map = {
+        '1d': s.activeLast1d, '7d': s.activeLast7d, '30d': s.activeLast30d,
+        total: s.totalUniqueAddressesEver, returning: s.returningLast30d,
+        rate: s.retentionRate30d == null ? '—' : s.retentionRate30d + '%',
+      };
+      for (const [key, val] of Object.entries(map)) {
+        const el = document.getElementById('v-' + key);
+        if (el && el.textContent !== String(val)) el.textContent = val == null ? '—' : val;
+      }
+      document.getElementById('stamp').textContent =
+        'Stand: ' + new Date().toLocaleTimeString('de-DE', { timeZone: 'UTC' }) + ' UTC · aktualisiert live';
+    } catch (e) { /* nächster Tick versucht es erneut, kein Grund für eine Fehlermeldung */ }
+  }
+  setInterval(refreshStats, REFRESH_MS);
+</script>
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=UTF-8', 'Cache-Control': 'no-store', ...corsHeaders(env) },
+  });
+}
+
+// ----------------------------------------------------------------------------
+// FIX 10 (Memoless-Proxy, war schon vorher da).
+//
+// Der Browser darf api.thorchain.org nicht direkt aufrufen -- dort fehlen die
+// CORS-Freigaben (Access-Control-Allow-Origin), weshalb im Frontend ein "Failed to fetch"
+// auftrat, sobald ein Swap registriert werden sollte. Server-zu-Server gibt es diese
+// Einschraenkung nicht: der Worker holt die Antwort und reicht sie MIT den noetigen
+// CORS-Headern an die Seite weiter -- exakt dasselbe Muster wie schon bei /balance.
+//
+// Weitergereicht werden ausschliesslich die drei bekannten Memoless-Pfade. Ein offener
+// "alles durchreichen"-Proxy waere ein unnoetiges Risiko (fremde Ziele, Missbrauch).
+// ----------------------------------------------------------------------------
+
+const MEMOLESS_UPSTREAM = 'https://api.thorchain.org/memoless/api/v1';
+const MEMOLESS_ALLOWED_PATHS = new Set(['assets', 'register', 'preflight']);
+
+async function handleMemoless(request, env) {
+  const url = new URL(request.url);
+  // /memoless/register -> "register"
+  const sub = url.pathname.replace(/^\/memoless\/?/, '').replace(/\/+$/, '');
+  if (!MEMOLESS_ALLOWED_PATHS.has(sub)) {
+    return json({ error: 'NOT_FOUND' }, env, 404);
+  }
+
+  const target = `${MEMOLESS_UPSTREAM}/${sub}${url.search || ''}`;
+  const init = { method: request.method, headers: { 'Content-Type': 'application/json' } };
+  if (request.method === 'POST') {
+    init.body = await request.text();
+  }
+
+  try {
+    const res = await fetchWithTimeout(target, { ...init, timeoutMs: 15000 });
+    const text = await res.text();
+    // Antwort unveraendert durchreichen (inkl. Statuscode), nur um CORS-Header ergaenzt --
+    // so sieht das Frontend echte Fehlermeldungen von THORChain statt eines generischen Fehlers.
+    return new Response(text, {
+      status: res.status,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...corsHeaders(env),
+      },
+    });
+  } catch (e) {
+    return json({ error: 'MEMOLESS_UPSTREAM_FAILED', message: e?.message || String(e) }, env, 502);
+  }
+}
+
+// ----------------------------------------------------------------------------
 
 export default {
   async fetch(request, env, ctx) {
-    currentEnv = env;
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders(env) });
+    // WICHTIG (globales Sicherheitsnetz): jeder einzelne Endpunkt-Handler hat zwar sein eigenes
+    // try/catch, aber ein unerwarteter Fehler AUSSERHALB davon (z.B. beim Routing selbst, in
+    // corsHeaders(), oder irgendein anderer Programmfehler) würde bisher UNGEFANGEN durchfallen
+    // -- und genau DAS liefert Cloudflare als eigenen, generischen 502 aus, komplett an meinem
+    // JSON-Fehlerformat vorbei. Dieser äußere try/catch fängt restlos ALLES ab: was auch immer
+    // schiefgeht, es kommt IMMER eine gültige JSON-Antwort zurück, nie Cloudflares eigener 502.
+    try {
+      currentEnv = env;
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { headers: corsHeaders(env) });
+      }
+      const url = new URL(request.url);
+      if (url.pathname === '/bond-history') {
+        return await handleBondHistory(request, env, ctx);
+      }
+      if (url.pathname === '/bond-ledger') {
+        return await handleBondLedger(request, env);
+      }
+      if (url.pathname === '/balance') {
+        return await handleBalance(request, env, ctx);
+      }
+      if (url.pathname === '/volume') {
+        return await handleVolume(request, env);
+      }
+      if (url.pathname === '/recent-swaps') {
+        return await handleRecentSwaps(request, env, ctx);
+      }
+      if (url.pathname === '/top-pairs') {
+        return await handleTopPairs(request, env);
+      }
+      if (url.pathname === '/purchases') {
+        return await handlePurchases(request, env, ctx);
+      }
+      if (url.pathname === '/wallets') {
+        return await handleWallets(request, env, ctx);
+      }
+      if (url.pathname === '/stats') {
+        return await handleStats(request, env);
+      }
+      if (url.pathname.startsWith('/memoless/')) {
+        return await handleMemoless(request, env);
+      }
+      return json({ error: 'NOT_FOUND' }, env, 404);
+    } catch (e) {
+      console.error('[rune-rewards-backend] Unerwarteter Fehler im Haupt-Handler:', e && e.stack || e);
+      try {
+        return json({ error: 'INTERNAL_ERROR', message: e && e.message || String(e) }, env, 500);
+      } catch (e2) {
+        // Selbst corsHeaders()/json() könnten theoretisch scheitern (z.B. env fehlt komplett)
+        // -- allerletzter Rückfall ganz ohne Abhängigkeiten von env.
+        return new Response(JSON.stringify({ error: 'INTERNAL_ERROR' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
     }
-    const url = new URL(request.url);
-    if (url.pathname === '/bond-history') {
-      return handleBondHistory(request, env, ctx);
-    }
-    if (url.pathname === '/balance') {
-      return handleBalance(request, env, ctx);
-    }
-    return json({ error: 'NOT_FOUND' }, env, 404);
   },
 
   async scheduled(event, env, ctx) {
@@ -483,6 +1667,7 @@ export default {
 
 async function runRefreshCycle(env) {
   await refreshChurnsCache(env);
+  await collectSwapPairStats(env);
 
   const now = Date.now();
 
@@ -613,12 +1798,52 @@ async function refreshOneAddress(env, addressRow, now) {
     await Promise.all(batch.map(async (churn) => {
       const queryHeight = churn.height - 1;
       let rewardAmount = 0;
+      // FIX: nicht jede Node-Antwort ohne verwertbare Provider-Daten bedeutet "0 Reward /
+      // Churn-out" -- ältere Höhen (vor Einführung von bond_providers im THORNode-Schema) oder
+      // eine unvollständige Archival-Antwort liefern u.U. GAR KEIN bond_providers-Feld, obwohl
+      // die Adresse zu diesem Zeitpunkt tatsächlich aktiv gebondet war. Ohne diese Unterscheidung
+      // würde ein reiner Daten-/Schema-Lücke fälschlich als echter Churn-out (0 Reward)
+      // gespeichert und in der App als solcher markiert. Nur speichern, wenn MINDESTENS EINE der
+      // abgefragten Node-Antworten tatsächlich ein bond_providers.providers-Array enthielt (auch
+      // ein LEERES Array zählt -- das heißt, THORNode hat für diese Höhe wirklich Providerdaten
+      // geliefert, die Adresse war dort nur nicht/mit 0 Bond gelistet).
+      let hasProviderData = false;
       try {
         const nodeResults = await Promise.all(
           nodeAddresses.map((nodeAddr) => fetchNodeAtHeight(nodeAddr, queryHeight))
         );
-        rewardAmount = nodeResults.reduce((sum, node) => sum + computeAddressAwardFromNode(node, address), 0);
+        for (const node of nodeResults) {
+          if (node && node.bond_providers && Array.isArray(node.bond_providers.providers)) {
+            hasProviderData = true;
+          }
+          rewardAmount += computeAddressAwardFromNode(node, address);
+        }
       } catch (e) {
+        // Netzwerk-/HTTP-Fehler -- könnte transient sein (z.B. Archival-Base kurz down),
+        // deshalb hier WEITER als "missing" stehen lassen und beim nächsten Cron-Lauf erneut
+        // versuchen (anders als der Fall unten, wo die Antwort zwar ankam, aber strukturell
+        // keine Provider-Daten enthielt).
+        return;
+      }
+
+      if (!hasProviderData) {
+        // WICHTIG: hier NICHT einfach überspringen (also NICHT `return`)! Das würde diese Höhe
+        // für immer als "missing" stehen lassen -- lag das Fehlen der Provider-Daten an etwas
+        // Dauerhaftem (z.B. Höhe liegt vor Einführung von bond_providers im THORNode-Schema),
+        // würde JEDER künftige Cron-Lauf exakt dieselbe Höhe wieder versuchen, nie vorankommen,
+        // und die Adresse bliebe für immer im Status "building" hängen (genau das führte zum
+        // dauerhaften Lade-Zustand im Frontend). Stattdessen wird die Höhe als "erledigt, aber
+        // unbekannt" markiert (reward_amount = NULL) -- taucht dann NICHT als Reward oder als
+        // Churn-out auf (siehe Filter in handleBondHistory), verschwindet aber aus der
+        // "missing"-Liste und blockiert den Fortschritt nicht mehr.
+        await env.DB
+          .prepare(
+            `INSERT OR REPLACE INTO bond_history_rows
+             (bond_address, churn_height, churn_timestamp, rune_stack, reward_amount, fetched_at)
+             VALUES (?, ?, ?, NULL, NULL, ?)`
+          )
+          .bind(address, churn.height, churn.date_ms, now)
+          .run();
         return;
       }
 
