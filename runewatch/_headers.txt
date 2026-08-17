@@ -1,0 +1,11 @@
+/index.html
+  Cache-Control: no-cache
+
+/app.js
+  Cache-Control: no-cache
+
+/react.production.min.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/react-dom.production.min.js
+  Cache-Control: public, max-age=31536000, immutable
