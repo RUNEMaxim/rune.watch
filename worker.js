@@ -1,207 +1,17 @@
-// ============================================================================
-// rune-rewards-backend — GEBÜNDELTE Version für den Cloudflare-Dashboard-Editor
-// FIX 1: Poisoned-Zero-Check entfernt
-// FIX 2: Sofort-Refresh bei jedem Abruf statt nur alle 5 Min. per Cron
-// FIX 3: Refresh-Cooldown 3s
-// FIX 4: /balance-Endpunkt - Balance+Bonded laufen server-seitig (kein CORS-Problem mehr)
-// FIX 5: Dedizierter Liquify-Endpunkt (eigener API-Key) als bevorzugte THORNode-Quelle -- der
-//        öffentliche, geteilte Gateway (viele anonyme Nutzer, evtl. mit internem Lastausgleich
-//        über mehrere, nicht immer synchrone Instanzen) bleibt als Fallback.
-// FIX 6: /balance cached erfolgreiche Antworten in D1 (balance_cache) und fällt bei einem
-//        Liquify-Ausfall/Timeout auf den letzten bekannten Stand zurück (bis zu 1h alt),
-//        statt sofort einen Fehler an den Client zu liefern.
-// FIX 7: getThornodeBases() enthielt bisher AUSSCHLIESSLICH Liquify (einmal mit, einmal ohne
-//        eigenen API-Key -- aber beides derselbe Anbieter/dieselbe Infrastruktur!). Fiel Liquify
-//        aus, gab es serverseitig KEINEN echten Fallback, egal was clientseitig gemacht wird.
-//        Ergänzt um public-thornode.nativeswap.io (kein Key nötig, laut rune.tools-Projekt eine
-//        zuverlässig funktionierende, echte Alternative) und als letzten Versuch
-//        thornode.thorchain.network. WICHTIG: diese beiden Alternativen unterstützen KEINE
-//        historischen ?height=N-Abfragen (nur aktueller Stand) -- deshalb NUR für
-//        Nicht-Height-Anfragen (fetchNodes, fetchBalance) aktiv, NICHT für fetchNodeAtHeight
-//        (Reward-Berechnung pro Churn-Höhe). Würde man sie dort auch zulassen, könnte bei einem
-//        Liquify-Ausfall still und leise der AKTUELLE Node-Stand statt der historische
-//        eingelesen werden -- falsche Reward-Zahlen, ohne dass es auffällt.
-// FIX 8 (PERFORMANCE / Core Web Vitals): fetchFromBases probierte die Fallback-Quellen bisher
-//        STRIKT NACHEINANDER, jede mit vollen 10s Timeout -- im schlimmsten Fall (erste Quelle(n)
-//        hängen statt sauber zu antworten) warteten Client-Requests bis zu ~30s auf eine Antwort,
-//        was sich 1:1 in den LCP/FCP-Ausreißern auf 15-25s widerspiegelt. Ersetzt durch ein
-//        "Hedged Request"-Muster: Quelle 1 startet sofort; antwortet sie nicht innerhalb von
-//        STAGGER_MS, startet zusätzlich (nicht ANSTATT) Quelle 2 parallel dazu, danach ggf.
-//        Quelle 3 usw. Es gewinnt schlicht die erste Antwort, unabhängig davon, welche Quelle sie
-//        liefert -- alle bereits laufenden Requests werden dabei NICHT abgebrochen (nur die noch
-//        nicht gestarteten Quellen werden übersprungen, sobald irgendeine Quelle erfolgreich war).
-//        Reduziert die Worst-Case-Wartezeit von ~30s auf ~STAGGER_MS * (Anzahl Quellen - 1) +
-//        einen einzelnen Timeout (bei 3 Quellen z.B. ~2.5s*2 + 6s = ~11s statt 30s), ohne die
-//        bevorzugte Quelle (Liquify mit eigenem Key) bei normalem Betrieb zu benachteiligen, da
-//        sie in aller Regel deutlich schneller als STAGGER_MS antwortet. Gilt jetzt einheitlich
-//        für THORNode- UND Midgard-Anfragen (vorher hatte Midgard eine eigene, komplett
-//        sequenzielle Kopie derselben Logik).
-// FIX 9: /purchases synchronisiert jetzt zusätzlich zur Kaufliste auch die
-//        Berechnungs-Einstellungen (costBasisMethod: 'average'|'fifo', rewardValuationMethod:
-//        'free'|'market'). Ohne das rechnete jedes Gerät mit seinen eigenen, nur lokal
-//        gespeicherten Einstellungen und zeigte einen ANDEREN Ø-Kaufpreis für dieselben Daten.
+// rune-rewards-backend — kompakte Fassung ohne Kommentare (Code identisch zu worker.js)
+// VORHER: migration.sql in der D1-Console ausführen.
 //
-//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
+// NEU in dieser Fassung: /thornode-timeline (vierte Seite "Entwicklung").
+// VORHER AUSSERDEM einmalig in der D1-Console ausführen:
 //
-//          ALTER TABLE user_purchases ADD COLUMN settings TEXT;
-//
-//        Die Spalte darf NULL sein -- Adressen ohne gespeicherte Einstellungen verhalten sich
-//        exakt wie bisher (der Client behält dann seinen lokalen Stand und schreibt ihn beim
-//        nächsten Push hoch).
-// FIX 10: Drei Midgard-Anfragen liefen bisher DIREKT AUS DEM BROWSER gegen
-//        gateway.liquify.com/midgard.thorchain.network -- ohne jeden serverseitigen
-//        Fallback/Cache, im Unterschied zu allen anderen Daten (Balance, Bond-Historie), die
-//        längst über diesen Worker laufen. Blockiert das Netzwerk eines einzelnen Nutzers (z.B.
-//        eine Firewall/ein Proxy, der bestimmte Domains sperrt) BEIDE Midgard-Basen, blieb die
-//        betroffene Karte ohne jede Ausweichmöglichkeit dauerhaft leer/fehlerhaft -- ein
-//        klassischer Single-Point-of-Failure auf Client-Seite, den kein Fallback im Frontend
-//        beheben kann, weil das Problem beim NUTZER liegt, nicht bei Midgard selbst. Server-zu-
-//        Server-Anfragen (von HIER aus) sind von dieser Einschränkung nicht betroffen, exakt wie
-//        schon bei /balance und /bond-history.
-//
-//        Drei neue Routen, alle nach demselben bewährten Muster (fetchFromBases/Hedging,
-//        kurzlebiger In-Memory-Cache gegen Lastspitzen bei vielen gleichzeitigen Nutzern):
-//
-//        - /volume         -- 24h- und 30-Tage-Swap-Volumen (löst fetchVolume24h/
-//                              fetchVolumeHistory im Frontend ab)
-//        - /recent-swaps   -- die letzten Swaps für die Live-Partikel-/Live-Chart-Anzeige
-//                              (wird alle 7s gepollt, deshalb mit eigenem kurzem Cache, damit
-//                              nicht jeder gleichzeitig online Nutzer einen eigenen
-//                              Midgard-Request auslöst)
-//        - /bond-ledger    -- die vollständige Bond/Unbond-Transaktionsliste samt Kapital
-//                              (Principal) für eine Adresse (löst fetchActionsForType/
-//                              fetchBondLedger im Frontend ab). Nutzt dieselbe
-//                              fetchActionsForType-Funktion, die auch der bestehende
-//                              Cron-Refresh für /bond-history verwendet -- jetzt erweitert um
-//                              die volle Transaktionsliste (items), die das Frontend für die
-//                              Anzeige einzelner Bond/Unbond-Ereignisse braucht.
-// FIX 16: /wallets -- synchronisiert jetzt auch die getrackte WALLET-LISTE selbst
-//        geräteübergreifend, nicht mehr nur die Kaufliste (/purchases). Vorher tauchte eine auf
-//        einem Gerät zusätzlich hinzugefügte oder entfernte Wallet-Adresse auf einem anderen
-//        Gerät nicht auf, weil es dafür überhaupt keinen Sync-Mechanismus gab. Nutzt exakt
-//        denselben Anker wie /purchases: die ERSTE getrackte Wallet-Adresse (wallets[0]) als
-//        Schlüssel -- setzt also voraus, dass diese auf allen Geräten identisch eingetragen ist.
-//        Gleiches additiv-mergendes Tombstone-Muster wie bei /purchases (siehe dort), nur mit
-//        Adressen statt Kauf-IDs als Einträge.
-//
-//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
-//
-//          CREATE TABLE IF NOT EXISTS user_wallet_lists (
-//            address TEXT PRIMARY KEY,
-//            wallets TEXT,
-//            updated_at INTEGER
-//          );
-//          CREATE TABLE IF NOT EXISTS user_wallet_lists_deleted (
-//            address TEXT NOT NULL,
-//            deleted_wallet TEXT NOT NULL,
-//            deleted_at INTEGER,
-//            PRIMARY KEY (address, deleted_wallet)
-//          );
-// FIX 18 (NEU): Zusätzlich zum reinen Tages-Dedup (sync_activity_days, siehe FIX 17) jetzt auch
-//        ein ECHTER Request-Zähler pro Adresse+Tag -- beantwortet "wie OFT (nicht nur an wie
-//        vielen Tagen) synchronisiert eine einzelne Adresse". Läuft komplett UNABHÄNGIG neben
-//        dem bestehenden Tages-Dedup her (der bleibt exakt wie er ist, wird für die
-//        Retention-Quote weiter gebraucht) -- der neue Zähler zählt bewusst JEDEN einzelnen
-//        Aufruf, ohne Dedup, als reine Zusatz-Kennzahl. Im /stats-Dashboard als zwei neue
-//        Kacheln sichtbar: "Requests gesamt (30T)" und "Ø Requests je aktiver Adresse".
-//
-//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
-//
-//          CREATE TABLE IF NOT EXISTS sync_activity_counts (
-//            address TEXT NOT NULL,
-//            day TEXT NOT NULL,
-//            count INTEGER NOT NULL DEFAULT 0,
-//            PRIMARY KEY (address, day)
-//          );
-// FIX 19 (NEU, auf Wunsch "beides zusammen"): sowohl die toten Midgard-Fallback-Domains
-//        entfernt (midgard.thorchain.network existiert nicht mehr, siehe DNS-Test/Nutzer-
-//        Feedback -- war bisher als "Fallback" gelistet, griff aber faktisch nie) ALS AUCH einen
-//        echten D1-Stale-Cache für /volume ergänzt, nach demselben bewährten Muster wie
-//        balance_cache bei /balance (FIX 6): schlägt die Live-Anfrage bei Liquify (jetzt der
-//        EINZIGE Anbieter) fehl, wird der letzte bekannte Stand (bis zu 1h alt) statt eines
-//        Fehlers ausgeliefert. /recent-swaps hatte mit recent_swaps_snapshot (FIX 14) bereits
-//        ein äquivalentes Sicherheitsnetz -- dessen Cache-Alter-Grenze wurde hier nicht
-//        angetastet, da er anders funktioniert (Momentaufnahme statt Alters-Grenze).
-//
-//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
-//
-//          CREATE TABLE IF NOT EXISTS volume_cache (
-//            id INTEGER PRIMARY KEY CHECK (id = 1),
-//            payload TEXT NOT NULL,
-//            updated_at INTEGER NOT NULL
-//          );
-// FIX 20 (NEU): /drawings -- geräteübergreifender Sync der Chart-Zeichnungen (horizontale
-//        Linien, Trendlinien, Fibonacci), analog zu /wallets (FIX 16), nur mit ZWEI Schlüsseln
-//        statt einem: Wallet-Adresse UND Chart-Bezeichner (chart, entspricht storageKeyPrefix
-//        im Frontend) -- Zeichnungen sind PRO CHART getrennt, nicht global pro Adresse.
-//
-//        VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console):
-//
-//          CREATE TABLE IF NOT EXISTS user_chart_drawings (
-//            address TEXT NOT NULL,
-//            chart TEXT NOT NULL,
-//            h_lines TEXT,
-//            t_lines TEXT,
-//            fib_lines TEXT,
-//            updated_at INTEGER,
-//            PRIMARY KEY (address, chart)
-//          );
-//          CREATE TABLE IF NOT EXISTS user_chart_drawings_deleted (
-//            address TEXT NOT NULL,
-//            chart TEXT NOT NULL,
-//            deleted_id TEXT NOT NULL,
-//            deleted_at INTEGER,
-//            PRIMARY KEY (address, chart, deleted_id)
-//          );
-// FIX 21 (NEU): /memoless-Fehlerantwort bei einem eigenen Worker-seitigen Fehlschlag (Timeout,
-//        Netzwerkfehler zum Upstream etc., siehe handleMemoless catch-Block) hatte bisher die
-//        Form { error: "MEMOLESS_UPSTREAM_FAILED", message: "..." } -- also einen reinen STRING
-//        unter "error", kein Objekt. Das Frontend liest die Fehlermeldung aber einheitlich über
-//        registerData?.error?.message (so, wie es auch die durchgereichten ECHTEN
-//        THORChain-Fehler liefern, z.B. { error: { message: "Failed to register memo" } }).
-//        Bei einem reinen String ist .message darauf immer undefined -- das Frontend fiel in
-//        diesem Fall auf die nichtssagende generische Meldung ("Something went wrong") zurück,
-//        obwohl der Worker die eigentliche Ursache (Timeout/Netzwerkfehler) bereits kannte.
-//        Jetzt liefert der catch-Block dieselbe { error: { message: "..." } }-Form wie ein
-//        echter Upstream-Fehler -- das Frontend zeigt ab sofort in BEIDEN Fällen die konkrete
-//        Ursache an.
-// FIX 22 (Korrektur von FIX 21): /memoless-Fehlercode statt fertigem deutschen Satz, siehe
-//        handleMemoless catch-Block -- Übersetzung passiert im Frontend über swapTimeout/
-//        swapNetworkError/swapErrorGeneric.
-// FIX 23 (NEU, gemeldet: "Top Swap Pairs" zeigt viel zu wenig Volumen, z.B. $4.4M bei $40M
-//        echtem 24h-Netzwerkvolumen -- 24h-Label stimmte de facto nicht): Die alte
-//        last_height-Nachlauf-Logik (FIX 12/13) versuchte, LÜCKENLOS alle Swaps seit dem
-//        letzten Cron-Durchlauf zu erfassen und dabei ein glaubwürdiges "echtes" 24h/7d/30d-
-//        Fenster zu behaupten. Sobald zwischen zwei Durchläufen mehr als
-//        SWAP_COLLECT_MAX_PAGES*50 (bisher 500) Swaps passierten, blieb last_height nach Design
-//        ABSICHTLICH stehen ("nächster Durchlauf versucht es erneut") -- lief das Netzwerk
-//        dauerhaft über dieser Schwelle, rückte last_height NIE wieder vor, und swap_events
-//        deckte in Wahrheit nur noch ein enges, sich nicht vergrößerndes Zeitfenster ab (einige
-//        Stunden statt der behaupteten 24h/7d/30d), ohne dass das im UI erkennbar war.
-//
-//        NEU (auf expliziten Wunsch): komplett andere Strategie -- statt eines behaupteten
-//        Zeitfensters werden ab jetzt schlicht die NEUESTEN SWAP_EVENTS_KEEP (1000) Swaps
-//        gehalten, unabhängig davon, welche Zeitspanne die tatsächlich abdecken. last_height/
-//        swap_collector_state/hitPageLimit/window-Parameter (24h|7d|30d) entfallen ersatzlos --
-//        es gibt kein "Fenster" mehr, das fälschlich zu groß behauptet werden könnte. Stattdessen
-//        liefert /top-pairs die tatsächlich abgedeckte Zeitspanne (spanFromMs/spanToMs) direkt
-//        mit, damit das Frontend ehrlich anzeigen kann, wie alt der älteste erfasste Swap ist,
-//        statt eine feste, potenziell falsche Fensterbeschriftung zu zeigen.
-//
-//        swap_collector_state wird nicht mehr gelesen/geschrieben, kann aber unverändert in D1
-//        stehen bleiben (keine Migration nötig, nur toter Zustand).
-// ============================================================================
+//   CREATE TABLE IF NOT EXISTS thornode_timeline_cache (
+//     id INTEGER PRIMARY KEY,
+//     payload TEXT NOT NULL,
+//     updated_at INTEGER NOT NULL
+//   );
 
-// Der Liquify-API-Key liegt NICHT mehr im Klartext-Code, sondern als Secret in den
-// Worker-Settings (Variables and Secrets -> LIQUIFY_API_KEY). Damit die bisherigen,
-// modul-weiten THORNODE_BASES/MIDGARD_BASES weiterhin ohne Umbau aller Funktionssignaturen
-// funktionieren, wird env einmal pro Request in `currentEnv` zwischengespeichert (siehe
-// fetch()/scheduled() ganz unten) und getThornodeBases() baut die Liste daraus dynamisch.
 let currentEnv = null;
 
-// needsHeight: true  -> NUR Quellen, die historische ?height=N-Abfragen unterstützen (Liquify).
-// needsHeight: false (Standard) -> volle Liste inkl. NativeSwap/thornode.thorchain.network als
-//              Fallback für aktuelle (nicht-historische) Abfragen.
 function getThornodeBases({ needsHeight = false } = {}) {
   const key = currentEnv && currentEnv.LIQUIFY_API_KEY;
   const bases = [];
@@ -214,14 +24,51 @@ function getThornodeBases({ needsHeight = false } = {}) {
   return bases;
 }
 
-// FIX 19: midgard.thorchain.network entfernt -- die Domain existiert nicht mehr (DNS-Fehler
-// bei direktem Test, konsistent mit den entsprechenden Fixes im Frontend/app.js). Liquify ist
-// aktuell der EINZIGE zuverlässige öffentliche Midgard-Anbieter -- siehe FIX 19 im Kopfkommentar
-// für den neu ergänzten D1-Stale-Cache (volume_cache), der diesen Single-Point-of-Failure für
-// /volume abfedert, solange kein zweiter echter Anbieter verfügbar ist.
-const MIDGARD_BASES = [
-  'https://gateway.liquify.com/chain/thorchain_midgard/v2',
-];
+// MIDGARD-QUELLEN.
+//
+// Gemeldet: "warum wird nicht auf nativeswap zurueckgegriffen?" -- weil nativeswap nur fuer
+// THORNODE eingetragen war (siehe getThornodeBases), fuer Midgard aber ueberhaupt keine
+// zweite Quelle existierte. Faellt Liquify mit 429 aus, bricht alles weg, was ueber Midgard
+// laeuft: Bond-Verlauf, Swap-Aktionen, Churns, Volumen.
+//
+// Warum hier trotzdem keine feste Zweitadresse steht: Ein oeffentliches nativeswap-Midgard
+// habe ich nicht gefunden, und die frueheren Standardadressen (Nine Realms,
+// thorchain.network) gelten inzwischen als tot -- SwapKit hat sie deshalb durch Liquify
+// ersetzt. Eine geratene URL wuerde nur jede Anfrage um einen Fehlversuch verlaengern.
+//
+// Stattdessen erweiterbar:
+//   LIQUIFY_MIDGARD_BASE   -- die Adresse mit API-Schluessel (hoeheres Limit), falls vorhanden
+//   MIDGARD_EXTRA_BASES    -- kommagetrennte Ersatzadressen, ohne Code-Aenderung nachtragbar
+// Beide sind Worker-Variablen; ohne sie bleibt es bei der bisherigen einen Quelle.
+function getMidgardBases() {
+  const env = currentEnv || {};
+  const key = env.LIQUIFY_API_KEY;
+  const bases = [];
+  if (env.LIQUIFY_MIDGARD_BASE) {
+    // Ausdruecklich gesetzt -> gewinnt, keine Ratereien.
+    bases.push(String(env.LIQUIFY_MIDGARD_BASE).replace(/\/+$/, ''));
+  } else if (key) {
+    // DER EIGENTLICHE FEHLER: Der Liquify-Schluessel wurde nur fuer THORNODE benutzt
+    // (getThornodeBases setzt `api=KEY` an erste Stelle). Midgard lief immer ueber die
+    // OEFFENTLICHE Adresse -- deshalb "Liquify funktioniert doch": tut es, aber nur dort,
+    // wo der Schluessel greift. Die 429 kamen vom ungeschluesselten Endpunkt.
+    //
+    // Das genaue Pfadformat des Schluessel-Endpunkts fuer Midgard kenne ich nicht, deshalb
+    // stehen hier zwei KANDIDATEN. Der hedged Abruf nimmt den ersten, der antwortet; ein
+    // falscher Pfad gibt sofort 404 und kostet kaum Zeit. Sobald klar ist, welcher stimmt,
+    // gehoert er als LIQUIFY_MIDGARD_BASE gesetzt -- dann faellt das Raten weg.
+    bases.push(`https://gateway.liquify.com/api=${key}/chain/thorchain_midgard/v2`);
+    bases.push(`https://gateway.liquify.com/api=${key}/v2`);
+  }
+  bases.push('https://gateway.liquify.com/chain/thorchain_midgard/v2');
+  if (env.MIDGARD_EXTRA_BASES) {
+    for (const b of String(env.MIDGARD_EXTRA_BASES).split(',')) {
+      const t2 = b.trim().replace(/\/+$/, '');
+      if (t2) bases.push(t2);
+    }
+  }
+  return bases;
+}
 
 async function fetchWithTimeout(url, { timeoutMs = 10000, ...options } = {}) {
   const controller = new AbortController();
@@ -233,10 +80,6 @@ async function fetchWithTimeout(url, { timeoutMs = 10000, ...options } = {}) {
   }
 }
 
-// ----------------------------------------------------------------------------
-// FIX 8: Hedged-Request-Helfer (siehe Kommentar oben). PER_BASE_TIMEOUT_MS ist der Timeout für
-// EINE einzelne Quelle (nicht mehr 10s), STAGGER_MS die Wartezeit, bevor zusätzlich die nächste
-// Quelle danebengestartet wird.
 const PER_BASE_TIMEOUT_MS = 6000;
 const STAGGER_MS = 800;
 
@@ -290,7 +133,7 @@ async function fetchFromBases(bases, path, options = {}) {
   return fetchJsonHedged(bases, (base) => `${base}${path}`, options);
 }
 
-let nodesCache = null; // { promise, atMs }
+let nodesCache = null; 
 const NODES_CACHE_MS = 2000;
 
 function fetchNodes() {
@@ -305,12 +148,16 @@ function fetchNodes() {
   return promise;
 }
 
+function fetchNodesAtHeight(height) {
+  return fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/nodes?height=${height}`);
+}
+
 function fetchNodeAtHeight(nodeAddress, height) {
   return fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/node/${nodeAddress}?height=${height}`);
 }
 
 function fetchChurns() {
-  return fetchFromBases(MIDGARD_BASES, '/churns');
+  return fetchFromBases(getMidgardBases(), '/churns');
 }
 
 function fetchBalance(address) {
@@ -318,17 +165,14 @@ function fetchBalance(address) {
 }
 
 async function fetchMidgardActionsPage(address, txType, offset) {
-  return fetchFromBases(MIDGARD_BASES, `/actions?address=${address}&type=${txType}&limit=50&offset=${offset}`);
+  return fetchFromBases(getMidgardBases(), `/actions?address=${address}&type=${txType}&limit=50&offset=${offset}`);
 }
 
-// ----------------------------------------------------------------------------
-// FIX 10: /volume -- 24h- und 30-Tage-Swap-Volumen.
-// ----------------------------------------------------------------------------
 function fetchVolumeInterval(interval, count) {
-  return fetchFromBases(MIDGARD_BASES, `/history/swaps?interval=${interval}&count=${count}`);
+  return fetchFromBases(getMidgardBases(), `/history/swaps?interval=${interval}&count=${count}`);
 }
 
-let volumeCache = null; // { promise, atMs }
+let volumeCache = null; 
 const VOLUME_CACHE_MS = 5000;
 
 function fetchVolumeBundleLive() {
@@ -354,7 +198,7 @@ function fetchVolumeBundleLive() {
   return promise;
 }
 
-const VOLUME_STALE_CACHE_MAX_AGE_MS = 60 * 60 * 1000; // 1h, wie CACHE_MAX_AGE_MS bei /balance
+const VOLUME_STALE_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 
 async function readVolumeCache(env) {
   try {
@@ -447,20 +291,21 @@ async function fetchVolumeBundle(env, ctx) {
 }
 
 async function handleVolume(request, env, ctx) {
+  
+  try {
+    recordVisitor(env, ctx, new URL(request.url).searchParams.get('v'));
+  } catch (e) {  }
   const result = await fetchVolumeBundle(env, ctx);
   return json({ ...result.data, stale: result.stale, staleSince: result.staleSince || null }, env);
 }
 
-// ----------------------------------------------------------------------------
-// FIX 10: /recent-swaps
-// ----------------------------------------------------------------------------
 function fetchRecentSwapActions() {
-  return fetchFromBases(MIDGARD_BASES, '/actions?type=swap&limit=10', {
+  return fetchFromBases(getMidgardBases(), '/actions?type=swap&limit=10', {
     timeoutMs: 12000
   });
 }
 
-let recentSwapsCache = null; // { promise, atMs }
+let recentSwapsCache = null; 
 const RECENT_SWAPS_CACHE_MS = 4000;
 
 function fetchRecentSwapActionsCached() {
@@ -489,6 +334,29 @@ async function readRecentSwapsSnapshot(env) {
   }
 }
 
+async function mitVerlauf(data, env) {
+  try {
+    const snap = await readRecentSwapsSnapshot(env);
+    if (!snap) return data;
+    return {
+      ...data,
+      knownActiveNodes: Array.isArray(snap.knownActiveNodes) ? snap.knownActiveNodes : [],
+      jailEvents: Array.isArray(snap.jailEvents) ? snap.jailEvents : [],
+      nodeHistorySince: snap.nodeHistorySince || null,
+      nodeHistorySeeded: !!snap.nodeHistorySeeded,
+      historyPending: Number(snap.historyPending) || 0,
+      nodeHistoryHeights: Number(snap.nodeHistoryHeights) || 0,
+      churnAttempts: Array.isArray(snap.churnAttempts) ? snap.churnAttempts : [],
+      
+      churnTargetHeight: Number(snap.churnTargetHeight) || 0,
+      lastChurnHeight: Number(snap.lastChurnHeight) || 0,
+    };
+  } catch (e) {
+    
+    return data;
+  }
+}
+
 async function handleRecentSwaps(request, env, ctx) {
   if (!recentSwapsWarmedUp) {
     const livePromise = fetchRecentSwapActionsCached().then(data => {
@@ -509,230 +377,65 @@ async function handleRecentSwaps(request, env, ctx) {
     }
     try {
       const data = await livePromise;
-      return json(data, env);
+      return json(await mitVerlauf(data, env), env);
     } catch (e) {
       console.warn('[rune-rewards-backend] /recent-swaps fehlgeschlagen (beide Quellen):', e?.message || String(e));
-      return json({ actions: [] }, env);
+      return json(await mitVerlauf({ actions: [] }, env), env);
     }
   }
 
   try {
     const data = await fetchRecentSwapActionsCached();
-    return json(data, env);
+    return json(await mitVerlauf(data, env), env);
   } catch (e) {
     console.warn('[rune-rewards-backend] /recent-swaps fehlgeschlagen (beide Quellen):', e?.message || String(e));
-    return json({
-      actions: []
-    }, env);
+    return json(await mitVerlauf({ actions: [] }, env), env);
   }
 }
 
-// ----------------------------------------------------------------------------
-// FIX 23: Top-5-Swap-Paare -- KEIN behauptetes Zeitfenster (24h/7d/30d) mehr, siehe
-// ausführliche Begründung im Kopfkommentar der Datei (FIX 23). Stattdessen: bei jedem
-// Cron-Durchlauf werden schlicht die neuesten SWAP_COLLECT_PAGES*50 (1000) Swaps von Midgard
-// geholt, dedupliziert (INSERT OR IGNORE), und die Tabelle wird danach auf die neuesten
-// SWAP_EVENTS_KEEP (1000) Einträge INSGESAMT gekappt -- unabhängig davon, welche Zeitspanne
-// diese 1000 Swaps tatsächlich abdecken. /top-pairs liest daraus die Top 5 und liefert
-// zusätzlich die TATSÄCHLICH abgedeckte Zeitspanne (ältester/neuester erfasster Swap) mit,
-// damit das Frontend ehrlich anzeigen kann "letzte 1.000 Swaps, deckt die letzten X Stunden
-// ab" statt einer festen, potenziell falschen "24h"-Beschriftung.
-//
-// swap_collector_state (last_height-Fortschritt) wird NICHT MEHR benutzt -- kann in D1 stehen
-// bleiben, wird aber nirgends mehr gelesen oder geschrieben.
-//
-// VORHER EINMALIG PER SQL AUSFÜHREN (D1 -> Console), falls noch nicht vorhanden:
-//
-//   CREATE TABLE IF NOT EXISTS swap_events (
-//     tx_id TEXT PRIMARY KEY,
-//     pair TEXT NOT NULL,
-//     volume_usd REAL,
-//     ts INTEGER NOT NULL
-//   );
-//   CREATE INDEX IF NOT EXISTS idx_swap_events_ts ON swap_events(ts);
-// ----------------------------------------------------------------------------
+const SWAP_COLLECT_PAGES = 1;
 
-function deriveAssetLabel(identifier) {
-  if (!identifier) return '?';
-  const raw = String(identifier);
-  const sep = Math.max(raw.indexOf('.'), raw.indexOf('~'));
-  const chain = sep > 0 ? raw.slice(0, sep) : raw;
-  const rest = sep > 0 ? raw.slice(sep + 1) : '';
-  const tickerRaw = (rest.split('-')[0] || chain).toUpperCase();
-  const chainClean = String(chain).split('-')[0].slice(0, 8);
-  const tickerClean = String(tickerRaw).split('-')[0].slice(0, 8);
-  return chainClean && chainClean !== tickerClean ? `${chainClean}.${tickerClean}` : tickerClean;
-}
-
-function buildSwapEventRow(a) {
-  if (a.status && a.status !== 'success') return null;
-  const txId = a.in && a.in[0] && a.in[0].txID;
-  if (!txId) return null;
-  const inCoin = a.in && a.in[0] && a.in[0].coins && a.in[0].coins[0];
-  const inAsset = inCoin && inCoin.asset;
-  const outAsset = (a.out && a.out[0] && a.out[0].coins && a.out[0].coins[0] && a.out[0].coins[0].asset) || (a.pools && a.pools[a.pools.length - 1]);
-  const pair = `${deriveAssetLabel(inAsset)} \u2192 ${deriveAssetLabel(outAsset)}`;
-  const swap = a.metadata && a.metadata.swap;
-  const priceUsd = swap ? parseFloat(swap.inPriceUSD) : NaN;
-  const amountBase = inCoin ? parseInt(inCoin.amount, 10) : NaN;
-  let volumeUsd = null;
-  if (isFinite(priceUsd) && isFinite(amountBase) && amountBase > 0) {
-    volumeUsd = (amountBase / 1e8) * priceUsd;
-  }
-  const ts = a.date ? Math.floor(Number(a.date) / 1e6) : Date.now();
-  return { txId, pair, volumeUsd, ts };
-}
-
-// FIX 23: 20 Seiten * 50 = 1000 Swaps pro Cron-Durchlauf, IMMER die neuesten (kein
-// last_height-Filter mehr) -- ersetzt die alte last_height-Nachlauf-Logik komplett.
-const SWAP_COLLECT_PAGES = 20;
-// Tabelle wird nach jedem Durchlauf auf die neuesten SWAP_EVENTS_KEEP Einträge INSGESAMT
-// gekappt (nicht nach Alter, sondern nach Anzahl) -- siehe Kopfkommentar FIX 23.
-const SWAP_EVENTS_KEEP = 1000;
-
-// FIX 29 (KRITISCH -- Cloudflare-Alarm: "D1 rows_written limit exceeded", Worker liefert bis
-// Tagesende nur noch Fehler): FIX 23 hat pro Cron-Durchlauf IMMER bis zu 1000 Swaps neu
-// abgefragt und versucht, ALLE davon per INSERT OR IGNORE einzufügen -- auch wenn beim
-// vorherigen Durchlauf schon fast alle davon gespeichert wurden. D1 zählt JEDEN
-// Einfüge-VERSUCH zu rows_written, unabhängig davon, ob er wegen Duplikat ignoriert wird.
-// Läuft der Cron alle paar Minuten, kommen so binnen weniger Stunden hunderttausende
-// überflüssige Schreibversuche zusammen -- exakt das gemeldete Limit-Problem.
-//
-// Fix: swap_collector_state (die Tabelle existierte bereits, wurde seit FIX 23 nur nicht mehr
-// genutzt) hält wieder die höchste bereits gesehene Block-Höhe fest. Jeder Durchlauf
-// paginiert nur so lange, bis eine BEKANNTE Höhe erreicht wird (= alles Neue seit letztem Mal
-// eingesammelt) -- ein normaler Durchlauf muss dadurch nur noch die paar WIRKLICH neuen Swaps
-// einfügen (typischerweise eine Handvoll, nicht 1000), nicht mehr denselben Datenberg jedes
-// Mal komplett neu. Sicherheitsnetz (hitPageLimit) bleibt wie beim ursprünglichen Design: wird
-// SWAP_COLLECT_PAGES komplett ausgeschöpft, ohne die alte Höhe wieder zu erreichen (mehr als
-// SWAP_COLLECT_PAGES*50 Swaps seit dem letzten Durchlauf), bleibt last_height bewusst
-// UNVERÄNDERT -- der nächste Durchlauf versucht dann, ab genau dort weiterzumachen, statt
-// fälschlich so zu tun, als wäre man auf dem neuesten Stand.
 async function collectSwapPairStats(env) {
-  let lastHeight = null;
-  try {
-    const stateRow = await env.DB.prepare('SELECT last_height FROM swap_collector_state WHERE id = 1').first();
-    lastHeight = stateRow ? stateRow.last_height : null;
-  } catch (e) {
-    console.warn('[rune-rewards-backend] swap_collector_state nicht lesbar (Migration ausgeführt?):', e?.message || String(e));
-  }
-
-  const collectedRows = [];
-  let maxHeightSeen = lastHeight;
-  let reachedKnownHeight = false;
-  let firstPageActions = null; // für die Momentaufnahme (FIX 14) -- unabhängig vom Höhen-Filter
-  let hitPageLimit = false;
+  
+  let firstPageActions = null;
 
   for (let page = 0; page < SWAP_COLLECT_PAGES; page++) {
     let data;
     try {
-      data = await fetchFromBases(MIDGARD_BASES, `/actions?type=swap&limit=50&offset=${page * 50}`, {
+      data = await fetchFromBases(getMidgardBases(), `/actions?type=swap&limit=50&offset=${page * 50}`, {
         timeoutMs: 12000,
       });
     } catch (e) {
       console.warn('[rune-rewards-backend] Swap-Paar-Sammlung fehlgeschlagen (Seite', page, '):', e?.message || String(e));
-      break; // was bisher gesammelt wurde, wird trotzdem gespeichert -- besser als nichts
+      break;
     }
     const actions = (data && Array.isArray(data.actions)) ? data.actions : [];
     if (page === 0) firstPageActions = actions;
     if (!actions.length) break;
 
-    for (const a of actions) {
-      const height = parseInt(a.height, 10);
-      // Midgard liefert neueste zuerst -- sobald eine Höhe auftaucht, die wir beim letzten
-      // Durchlauf schon erfasst hatten, ist ALLES Neue seit damals vollständig eingesammelt,
-      // weiteres Paginieren würde nur bereits bekannte, ältere Swaps erneut anfassen (und
-      // erneute, unnötige D1-Schreibversuche verursachen).
-      if (lastHeight != null && isFinite(height) && height <= lastHeight) {
-        reachedKnownHeight = true;
-        break;
-      }
-      const row = buildSwapEventRow(a);
-      if (row) collectedRows.push(row);
-      if (isFinite(height) && (maxHeightSeen == null || height > maxHeightSeen)) {
-        maxHeightSeen = height;
-      }
-    }
-
-    if (reachedKnownHeight || actions.length < 50) break; // fertig bzw. letzte Seite erreicht
-    if (page === SWAP_COLLECT_PAGES - 1) hitPageLimit = true;
+    break;
   }
 
-  // FIX 14: Momentaufnahme der aktuellsten Swaps (Seite 0, UNGEFILTERT nach Höhe -- die
-  // Live-Anzeige im Frontend will immer die neuesten paar Swaps sehen) für den sofortigen
-  // Fallback in /recent-swaps speichern. Läuft unabhängig davon, ob es NEUE Swaps für die
-  // Statistik gab.
   if (firstPageActions && firstPageActions.length) {
     try {
+      
+      let bestehend = {};
+      try {
+        const alt2 = await env.DB.prepare('SELECT payload FROM recent_swaps_snapshot WHERE id = 1').first();
+        bestehend = alt2 && alt2.payload ? JSON.parse(alt2.payload) : {};
+      } catch (e) { bestehend = {}; }
+      
+      delete bestehend.bigSwaps;
+
       await env.DB.prepare(
         `INSERT INTO recent_swaps_snapshot (id, payload, updated_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
-      ).bind(JSON.stringify({ actions: firstPageActions.slice(0, 20) }), Date.now()).run();
+      ).bind(JSON.stringify({ ...bestehend, actions: firstPageActions.slice(0, 20) }), Date.now()).run();
     } catch (e) {
       console.warn('[rune-rewards-backend] Momentaufnahme-Schreiben fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
     }
   }
 
-  if (!collectedRows.length) return; // nichts Neues seit letztem Mal -- kein weiterer D1-Zugriff nötig
-
-  try {
-    const stmt = env.DB.prepare(
-      'INSERT OR IGNORE INTO swap_events (tx_id, pair, volume_usd, ts) VALUES (?, ?, ?, ?)'
-    );
-    await env.DB.batch(collectedRows.map((r) => stmt.bind(r.txId, r.pair, r.volumeUsd, r.ts)));
-
-    if (maxHeightSeen != null && !hitPageLimit) {
-      await env.DB.prepare(
-        `INSERT INTO swap_collector_state (id, last_height) VALUES (1, ?)
-         ON CONFLICT(id) DO UPDATE SET last_height = excluded.last_height`
-      ).bind(maxHeightSeen).run();
-    } else if (hitPageLimit) {
-      console.warn('[rune-rewards-backend] Swap-Paar-Sammlung: Seitenlimit erreicht, ohne die alte last_height wieder zu treffen -- lasse last_height unverändert, versuche es beim nächsten Durchlauf erneut (mehr als', SWAP_COLLECT_PAGES * 50, 'Swaps seit dem letzten Durchlauf).');
-    }
-
-    // FIX 23 (bleibt bestehen): rollierendes Fenster nach ANZAHL statt Alter -- immer nur die
-    // neuesten SWAP_EVENTS_KEEP Einträge behalten. Betrifft jetzt aber nur noch die paar NEUEN
-    // Zeilen pro Durchlauf (dank Höhen-Filter oben), nicht mehr potenziell 1000 auf einmal.
-    await env.DB.prepare(
-      `DELETE FROM swap_events WHERE tx_id NOT IN (
-         SELECT tx_id FROM swap_events ORDER BY ts DESC LIMIT ?
-       )`
-    ).bind(SWAP_EVENTS_KEEP).run();
-  } catch (e) {
-    console.warn('[rune-rewards-backend] Swap-Paar-Sammlung: D1-Schreibfehler (Migration ausgeführt?):', e?.message || String(e));
-  }
-}
-
-// FIX 23: kein window-Parameter mehr (24h|7d|30d entfällt ersatzlos, siehe Kopfkommentar) --
-// /top-pairs liefert immer die Top 5 aus den aktuell gehaltenen (neuesten SWAP_EVENTS_KEEP)
-// Swaps, dazu swapCount/spanFromMs/spanToMs, damit das Frontend die tatsächlich abgedeckte
-// Zeitspanne ehrlich anzeigen kann statt einer festen, potenziell falschen Beschriftung.
-async function handleTopPairs(request, env) {
-  const url = new URL(request.url);
-  const sortByVolume = url.searchParams.get('sort') === 'volume';
-  const orderClause = sortByVolume ? 'vol DESC' : 'cnt DESC';
-  try {
-    const [rows, spanRow] = await Promise.all([
-      env.DB.prepare(
-        `SELECT pair, COUNT(*) as cnt, SUM(COALESCE(volume_usd, 0)) as vol
-         FROM swap_events
-         GROUP BY pair
-         ORDER BY ${orderClause}
-         LIMIT 5`
-      ).all(),
-      env.DB.prepare('SELECT MIN(ts) as oldest, MAX(ts) as newest, COUNT(*) as total FROM swap_events').first(),
-    ]);
-    return json({
-      sort: sortByVolume ? 'volume' : 'count',
-      swapCount: spanRow?.total || 0,
-      spanFromMs: spanRow?.oldest ?? null,
-      spanToMs: spanRow?.newest ?? null,
-      pairs: (rows.results || []).map((r) => ({ pair: r.pair, count: r.cnt, volumeUsd: r.vol })),
-    }, env);
-  } catch (e) {
-    console.error('[rune-rewards-backend] /top-pairs fehlgeschlagen (Tabelle angelegt?):', e?.message || String(e));
-    return json({ sort: sortByVolume ? 'volume' : 'count', swapCount: 0, spanFromMs: null, spanToMs: null, pairs: [] }, env);
-  }
 }
 
 function sleep(ms) {
@@ -839,41 +542,6 @@ async function handleBondLedger(request, env) {
 }
 
 const MAX_ADDRESSES_PER_CRON_RUN = 2;
-// FIX 24 (gemeldet: "Rewards-Historie/Ø Monat lädt zu langsam, das muss doch sofort gehen"):
-// vorher 20 Höhen pro Refresh-Aufruf in Batches von 5 (= 4 sequenzielle Batches à 150ms Pause).
-// Bei z.B. 127 nachzuladenden Churns brauchte das ~7 Refresh-Aufrufe hintereinander (je alle
-// ~4s vom Frontend abgefragt, siehe REWARDS_BACKEND_POLL_MS) -- real 30-60+ Sekunden, bis die
-// Historie (und damit Ø Monat/TOTAL) vollständig war. Jetzt: gleiche Anzahl sequenzieller
-// Batches (4) wie vorher -- die Wartezeit durch die 150ms-Pausen zwischen Batches bleibt also
-// gleich -- aber jeder Batch fragt 3x so viele Höhen gleichzeitig ab (15 statt 5), macht
-// insgesamt 60 statt 20 Höhen pro Aufruf. Bei 127 Churns sind das nur noch ~3 Aufrufe statt ~7
-// -- Backfill ist dadurch in etwa 3x schneller abgeschlossen, ohne dass ein einzelner Aufruf
-// länger braucht als vorher (gleiche Batch-Struktur, nur mehr Parallelität pro Batch).
-// FIX 25 (Korrektur von FIX 24 -- gemeldet: "die Historie ist doch im Worker gespeichert, das
-// muss doch sofort fertig sein"): FIX 24 hat den Durchsatz PRO Aufruf erhöht (20->60 Höhen),
-// aber das Kernproblem nicht behoben -- bei z.B. 128 nachzuladenden Churns waren immer noch
-// ~3 GETRENNTE, vom Frontend nacheinander ausgelöste Refresh-Aufrufe nötig (gebunden an
-// Poll-Intervall + Cooldown). Das ist unnötig: die eigentliche Arbeit läuft ohnehin im
-// Hintergrund über ctx.waitUntil() UND schreibt nach JEDEM einzelnen Batch sofort in D1 (siehe
-// Schleife unten) -- es gibt keinen technischen Grund, die Verarbeitung künstlich nach 60
-// Höhen abzubrechen und auf den NÄCHSTEN externen HTTP-Aufruf zu warten. Jetzt: EIN einziger
-// Hintergrund-Durchlauf verarbeitet die GESAMTE fehlende Liste (bis zur Sicherheitsgrenze 500 --
-// mehr als jede reale Adresse je an einmal nachzuholenden Churns haben sollte, analog zum
-// bereits bestehenden Muster bei SWAP_COLLECT_PAGES*50=500 für /top-pairs). Das Frontend-Polling
-// (REWARDS_BACKEND_POLL_MS) dient danach nur noch dazu, den bereits LAUFENDEN Fortschritt
-// anzuzeigen (die Zeilen wachsen währenddessen sichtbar in bond_history_rows), nicht mehr dazu,
-// JEDEN einzelnen Verarbeitungsschritt selbst anzustoßen.
-// FIX 32 (KRITISCH -- erneuter D1-Alarm bei 77%, gemeldet: "immer noch Probleme"): FIX 25's
-// Erhöhung auf 500 hatte einen Nebeneffekt, den ich übersehen hatte: INSERT OR REPLACE zählt
-// bei D1 als LÖSCHEN+EINFÜGEN (2 Schreibvorgänge pro Zeile, nicht 1). Bleibt eine Adresse
-// LÄNGER im Status 'building' hängen (z.B. weil für ältere Höhen keine verwertbaren
-// Provider-Daten verfügbar sind, siehe hasProviderData weiter unten), wird sie vom Cron
-// bevorzugt IMMER WIEDER aufgegriffen ("ORDER BY status='pending' DESC" -- 'building' zählt
-// hier mit) -- jeder dieser Durchläufe versuchte bis zu 500 REPLACE-Operationen, macht bis zu
-// 1000 tatsächliche Schreibvorgänge JE Adresse JE Cron-Tick. Deutlich zu aggressiv. Auf 40
-// reduziert -- immer noch doppelt so schnell wie die ursprünglichen 20, aber weit weniger
-// riskant bei wiederholten Durchläufen für ein- und dieselbe (evtl. dauerhaft "steckende")
-// Adresse.
 const MAX_HEIGHTS_PER_ADDRESS_PER_RUN = 40;
 const HEIGHT_BATCH_SIZE = 10;
 const DONE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
@@ -917,29 +585,23 @@ async function handleBondHistory(request, env, ctx) {
     trackedRow = { bond_address: address, status: 'pending', created_at: now };
   }
 
-  // FIX 24: Cooldown von 3s auf 2s reduziert, passend zum ebenfalls verkürzten Frontend-Poll-
-  // Intervall (REWARDS_BACKEND_POLL_MS, siehe app.js) -- verhindert, dass ein Poll knapp VOR
-  // Ablauf des alten 3s-Cooldowns "leer" ankommt (kein neuer Refresh ausgelöst) und dadurch
-  // unnötig eine ganze Poll-Runde verschenkt wird, während der Sync eigentlich schneller
-  // vorankommen könnte.
   const REFRESH_COOLDOWN_MS = 2 * 1000;
   const recentlyRefreshed = trackedRow.last_refreshed_at && (now - trackedRow.last_refreshed_at) < REFRESH_COOLDOWN_MS;
-  // FIX 25 (Korrektur eines durch FIX 25 selbst entstandenen Nebeneffekts): last_refreshed_at
-  // wird erst GANZ AM ENDE von refreshOneAddress geschrieben (siehe dort) -- bei einem jetzt
-  // potenziell lange laufenden Einzel-Durchlauf (bis zu 500 Höhen, siehe
-  // MAX_HEIGHTS_PER_ADDRESS_PER_RUN) bleibt last_refreshed_at während der GESAMTEN Laufzeit auf
-  // dem alten (oft NULL/längst abgelaufenen) Stand stehen. Ohne diese zusätzliche Prüfung hätte
-  // JEDER weitere Poll (alle 2.5s vom Frontend) einen ZWEITEN, PARALLEL LAUFENDEN
-  // refreshOneAddress-Aufruf für dieselbe Adresse ausgelöst, während der erste noch mitten in
-  // der Bearbeitung war -- unnötige doppelte THORNode-Anfragen (durch INSERT OR REPLACE zwar
-  // nicht FALSCH, aber verschwenderisch und unnötige Last). Jetzt: status === 'building'
-  // bedeutet "hier läuft bereits etwas" (dieser Status wird ZU BEGINN der Verarbeitung gesetzt,
-  // siehe refreshOneAddress) -- ein neuer On-Demand-Trigger wird dafür übersprungen. Bleibt ein
-  // Durchlauf ausnahmsweise wirklich hängen (z.B. Worker-Absturz mitten in der Verarbeitung),
-  // greift weiterhin der bestehende Cron-Job (runRefreshCycle), der 'pending'/'building'-Adressen
-  // ohnehin regelmäßig erneut aufgreift -- kein Adressen kann dadurch dauerhaft stecken bleiben.
   const alreadyInProgress = trackedRow.status === 'building';
-  if (trackedRow.status !== 'done' && !recentlyRefreshed && !alreadyInProgress) {
+
+  let churnFehlt = false;
+  if (trackedRow.status === 'done' && !recentlyRefreshed) {
+    try {
+      const letzteZeile = await env.DB
+        .prepare('SELECT MAX(churn_height) AS h FROM bond_history_rows WHERE bond_address = ?')
+        .bind(address).first();
+      const letzterChurn = await env.DB
+        .prepare('SELECT MAX(height) AS h FROM churns_cache').first();
+      churnFehlt = !!(letzterChurn?.h && (!letzteZeile?.h || letzterChurn.h > letzteZeile.h));
+    } catch (e) {  }
+  }
+
+  if ((trackedRow.status !== 'done' || churnFehlt) && !recentlyRefreshed && !alreadyInProgress) {
     ctx.waitUntil(refreshOneAddress(env, trackedRow, now).catch((e) => {
       console.error('[rune-rewards-backend] Sofort-Refresh fehlgeschlagen für', address, e);
     }));
@@ -972,7 +634,7 @@ async function handleBondHistory(request, env, ctx) {
   }, env);
 }
 
-const CACHE_MAX_AGE_MS = 60 * 60 * 1000; // gecachte Werte älter als 1h werden NICHT mehr als Fallback benutzt
+const CACHE_MAX_AGE_MS = 60 * 60 * 1000;
 
 async function readBalanceCache(env, address) {
   const row = await env.DB
@@ -1139,7 +801,7 @@ const DONATION_FRESH_MS = 12 * 1000;
 const DONATION_BACKGROUND_REFRESH_MS = 12 * 1000;
 
 function utcMonthString(ms) {
-  return new Date(ms).toISOString().slice(0, 7); // 'YYYY-MM'
+  return new Date(ms).toISOString().slice(0, 7); 
 }
 
 async function fetchDonationBalanceRune() {
@@ -1189,7 +851,7 @@ async function fetchDonationEthBalance() {
 }
 
 async function fetchEthUsdPrice() {
-  const pool = await fetchFromBases(MIDGARD_BASES, '/pool/ETH.ETH');
+  const pool = await fetchFromBases(getMidgardBases(), '/pool/ETH.ETH');
   const price = parseFloat(pool?.assetPriceUSD);
   if (!Number.isFinite(price) || price <= 0) throw new Error('MIDGARD_ETH_PRICE_MISSING');
   return price;
@@ -1277,9 +939,17 @@ async function handleDonationProgress(request, env, ctx) {
       return json({ receivedRune: 0, receivedUsdc: 0, receivedEthUsd: 0, month: currentMonth }, env);
     }
 
-    await env.DB.prepare(
-      `UPDATE donation_tracking SET last_balance_rune = ?, last_balance_usdc = ?, last_balance_eth = ?, last_eth_usd_price = ?, last_balance_at = ? WHERE id = 1`
-    ).bind(currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now()).run();
+    const gleich = (a, b) => (a == null && b == null) || (a != null && b != null && Math.abs(a - b) < 1e-8);
+    const unveraendert = gleich(currentRune, row.last_balance_rune)
+      && gleich(currentUsdc, row.last_balance_usdc)
+      && gleich(currentEth, row.last_balance_eth)
+      && gleich(ethUsdPrice, row.last_eth_usd_price);
+    const letzterSchreibvorgang = Number(row.last_balance_at) || 0;
+    if (!unveraendert || Date.now() - letzterSchreibvorgang > 3600000) {
+      await env.DB.prepare(
+        `UPDATE donation_tracking SET last_balance_rune = ?, last_balance_usdc = ?, last_balance_eth = ?, last_eth_usd_price = ?, last_balance_at = ? WHERE id = 1`
+      ).bind(currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now()).run();
+    }
 
     const receivedRune = currentRune != null ? Math.max(0, currentRune - row.baseline_rune) : 0;
     const receivedUsdc = currentUsdc != null ? Math.max(0, currentUsdc - (row.baseline_usdc || 0)) : 0;
@@ -1293,13 +963,43 @@ async function handleDonationProgress(request, env, ctx) {
 }
 
 function utcDayString(ms) {
-  return new Date(ms).toISOString().slice(0, 10); // 'YYYY-MM-DD'
+  return new Date(ms).toISOString().slice(0, 10); 
 }
 
 function getStatsExcludedAddresses(env) {
   const raw = (env && env.STATS_EXCLUDED_ADDRESSES) || '';
   return new Set(
     raw.split(',').map((a) => a.trim().toLowerCase()).filter(Boolean)
+  );
+}
+
+// ANONYME BESUCHER-ZAEHLUNG (FIX 34a).
+//
+// Warum es sie gibt: recordSyncActivity weiter unten zaehlt ausschliesslich Nutzer MIT
+// eingetragener Wallet -- nur die rufen /purchases, /wallets, /drawings, /swap-history
+// ueberhaupt auf. Wer nur Chart, Node-Karte oder Swap benutzt, taucht dort nie auf.
+//
+// /volume ruft dagegen jeder Besucher auf. Die App haengt dort ein Token an, das ihr Browser
+// selbst erzeugt hat -- eine Zufallszahl im localStorage. Keine IP, kein Fingerprint, keine
+// Verknuepfung mit einer Wallet, kein Cookie. Fuer niemanden ausser dem Browser selbst deutbar.
+//
+// Kosten: EIN Schreibvorgang je Geraet und Tag (INSERT OR IGNORE). Auch bei einem Nutzer, der
+// die Seite hundertmal am Tag oeffnet, bleibt es bei genau einer Zeile.
+const VISITOR_TOKEN_RE = /^[A-Za-z0-9_-]{8,64}$/;
+
+function recordVisitor(env, ctx, token) {
+  if (!env.DB || !ctx || typeof ctx.waitUntil !== 'function') return;
+  if (!token || !VISITOR_TOKEN_RE.test(token)) return;
+  const now = Date.now();
+  const day = utcDayString(now);
+  ctx.waitUntil(
+    env.DB
+      .prepare('INSERT OR IGNORE INTO visitor_days (token, day, first_seen_at) VALUES (?, ?, ?)')
+      .bind(token, day, now)
+      .run()
+      .catch((e) => {
+        console.warn('[rune-rewards-backend] recordVisitor fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
+      })
   );
 }
 
@@ -1331,7 +1031,7 @@ function recordSyncActivity(env, ctx, address) {
   ctx.waitUntil(Promise.all([dedupTask, countTask]));
 }
 
-const MAX_PURCHASES_PAYLOAD_BYTES = 2_000_000; // Sicherheitsnetz gegen versehentlich riesige Payloads
+const MAX_PURCHASES_PAYLOAD_BYTES = 2_000_000;
 
 function sanitizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -1454,7 +1154,7 @@ async function handlePurchases(request, env, ctx) {
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
 }
 
-const MAX_WALLETS_PAYLOAD_BYTES = 200_000; // eine reine Adressliste bleibt immer winzig -- großzügiges Sicherheitsnetz
+const MAX_WALLETS_PAYLOAD_BYTES = 200_000;
 
 async function handleWallets(request, env, ctx) {
   const url = new URL(request.url);
@@ -1545,7 +1245,7 @@ async function handleWallets(request, env, ctx) {
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
 }
 
-const MAX_DRAWINGS_PAYLOAD_BYTES = 500_000; // Zeichnungen sind kleine Objekte, aber grosszügig bemessen für viele Linien
+const MAX_DRAWINGS_PAYLOAD_BYTES = 500_000;
 
 async function handleDrawings(request, env, ctx) {
   const url = new URL(request.url);
@@ -1664,7 +1364,7 @@ async function handleDrawings(request, env, ctx) {
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
 }
 
-const MAX_SWAP_HISTORY_PAYLOAD_BYTES = 200_000; // kleine Objekte, aber grosszügig bemessen
+const MAX_SWAP_HISTORY_PAYLOAD_BYTES = 200_000;
 
 async function handleSwapHistory(request, env, ctx) {
   const url = new URL(request.url);
@@ -1747,15 +1447,18 @@ async function handleStats(request, env) {
   const day7 = utcDayString(now - 7 * 24 * 60 * 60 * 1000);
   const day30 = utcDayString(now - 30 * 24 * 60 * 60 * 1000);
 
-  const [totalRow, active1Row, active7Row, active30Row, depthRow, totalRequests1Row, totalRequests7Row, totalRequests30Row] = await Promise.all([
-    env.DB.prepare('SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days').first(),
-    env.DB.prepare('SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?').bind(day1).first(),
-    env.DB.prepare('SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?').bind(day7).first(),
-    env.DB.prepare('SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?').bind(day30).first(),
-    // NEU (auf Wunsch: "wie viel Prozent war an 3/10/30 verschiedenen Tagen da"): EINE Abfrage,
-    // die pro Adresse zählt, an wie vielen VERSCHIEDENEN Tagen sie in den letzten 30 Tagen
-    // aktiv war, und daraus direkt in SQL die Schwellenwert-Kästchen (>=2/3/10/30) zusammenzählt
-    // -- effizienter als 4 einzelne HAVING-Unterabfragen, da die Gruppierung nur einmal läuft.
+  const excl = [...getStatsExcludedAddresses(env)];
+  const exclSql = excl.length ? ` AND LOWER(address) NOT IN (${excl.map(() => '?').join(',')})` : '';
+
+  const [
+    totalRow, active1Row, active7Row, active30Row, depthRow,
+    totalRequests1Row, totalRequests7Row, totalRequests30Row, trackingSinceRow,
+    vis1Row, vis7Row, vis30Row, visTotalRow, visSinceRow,
+  ] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE 1=1${exclSql}`).bind(...excl).first(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?${exclSql}`).bind(day1, ...excl).first(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?${exclSql}`).bind(day7, ...excl).first(),
+    env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?${exclSql}`).bind(day30, ...excl).first(),
     env.DB.prepare(
       `SELECT
          COUNT(*) AS n2,
@@ -1764,38 +1467,53 @@ async function handleStats(request, env) {
          SUM(CASE WHEN d >= 30 THEN 1 ELSE 0 END) AS n30
        FROM (
          SELECT address, COUNT(DISTINCT day) AS d FROM sync_activity_days
-         WHERE day >= ?
+         WHERE day >= ?${exclSql}
          GROUP BY address
          HAVING d >= 2
        )`
-    ).bind(day30).first(),
-    env.DB.prepare('SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?').bind(day1).first()
+    ).bind(day30, ...excl).first(),
+    env.DB.prepare(`SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?${exclSql}`).bind(day1, ...excl).first()
       .catch((e) => {
         console.warn('[rune-rewards-backend] sync_activity_counts (1d) nicht lesbar:', e?.message || String(e));
         return { n: 0 };
       }),
-    env.DB.prepare('SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?').bind(day7).first()
+    env.DB.prepare(`SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?${exclSql}`).bind(day7, ...excl).first()
       .catch((e) => {
         console.warn('[rune-rewards-backend] sync_activity_counts (7d) nicht lesbar:', e?.message || String(e));
         return { n: 0 };
       }),
-    env.DB.prepare('SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?').bind(day30).first()
+    env.DB.prepare(`SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?${exclSql}`).bind(day30, ...excl).first()
       .catch((e) => {
         console.warn('[rune-rewards-backend] sync_activity_counts (30d) nicht lesbar:', e?.message || String(e));
         return { n: 0 };
       }),
+    // Erster Tag, an dem ueberhaupt aufgezeichnet wurde. Bewusst aus sync_activity_days und
+    // NICHT aus sync_activity_counts -- die kam spaeter dazu und wuerde einen zu spaeten
+    // Startzeitpunkt vortaeuschen.
+    env.DB.prepare('SELECT MIN(day) AS d FROM sync_activity_days').first()
+      .catch((e) => {
+        console.warn('[rune-rewards-backend] Aufzeichnungsbeginn nicht lesbar:', e?.message || String(e));
+        return { d: null };
+      }),
+    
+    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day1).first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day7).first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day30).first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days').first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT MIN(day) AS d FROM visitor_days').first().catch(() => ({ d: null })),
   ]);
 
   const active1 = active1Row?.n || 0;
   const active7 = active7Row?.n || 0;
   const active30 = active30Row?.n || 0;
-  const returning30 = depthRow?.n2 || 0; // >=2 Tage (bisheriges "Wiederkehrer"-Kriterium, unverändert)
-  const returning3d = depthRow?.n3 || 0; // >=3 Tage
-  const returning10d = depthRow?.n10 || 0; // >=10 Tage
-  const returning30d = depthRow?.n30 || 0; // an JEDEM der letzten 30 Tage (Maximum)
+  const returning30 = depthRow?.n2 || 0;
+  const returning3d = depthRow?.n3 || 0;
+  const returning10d = depthRow?.n10 || 0;
+  const returning30d = depthRow?.n30 || 0;
   const totalRequests1 = totalRequests1Row?.n || 0;
   const totalRequests7 = totalRequests7Row?.n || 0;
   const totalRequests30 = totalRequests30Row?.n || 0;
+  const trackingSince = trackingSinceRow?.d || null; 
 
   const pctOf = (n) => active30 > 0 ? Math.round((n / active30) * 1000) / 10 : null;
 
@@ -1806,9 +1524,6 @@ async function handleStats(request, env) {
     activeLast30d: active30,
     returningLast30d: returning30,
     retentionRate30d: pctOf(returning30),
-    // NEU: Nutzungstiefe -- wie viel Prozent der in den letzten 30 Tagen aktiven Adressen waren
-    // an mindestens X verschiedenen Tagen aktiv. Jede Stufe ist eine TEILMENGE der vorherigen
-    // (wer an >=10 Tagen aktiv war, war zwangsläufig auch an >=3 Tagen aktiv).
     engagementDepth: [
       { minDays: 2, count: returning30, pct: pctOf(returning30) },
       { minDays: 3, count: returning3d, pct: pctOf(returning3d) },
@@ -1818,6 +1533,16 @@ async function handleStats(request, env) {
     totalRequestsLast1d: totalRequests1,
     totalRequestsLast7d: totalRequests7,
     totalRequestsLast30d: totalRequests30,
+    trackingSince,
+    trackingSinceDays: trackingSince
+      ? Math.max(1, Math.round((now - Date.parse(trackingSince + 'T00:00:00Z')) / 86400000) + 1)
+      : null,
+    
+    visitorsLast1d: vis1Row?.n ?? null,
+    visitorsLast7d: vis7Row?.n ?? null,
+    visitorsLast30d: vis30Row?.n ?? null,
+    visitorsTotal: visTotalRow?.n ?? null,
+    visitorsSince: visSinceRow?.d ?? null,
   };
 
   const wantsHtml = (request.headers.get('Accept') || '').includes('text/html');
@@ -1825,11 +1550,23 @@ async function handleStats(request, env) {
     return json(stats, env);
   }
 
+  const deDate = (isoDay) => {
+    if (!isoDay) return null;
+    const [y, m, d] = isoDay.split('-');
+    return `${d}.${m}.${y}`;
+  };
+  const trackingHint = stats.trackingSince
+    ? `seit ${deDate(stats.trackingSince)} · ${stats.trackingSinceDays} Tage`
+    : 'noch keine Aufzeichnung';
+  const visitorHint = stats.visitorsSince
+    ? `seit ${deDate(stats.visitorsSince)}`
+    : 'noch keine Aufzeichnung';
+
   const tile = (key, label, value, hint) => `
     <div class="tile">
       <div class="tile-value" id="v-${key}">${value == null ? '—' : value}</div>
       <div class="tile-label">${label}</div>
-      ${hint ? `<div class="tile-hint">${hint}</div>` : ''}
+      ${hint ? `<div class="tile-hint" id="h-${key}">${hint}</div>` : ''}
     </div>`;
 
   const html = `<!DOCTYPE html>
@@ -1871,12 +1608,12 @@ async function handleStats(request, env) {
   .tile-head {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
   }
-  .tile-select {
+  /* Festes Zeitraum-Etikett -- sieht aus wie ein Auswahlfeld, ist aber bewusst nicht
+     bedienbar: Aktive Adressen und Requests zeigen beide 24h. */
+  .tile-period {
     background: #0e141b; color: #93a5b1; border: 1px solid #1f2b35; border-radius: 6px;
-    font-size: 10.5px; font-weight: 600; padding: 3px 6px; font-family: inherit;
-    cursor: pointer;
+    font-size: 10.5px; font-weight: 600; padding: 3px 6px;
   }
-  .tile-select:focus { outline: 1px solid #2dd4bf; }
   .refresh {
     margin-top: 22px; font-size: 11.5px; color: #4c5c66;
     display: flex; align-items: center; gap: 6px;
@@ -1900,87 +1637,151 @@ async function handleStats(request, env) {
   }
   .depth-pct { color: #e7ecf0; font-weight: 600; text-align: right; }
   .depth-count { color: #52646f; font-size: 10.5px; }
+  /* Zwei Seiten nebeneinander, horizontal wischbar (Snap). Am Handy ein Karussell, am PC
+     funktionieren die Punkte unten als Navigation. */
+  .pager {
+    display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .pager::-webkit-scrollbar { display: none; }
+  .page { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; padding-right: 2px; }
+  .page-title {
+    font-size: 11px; color: #5f7480; margin: 0 0 10px; letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .dots { display: flex; gap: 7px; justify-content: center; margin: 20px 0 0; }
+  .dot-nav {
+    width: 7px; height: 7px; border-radius: 50%; background: #1f2b35; border: none;
+    padding: 0; cursor: pointer; transition: background 0.15s ease;
+  }
+  .dot-nav.active { background: #2dd4bf; }
+  .note {
+    font-size: 11.5px; color: #6b7c87; line-height: 1.55; margin-top: 14px;
+    border-left: 2px solid #1f2b35; padding-left: 11px; max-width: 480px;
+  }
+  .swipe-hint { font-size: 10.5px; color: #3f4f59; text-align: center; margin-top: 8px; }
 </style>
 </head>
 <body>
   <h1>rune.watch — Sync-Aktivität</h1>
-  <div class="subtitle">Adressbasiert, geräteübergreifend (nicht Cloudflare "Visits")</div>
-  <div class="grid">
-    <div class="tile">
-      <div class="tile-head">
-        <div class="tile-label" style="margin-top:0">Aktive Adressen</div>
-        <select class="tile-select" id="sel-active">
-          <option value="1d">24h</option>
-          <option value="7d">7 Tage</option>
-          <option value="30d" selected>30 Tage</option>
-        </select>
-      </div>
-      <div class="tile-value" id="v-active">${stats.activeLast30d}</div>
-    </div>
-    <div class="tile">
-      <div class="tile-head">
-        <div class="tile-label" style="margin-top:0">Requests gesamt</div>
-        <select class="tile-select" id="sel-requests">
-          <option value="1d">24h</option>
-          <option value="7d">7 Tage</option>
-          <option value="30d" selected>30 Tage</option>
-        </select>
-      </div>
-      <div class="tile-value" id="v-requests">${stats.totalRequestsLast30d}</div>
-      <div class="tile-hint">alle Sync-Aufrufe, nicht Tage-dedupliziert</div>
-    </div>
-    ${tile('total', 'Adressen insgesamt', stats.totalUniqueAddressesEver, 'seit Einführung des Trackings')}
-    ${tile('returning', 'Wiederkehrer – 30 Tage', stats.returningLast30d, '≥2 verschiedene Tage synchronisiert')}
-    ${tile('rate', 'Retention-Quote', stats.retentionRate30d == null ? '—' : stats.retentionRate30d + '%', 'Anteil Wiederkehrer an aktiven Adressen (30T)')}
-    ${tile('avgreq', 'Ø Requests je aktiver Adresse', stats.activeLast30d > 0 ? Math.round((stats.totalRequestsLast30d / stats.activeLast30d) * 10) / 10 : '—', 'für denselben Zeitraum wie "Requests gesamt"')}
-    <div class="tile wide">
-      <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Nutzungstiefe (letzte 30 Tage)</div>
-      ${stats.engagementDepth.map(row => `
-        <div class="depth-row">
-          <div class="depth-label">≥ ${row.minDays} Tage</div>
-          <div class="depth-bar-track">
-            <div class="depth-bar-fill" id="v-depth-bar-${row.minDays}" style="width:${row.pct == null ? 0 : row.pct}%"></div>
+  <div class="subtitle">Adressbasiert, geräteübergreifend (nicht Cloudflare "Visits") · Aufzeichnung <span id="v-since">${trackingHint}</span></div>
+
+  <div class="pager" id="pager">
+    <section class="page">
+      <div class="page-title">1 · Adressen (mit eingetragener Wallet)</div>
+      <div class="grid">
+        <div class="tile">
+          <div class="tile-head">
+            <div class="tile-label" style="margin-top:0">Aktive Adressen</div>
+            <div class="tile-period">24h</div>
           </div>
-          <div class="depth-pct" id="v-depth-pct-${row.minDays}">${row.pct == null ? '—' : row.pct + '%'}</div>
-          <div class="depth-count" id="v-depth-count-${row.minDays}">(${row.count})</div>
-        </div>`).join('')}
-      <div class="tile-hint" style="margin-top:8px;">Anteil der in den letzten 30 Tagen aktiven Adressen (<span id="v-depth-base">${stats.activeLast30d}</span>), die an mindestens X verschiedenen Tagen synchronisiert haben. Jede Stufe ist in der vorherigen enthalten.</div>
-    </div>
+          <div class="tile-value" id="v-active">${stats.activeLast1d}</div>
+          <div class="tile-hint">Adressen, die in den letzten 24h synchronisiert haben</div>
+        </div>
+        <div class="tile">
+          <div class="tile-head">
+            <div class="tile-label" style="margin-top:0">Requests gesamt</div>
+            <div class="tile-period">24h</div>
+          </div>
+          <div class="tile-value" id="v-requests">${stats.totalRequestsLast1d}</div>
+          <div class="tile-hint">alle Sync-Aufrufe der letzten 24h, nicht Tage-dedupliziert</div>
+        </div>
+        ${tile('total', 'Adressen insgesamt', stats.totalUniqueAddressesEver, trackingHint)}
+        ${tile('returning', 'Wiederkehrer – 30 Tage', stats.returningLast30d, '≥2 verschiedene Tage synchronisiert')}
+        ${tile('rate', 'Retention-Quote', stats.retentionRate30d == null ? '—' : stats.retentionRate30d + '%', 'Anteil Wiederkehrer an aktiven Adressen (30T)')}
+        ${tile('avgreq', 'Ø Requests je aktiver Adresse', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'letzte 24h, je in 24h aktiver Adresse')}
+        <div class="tile wide">
+          <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Nutzungstiefe (letzte 30 Tage)</div>
+          ${stats.engagementDepth.map(row => `
+            <div class="depth-row">
+              <div class="depth-label">≥ ${row.minDays} Tage</div>
+              <div class="depth-bar-track">
+                <div class="depth-bar-fill" id="v-depth-bar-${row.minDays}" style="width:${row.pct == null ? 0 : row.pct}%"></div>
+              </div>
+              <div class="depth-pct" id="v-depth-pct-${row.minDays}">${row.pct == null ? '—' : row.pct + '%'}</div>
+              <div class="depth-count" id="v-depth-count-${row.minDays}">(${row.count})</div>
+            </div>`).join('')}
+          <div class="tile-hint" style="margin-top:8px;">Anteil der in den letzten 30 Tagen aktiven Adressen (<span id="v-depth-base">${stats.activeLast30d}</span>), die an mindestens X verschiedenen Tagen synchronisiert haben. Jede Stufe ist in der vorherigen enthalten.</div>
+        </div>
+      </div>
+      <div class="swipe-hint">← wischen für Besucher →</div>
+    </section>
+
+    <section class="page">
+      <div class="page-title">2 · Besucher (anonym, alle Geräte)</div>
+      <div class="grid">
+        ${tile('vis1', 'Geräte – 24h', stats.visitorsLast1d, 'unterschiedliche Geräte in den letzten 24h')}
+        ${tile('vis7', 'Geräte – 7 Tage', stats.visitorsLast7d)}
+        ${tile('vis30', 'Geräte – 30 Tage', stats.visitorsLast30d)}
+        ${tile('vistotal', 'Geräte insgesamt', stats.visitorsTotal, visitorHint)}
+      </div>
+      <div class="note">
+        Gezählt werden <b>Geräte</b>, nicht Menschen: Handy und PC derselben Person sind zwei.
+        Wer Browserdaten löscht oder privat surft, zählt beim nächsten Besuch erneut — die Zahl
+        ist also eher eine Obergrenze. Grundlage ist eine Zufallszahl, die der Browser selbst
+        erzeugt und im localStorage ablegt; keine IP, kein Fingerprint, kein Cookie, keine
+        Verknüpfung mit einer Wallet.
+        <br><br>
+        Der Unterschied zu Seite 1: Dort zählen nur Nutzer <b>mit eingetragener Wallet</b> — nur
+        die synchronisieren überhaupt. Hier zählt jeder Besuch, auch wer nur den Chart ansieht.
+        Die beiden Zahlen werden nie übereinstimmen.
+      </div>
+    </section>
   </div>
+
+  <div class="dots">
+    <button class="dot-nav active" data-page="0" aria-label="Seite 1: Adressen"></button>
+    <button class="dot-nav" data-page="1" aria-label="Seite 2: Besucher"></button>
+  </div>
+
   <div class="refresh"><span class="dot"></span><span id="stamp">Stand: ${new Date().toLocaleString('de-DE', { timeZone: 'UTC' })} UTC · aktualisiert live</span></div>
 <script>
   const REFRESH_MS = 1000;
   let latestStats = null;
 
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el && el.textContent !== String(val)) el.textContent = val == null ? '—' : val;
+  }
+
+  function deDate(isoDay) {
+    if (!isoDay) return null;
+    const p = isoDay.split('-');
+    return p[2] + '.' + p[1] + '.' + p[0];
+  }
+
   function renderSelected() {
     if (!latestStats) return;
-    const activePeriod = document.getElementById('sel-active').value;
-    const requestsPeriod = document.getElementById('sel-requests').value;
-    const activeMap = { '1d': latestStats.activeLast1d, '7d': latestStats.activeLast7d, '30d': latestStats.activeLast30d };
-    const requestsMap = { '1d': latestStats.totalRequestsLast1d, '7d': latestStats.totalRequestsLast7d, '30d': latestStats.totalRequestsLast30d };
-    const activeVal = activeMap[activePeriod];
-    const requestsVal = requestsMap[requestsPeriod];
-    const activeForAvg = activeMap[requestsPeriod];
-    const avgVal = activeForAvg > 0 ? Math.round((requestsVal / activeForAvg) * 10) / 10 : null;
+    // Aktive Adressen und Requests stehen beide fest auf 24h -- die Gesamtzahl steht ohnehin
+    // in "Adressen insgesamt". Der Durchschnitt muss denselben Zeitraum benutzen, sonst teilt
+    // man eine 24-Stunden-Summe durch die 30-Tage-Adressen.
+    const requestsVal = latestStats.totalRequestsLast1d;
+    const avgVal = latestStats.activeLast1d > 0
+      ? Math.round((requestsVal / latestStats.activeLast1d) * 10) / 10 : null;
+    const trackingHint = latestStats.trackingSince
+      ? 'seit ' + deDate(latestStats.trackingSince) + ' · ' + latestStats.trackingSinceDays + ' Tage'
+      : 'noch keine Aufzeichnung';
 
-    setText('v-active', activeVal);
+    setText('v-since', trackingHint);
+    setText('h-total', trackingHint);
+    setText('v-active', latestStats.activeLast1d);
     setText('v-requests', requestsVal);
     setText('v-total', latestStats.totalUniqueAddressesEver);
     setText('v-returning', latestStats.returningLast30d);
     setText('v-rate', latestStats.retentionRate30d == null ? '—' : latestStats.retentionRate30d + '%');
     setText('v-avgreq', avgVal == null ? '—' : avgVal);
     setText('v-depth-base', latestStats.activeLast30d);
+    setText('v-vis1', latestStats.visitorsLast1d);
+    setText('v-vis7', latestStats.visitorsLast7d);
+    setText('v-vis30', latestStats.visitorsLast30d);
+    setText('v-vistotal', latestStats.visitorsTotal);
+    setText('h-vistotal', latestStats.visitorsSince ? 'seit ' + deDate(latestStats.visitorsSince) : 'noch keine Aufzeichnung');
     (latestStats.engagementDepth || []).forEach(row => {
       const bar = document.getElementById('v-depth-bar-' + row.minDays);
       if (bar) bar.style.width = (row.pct == null ? 0 : row.pct) + '%';
       setText('v-depth-pct-' + row.minDays, row.pct == null ? '—' : row.pct + '%');
       setText('v-depth-count-' + row.minDays, '(' + row.count + ')');
     });
-  }
-
-  function setText(id, val) {
-    const el = document.getElementById(id);
-    if (el && el.textContent !== String(val)) el.textContent = val == null ? '—' : val;
   }
 
   async function refreshStats() {
@@ -1991,10 +1792,21 @@ async function handleStats(request, env) {
       renderSelected();
       document.getElementById('stamp').textContent =
         'Stand: ' + new Date().toLocaleTimeString('de-DE', { timeZone: 'UTC' }) + ' UTC · aktualisiert live';
-    } catch (e) { /* nächster Tick versucht es erneut, kein Grund für eine Fehlermeldung */ }
+    } catch (e) { /* nächster Tick versucht es erneut */ }
   }
-  document.getElementById('sel-active').addEventListener('change', renderSelected);
-  document.getElementById('sel-requests').addEventListener('change', renderSelected);
+
+  // Wischen zwischen den Seiten: Die Punkte unten springen, und beim Wischen wandert der
+  // aktive Punkt mit.
+  const pager = document.getElementById('pager');
+  const dots = [...document.querySelectorAll('.dot-nav')];
+  dots.forEach(d => d.addEventListener('click', () => {
+    pager.scrollTo({ left: pager.clientWidth * Number(d.dataset.page), behavior: 'smooth' });
+  }));
+  pager.addEventListener('scroll', () => {
+    const i = Math.round(pager.scrollLeft / Math.max(1, pager.clientWidth));
+    dots.forEach((d, j) => d.classList.toggle('active', j === i));
+  }, { passive: true });
+
   setInterval(refreshStats, REFRESH_MS);
 </script>
 </body>
@@ -2006,7 +1818,1030 @@ async function handleStats(request, env) {
   });
 }
 
-const MEMOLESS_UPSTREAM = 'https://api.thorchain.org/memoless/api/v1';
+const DEX_PROTOCOLS = [
+  { key: 'chainflip', name: 'Chainflip', slug: 'chainflip' },
+  { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents' },
+];
+const LLAMA_BASES = ['https://api.llama.fi'];
+
+function tagesSchluessel(sekunden) {
+  return new Date(sekunden * 1000).toISOString().slice(0, 10); 
+}
+
+async function fetchLlamaSummary(slug) {
+  
+  return fetchFromBases(LLAMA_BASES, `/summary/dexs/${slug}?excludeTotalDataChartBreakdown=true`, { timeoutMs: 12000 });
+}
+
+async function fetchLlamaFees(slug) {
+  return fetchFromBases(LLAMA_BASES, `/summary/fees/${slug}?excludeTotalDataChartBreakdown=true&dataType=dailyFees`, { timeoutMs: 12000 });
+}
+
+async function fetchLlamaSupplySide(slug) {
+  return fetchFromBases(LLAMA_BASES, `/summary/fees/${slug}?excludeTotalDataChartBreakdown=true&dataType=dailySupplySideRevenue`, { timeoutMs: 12000 });
+}
+
+let midgardSplitRoh = null;
+function merkeSplit(intervalle) {
+  let bonding = 0, liquidity = 0;
+  for (const iv of intervalle) {
+    const b = Number(iv.bondingEarnings), l = Number(iv.liquidityEarnings);
+    if (Number.isFinite(b)) bonding += b;
+    if (Number.isFinite(l)) liquidity += l;
+  }
+  const summe = bonding + liquidity;
+  midgardSplitRoh = summe > 0
+    ? { nodesPct: Math.round(bonding / summe * 1000) / 10, poolsPct: Math.round(liquidity / summe * 1000) / 10 }
+    : null;
+}
+
+async function fetchMidgardDailyFees(tage) {
+  const json = await fetchFromBases(getMidgardBases(), `/history/earnings?interval=day&count=${Math.min(100, tage + 2)}`, { timeoutMs: 12000 });
+  const intervalle = (json && json.intervals) || [];
+  merkeSplit(intervalle);
+  return intervalle.map((iv) => {
+    const feesRune = Number(iv.liquidityFees) / 1e8;
+    const preis = parseFloat(iv.runePriceUSD);
+    const ende = parseInt(iv.endTime, 10);
+    const usd = Number.isFinite(feesRune) && Number.isFinite(preis) ? feesRune * preis : 0;
+    return { day: tagesSchluessel(ende - 1), volume: usd };
+  });
+}
+
+async function fetchMidgardDailyVolume(tage) {
+  const json = await fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&count=${Math.min(100, tage + 2)}`, { timeoutMs: 12000 });
+  const intervalle = (json && json.intervals) || [];
+  return intervalle.map((iv) => {
+    
+    const vol = parseFloat(iv.totalVolumeUSD) / 1e2;
+    
+    const ende = parseInt(iv.endTime, 10);
+    return { day: tagesSchluessel(ende - 1), volume: Number.isFinite(vol) ? vol : 0 };
+  });
+}
+
+function summiereTage(reihe, tage, letzterTag) {
+  
+  const grenze = new Date(letzterTag + 'T00:00:00.000Z').getTime() - (tage - 1) * 86400000;
+  let summe = 0, gezaehlt = 0;
+  for (const e of reihe) {
+    const t = new Date(e.day + 'T00:00:00.000Z').getTime();
+    if (t >= grenze && e.day <= letzterTag) { summe += e.volume; gezaehlt++; }
+  }
+  return { summe, tage: gezaehlt };
+}
+
+async function baueDexVergleich() {
+  const roh = await Promise.allSettled([
+    ...DEX_PROTOCOLS.map((p) => fetchLlamaSummary(p.slug)),
+    fetchMidgardDailyVolume(30),
+    fetchMidgardDailyFees(30),
+    ...DEX_PROTOCOLS.map((p) => fetchLlamaFees(p.slug)),
+    ...DEX_PROTOCOLS.map((p) => fetchLlamaSupplySide(p.slug)),
+  ]);
+
+  const reihen = {};
+  const fehler = {};
+  DEX_PROTOCOLS.forEach((p, i) => {
+    const r = roh[i];
+    if (r.status !== 'fulfilled' || !r.value) {
+      fehler[p.key] = r.reason?.message || String(r.reason || 'NO_DATA');
+      return;
+    }
+    const chart = Array.isArray(r.value.totalDataChart) ? r.value.totalDataChart : [];
+    
+    const proTag = new Map();
+    for (const eintrag of chart) {
+      if (!Array.isArray(eintrag) || eintrag.length < 2) continue;
+      const tag = tagesSchluessel(Number(eintrag[0]));
+      const v = Number(eintrag[1]);
+      if (!Number.isFinite(v)) continue;
+      proTag.set(tag, (proTag.get(tag) || 0) + v);
+    }
+    reihen[p.key] = [...proTag.entries()].map(([day, volume]) => ({ day, volume })).sort((a, b) => a.day < b.day ? -1 : 1);
+  });
+
+  const midgardReihe = roh[DEX_PROTOCOLS.length].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length].value : null;
+  const midgardFees = roh[DEX_PROTOCOLS.length + 1].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 1].value : null;
+  const llamaFees = {}, llamaSupply = {};
+  DEX_PROTOCOLS.forEach((p, i) => {
+    const r = roh[DEX_PROTOCOLS.length + 2 + i];
+    if (r && r.status === 'fulfilled' && r.value) llamaFees[p.key] = r.value;
+    const r2 = roh[DEX_PROTOCOLS.length + 2 + DEX_PROTOCOLS.length + i];
+    if (r2 && r2.status === 'fulfilled' && r2.value) llamaSupply[p.key] = r2.value;
+  });
+
+  if (midgardReihe && midgardReihe.length) reihen['thorchain'] = midgardReihe.slice().sort((a, b) => a.day < b.day ? -1 : 1);
+  else fehler['thorchain'] = 'MIDGARD_NO_DATA';
+
+  const heute = tagesSchluessel(Math.floor(Date.now() / 1000));
+  const letzteTage = Object.values(reihen).filter((r) => r.length)
+    .map((r) => { const nurAbgeschlossen = r.filter((e) => e.day < heute); return nurAbgeschlossen.length ? nurAbgeschlossen[nurAbgeschlossen.length - 1].day : null; })
+    .filter(Boolean);
+  const stichtag = letzteTage.length ? letzteTage.sort()[0] : null;
+
+  const ALLE = [{ key: 'thorchain', name: 'THORChain', source: 'midgard' },
+    ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name, source: 'defillama' }))];
+  const protokolle = ALLE.map((p) => {
+    const reihe = reihen[p.key] || [];
+    if (!reihe.length || !stichtag) {
+      return { key: p.key, name: p.name, source: p.source, error: fehler[p.key] || 'NO_DATA', d1: null, d7: null, d30: null };
+    }
+    const d1 = summiereTage(reihe, 1, stichtag);
+    const d7 = summiereTage(reihe, 7, stichtag);
+    const d30 = summiereTage(reihe, 30, stichtag);
+    return {
+      key: p.key, name: p.name, source: p.source,
+      d1: d1.summe, d7: d7.summe, d30: d30.summe,
+      days1: d1.tage, days7: d7.tage, days30: d30.tage,
+      
+      series: reihe.filter((e) => e.day <= stichtag).slice(-30),
+      error: null,
+    };
+  });
+
+  const alsReihe = (j) => {
+    const chart = j && Array.isArray(j.totalDataChart) ? j.totalDataChart : [];
+    if (!chart.length) return null;
+    const proTag = new Map();
+    for (const e of chart) {
+      if (!Array.isArray(e) || e.length < 2) continue;
+      const tag = tagesSchluessel(Number(e[0]));
+      const v = Number(e[1]);
+      if (Number.isFinite(v)) proTag.set(tag, (proTag.get(tag) || 0) + v);
+    }
+    return [...proTag.entries()].map(([day, volume]) => ({ day, volume })).sort((a, b) => a.day < b.day ? -1 : 1);
+  };
+  
+  const feeReihen = {}, feeAllReihen = {};
+  if (midgardFees && midgardFees.length) feeReihen['thorchain'] = midgardFees;
+  for (const p of DEX_PROTOCOLS) {
+    const supply = alsReihe(llamaSupply[p.key]);
+    if (supply) feeReihen[p.key] = supply;
+    const alles = alsReihe(llamaFees[p.key]);
+    if (alles) feeAllReihen[p.key] = alles;
+  }
+  for (const p of protokolle) {
+    
+    const j = llamaFees[p.key];
+    if (j) p.feeMethodology = {
+      text: (j.methodology && (j.methodology.Fees || j.methodology.fees || j.methodology.Revenue)) || null,
+      url: j.methodologyURL || null,
+    };
+    const reihe = feeReihen[p.key];
+    if (reihe && reihe.length && stichtag) {
+      const f1 = summiereTage(reihe, 1, stichtag), f7 = summiereTage(reihe, 7, stichtag), f30 = summiereTage(reihe, 30, stichtag);
+      p.fees = { d1: f1.summe, d7: f7.summe, d30: f30.summe, days1: f1.tage, days7: f7.tage, days30: f30.tage };
+      p.feeSeries = reihe.filter((e) => e.day <= stichtag).slice(-30);
+      p.feeBasis = p.key === 'thorchain' ? 'midgard-liquidityFees' : 'defillama-supplySide';
+    } else { p.fees = null; p.feeBasis = null; }
+    
+    const alles = feeAllReihen[p.key];
+    if (alles && alles.length && stichtag) {
+      const a1 = summiereTage(alles, 1, stichtag), a7 = summiereTage(alles, 7, stichtag), a30 = summiereTage(alles, 30, stichtag);
+      p.feesAll = { d1: a1.summe, d7: a7.summe, d30: a30.summe };
+    } else p.feesAll = null;
+    if (!p.fees) continue;
+  }
+
+  return {
+    asOfDay: stichtag,            
+    sources: { thorchain: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
+    
+    thorNodePoolSplit: midgardSplitRoh,
+    protocols: protokolle,
+    fetchedAt: Date.now(),
+  };
+}
+
+let dexVolumeCache = null; 
+const DEX_VOLUME_CACHE_MS = 10 * 60 * 1000; 
+
+function baueDexVergleichCached() {
+  if (dexVolumeCache && Date.now() - dexVolumeCache.atMs < DEX_VOLUME_CACHE_MS) return dexVolumeCache.promise;
+  const promise = baueDexVergleich();
+  promise.catch(() => { if (dexVolumeCache && dexVolumeCache.promise === promise) dexVolumeCache = null; });
+  dexVolumeCache = { promise, atMs: Date.now() };
+  return promise;
+}
+
+const DEX_VOLUME_STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+async function handleDexVolume(request, env, ctx) {
+  try {
+    const daten = await baueDexVergleichCached();
+    const brauchbar = daten.protocols.some((p) => p.d1 != null);
+    if (brauchbar) {
+      const schreiben = env.DB.prepare(
+        `INSERT INTO dex_volume_cache (id, payload, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+      ).bind(JSON.stringify(daten), Date.now()).run().catch((e) => {
+        console.warn('[rune-rewards-backend] dex_volume_cache-Schreiben fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
+      });
+      if (ctx && ctx.waitUntil) ctx.waitUntil(schreiben); else await schreiben;
+      return json({ ...daten, stale: false }, env);
+    }
+    throw new Error('ALL_PROTOCOLS_FAILED');
+  } catch (e) {
+    console.warn('[rune-rewards-backend] /dex-volume fehlgeschlagen, versuche Stale-Cache:', e?.message || String(e));
+    try {
+      const row = await env.DB.prepare('SELECT payload, updated_at FROM dex_volume_cache WHERE id = 1').first();
+      if (row && row.payload && (Date.now() - row.updated_at) < DEX_VOLUME_STALE_MAX_AGE_MS) {
+        return json({ ...JSON.parse(row.payload), stale: true, staleSince: row.updated_at }, env);
+      }
+    } catch (e2) {  }
+    return json({ error: 'DEX_VOLUME_UNAVAILABLE', message: e?.message || String(e) }, env, 503);
+  }
+}
+
+const COINGECKO_BASES = ['https://api.coingecko.com/api/v3'];
+
+const CRYPTOCOMPARE_BASES = ['https://min-api.cryptocompare.com'];
+
+async function fetchRuneOhlcMax() {
+  
+  try {
+    const j = await fetchFromBases(CRYPTOCOMPARE_BASES, '/data/v2/histoday?fsym=RUNE&tsym=USD&allData=true', { timeoutMs: 15000 });
+    const reihe = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
+    if (reihe && reihe.length) {
+      const kerzen = reihe
+        .filter((k) => k && Number(k.close) > 0 && Number(k.open) > 0)
+        .map((k) => [Number(k.time) * 1000, Number(k.open), Number(k.high), Number(k.low), Number(k.close)])
+        .filter((k) => k.every(Number.isFinite))
+        .sort((a, b) => a[0] - b[0]);
+      if (kerzen.length > 100) return kerzen;
+    }
+  } catch (e) {
+    console.warn('[rune-rewards-backend] /rune-history: CryptoCompare nicht erreichbar:', e?.message || String(e));
+  }
+
+  try {
+    const roh = await fetchFromBases(COINGECKO_BASES, '/coins/thorchain/ohlc?vs_currency=usd&days=max', { timeoutMs: 15000 });
+    if (Array.isArray(roh) && roh.length) {
+      const kerzen = roh
+        .filter((k) => Array.isArray(k) && k.length >= 5 && Number.isFinite(Number(k[0])) && Number(k[4]) > 0)
+        .map((k) => [Number(k[0]), Number(k[1]), Number(k[2]), Number(k[3]), Number(k[4])])
+        .sort((a, b) => a[0] - b[0]);
+      if (kerzen.length) return kerzen;
+    }
+  } catch (e) {  }
+
+  const mc = await fetchFromBases(COINGECKO_BASES, '/coins/thorchain/market_chart?vs_currency=usd&days=max&interval=daily', { timeoutMs: 15000 });
+  const preise = mc && Array.isArray(mc.prices) ? mc.prices : null;
+  if (!preise || !preise.length) throw new Error('COINGECKO_NO_PRICES');
+  const proTag = new Map();
+  for (const p of preise) {
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const ms = Number(p[0]), kurs = Number(p[1]);
+    if (!Number.isFinite(ms) || !(kurs > 0)) continue;
+    proTag.set(Date.parse(new Date(ms).toISOString().slice(0, 10) + 'T00:00:00.000Z'), kurs);
+  }
+  const tage = [...proTag.entries()].sort((a, b) => a[0] - b[0]);
+  if (!tage.length) throw new Error('COINGECKO_NO_DAYS');
+  return tage.map(([ms, schluss], i) => {
+    const open = i > 0 ? tage[i - 1][1] : schluss;
+    return [ms, open, Math.max(open, schluss), Math.min(open, schluss), schluss];
+  });
+}
+
+let runeHistoryCache = null; 
+const RUNE_HISTORY_CACHE_MS = 24 * 60 * 60 * 1000;
+
+async function handleRuneHistory(request, env, ctx) {
+  try {
+    if (!runeHistoryCache || Date.now() - runeHistoryCache.atMs > RUNE_HISTORY_CACHE_MS) {
+      const promise = fetchRuneOhlcMax();
+      promise.catch(() => { if (runeHistoryCache && runeHistoryCache.promise === promise) runeHistoryCache = null; });
+      runeHistoryCache = { promise, atMs: Date.now() };
+    }
+    const candles = await runeHistoryCache.promise;
+    if (!candles.length) throw new Error('COINGECKO_EMPTY');
+    const payload = { source: candles.length > 100 ? 'cryptocompare' : 'coingecko', candles, firstMs: candles[0][0], lastMs: candles[candles.length - 1][0] };
+    const schreiben = env.DB.prepare(
+      `INSERT INTO rune_history_cache (id, payload, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+    ).bind(JSON.stringify(payload), Date.now()).run().catch((e) => {
+      console.warn('[rune-rewards-backend] rune_history_cache-Schreiben fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
+    });
+    if (ctx && ctx.waitUntil) ctx.waitUntil(schreiben); else await schreiben;
+    return json({ ...payload, stale: false }, env);
+  } catch (e) {
+    console.warn('[rune-rewards-backend] /rune-history fehlgeschlagen, versuche Cache:', e?.message || String(e));
+    try {
+      const row = await env.DB.prepare('SELECT payload, updated_at FROM rune_history_cache WHERE id = 1').first();
+      
+      if (row && row.payload) return json({ ...JSON.parse(row.payload), stale: true, staleSince: row.updated_at }, env);
+    } catch (e2) {  }
+    return json({ error: 'RUNE_HISTORY_UNAVAILABLE', message: e?.message || String(e) }, env, 503);
+  }
+}
+
+// ── ENTWICKLUNGSSTAND VON THORCHAIN (GitLab + Netz-Version) ──────────────────
+//
+// THORNode wird auf GitLab entwickelt; das GitHub-Repo ist nur ein Spiegel. Hier werden
+// Releases, Merge Requests und Meilensteine geholt, auf das Noetige eingedampft und fuer
+// 15 Minuten abgelegt.
+//
+// Warum ueber den Worker und nicht direkt aus dem Browser: sonst teilt sich jeder Besucher
+// GitLabs Rate-Limit nach IP, und wir waeren darauf angewiesen, dass GitLab fuer diese
+// Endpunkte CORS erlaubt. So gibt es genau EINEN Abrufer, und der Token bleibt serverseitig.
+//
+// Dazu kommt die im Netz AKTIVE Version aus /thorchain/version. THORChain schaltet eine neue
+// Version erst frei, wenn die Supermajoritaet der Nodes sie faehrt -- die Luecke zwischen
+// "im Repo fertig" und "im Netz live" ist die eigentliche Aussage dieser Seite.
+const GITLAB_API = 'https://gitlab.com/api/v4/projects/thorchain%2Fthornode';
+// SCHEMA-VERSION DES ZWISCHENSPEICHERS.
+//
+// Gemeldet: nach dem Deploy stand ueberall "nichts erfasst" und das stabile Release war leer.
+// Ursache: der Cache haelt die Antwort 15 Minuten -- nach einem Worker-Update wurde also
+// weiter die ALTE Nutzlast ausgeliefert, der die neuen Felder schlicht fehlten. Die Version
+// wird mitgespeichert; passt sie nicht, gilt der Eintrag als ungueltig und wird neu geholt.
+// Bei jeder Aenderung an der Form von baueThornodeTimeline hochzaehlen.
+const TIMELINE_SCHEMA = 13;
+const TIMELINE_FRESH_MS = 15 * 60 * 1000;
+const TIMELINE_STALE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function gitlabJson(env, pfad) {
+  // Der Token ist OPTIONAL. Ohne ihn funktioniert alles, nur mit knapperem Limit -- lege in
+  // den Worker-Variablen GITLAB_TOKEN an (Read-only, Scope read_api), wenn es eng wird.
+  const tok = env && env.GITLAB_TOKEN;
+  const res = await fetchWithTimeout(`${GITLAB_API}${pfad}`, {
+    // 8 s statt 12: Alle Seiten laufen jetzt parallel, die Gesamtdauer ist also die der
+    // langsamsten Einzelanfrage. Ein haengender Aufruf darf die ganze Antwort nicht ueber das
+    // Zeitlimit des Browsers schieben.
+    timeoutMs: 8000,
+    headers: {
+      'x-client-id': 'rune-rewards-backend',
+      ...(tok ? { 'PRIVATE-TOKEN': tok } : {}),
+    },
+  });
+  if (!res.ok) throw new Error(`GITLAB_HTTP_${res.status} (${pfad})`);
+  return res.json();
+}
+
+const alsMs = (s) => { const t = s ? Date.parse(s) : NaN; return Number.isFinite(t) ? t : null; };
+
+// Release-Kandidaten (rc/beta/alpha) sind KEINE fertigen Releases. Sie als "neuestes Release"
+// dem Netz gegenueberzustellen meldete faelschlich "gebaut, noch nicht live", obwohl das Netz
+// auf dem neuesten stabilen Stand lief.
+const istVorab = (v) => /-(rc|beta|alpha|pre)/i.test(String(v || ''));
+
+// ── RELEASE-MERGE-REQUESTS ─────────────────────────────────────────────────
+//
+// Das staerkste Signal ueberhaupt, und es ging bisher in der MR-Liste unter: Wenn ein MR
+// einen Zweig wie "mainnet-3.20.3" nach "mainnet" bringt, wird GERADE ein Release ausgerollt.
+// Beispiel aus dem Repo: !5100 "Release 3.20.3 — Bifrost-only patch", offen, mainnet-3.20.3
+// -> mainnet.
+//
+// Erkannt wird ueber drei Wege, weil nicht jeder Release-MR alle erfuellt:
+//   Zielzweig mainnet/stagenet  -- der zuverlaessigste
+//   Quellzweig mainnet-X.Y.Z    -- greift auch, wenn das Ziel mal abweicht
+//   Titel "Release X.Y.Z"       -- greift, wenn die Zweige anders heissen
+function istReleaseMr(m) {
+  const ziel = String((m && m.target_branch) || '');
+  const titel = String((m && m.title) || '');
+  // NUR das ZIEL entscheidet. Die frueheren Regeln ueber den Quellzweig waren zu weit:
+  // "release-3.18-stagenet-prep -> develop" ist Vorbereitung, kein Ausrollen, wurde aber als
+  // Release erkannt und stand dann als offener MR von vor 128 Tagen ganz oben. Ausgerollt
+  // wird ausschliesslich NACH mainnet oder stagenet.
+  if (/^(mainnet|stagenet)$/i.test(ziel)) return true;
+  // Ausnahme: ein ausdruecklich so betitelter Release-MR, auch wenn er woanders hin geht.
+  if (/^release[\s:-]+v?\d+\.\d+\.\d+/i.test(titel)) return true;
+  return false;
+}
+
+function versionAus(m) {
+  const quellen = [(m && m.source_branch) || '', (m && m.title) || ''];
+  for (const q of quellen) {
+    const t2 = String(q).match(/(\d+\.\d+\.\d+(?:-[a-z0-9.]+)?)/i);
+    if (t2) return t2[1];
+  }
+  return null;
+}
+
+// RELEASE-NOTIZEN AUS DER MR-BESCHREIBUNG.
+//
+// Der Text eines Release-MRs enthaelt das, was den Leser eigentlich interessiert: eine
+// Tabelle "| MR | Fix |" mit den enthaltenen Aenderungen, dazu ein bis zwei Saetze und der
+// Meilenstein. Das stand bisher nur auf GitLab.
+//
+// Bewusst keine echte Markdown-Verarbeitung -- nur Tabellenzeilen und Aufzaehlungen werden
+// herausgezogen. Was dem Muster nicht entspricht, landet im Vorspann statt verloren zu gehen.
+function releaseNotizen(beschreibung) {
+  const zeilen = String(beschreibung || '').split('\n');
+  const enthalten = [];
+  const vorspann = [];
+  let meilenstein = null;
+  for (const roh of zeilen) {
+    const z = roh.trim();
+    if (!z) continue;
+    const ms = z.match(/milestone\s+([\w.\-]+)/i);
+    if (ms && !meilenstein) meilenstein = ms[1];
+    if (z.startsWith('|')) {
+      const zellen = z.replace(/^\||\|$/g, '').split('|').map((x) => x.trim());
+      if (!zellen.length) continue;
+      if (zellen.every((x) => /^:?-{2,}:?$/.test(x))) continue;      // Trennzeile
+      if (/^(mr|fix|change|description)$/i.test(zellen[0])) continue; // Kopfzeile
+      const nr = (zellen[0].match(/!(\d+)/) || [])[1] || null;
+      const text = String(zellen[1] || zellen[0]).replace(/[`*]/g, '').trim();
+      if (text) enthalten.push({ mr: nr, text: text.slice(0, 180) });
+      continue;
+    }
+    if (/^[-*+]\s+/.test(z)) {
+      const text = z.replace(/^[-*+]\s+/, '').replace(/[`*]/g, '').trim();
+      const nr = (z.match(/!(\d+)/) || [])[1] || null;
+      if (text) enthalten.push({ mr: nr, text: text.slice(0, 180) });
+      continue;
+    }
+    if (/^#/.test(z)) continue;
+    if (vorspann.join(' ').length < 220) vorspann.push(z.replace(/[`*]/g, ''));
+  }
+  return {
+    vorspann: vorspann.join(' ').slice(0, 260) || null,
+    meilenstein,
+    enthalten: enthalten.slice(0, 25),
+    gesamt: enthalten.length,
+  };
+}
+
+function mrKompakt(m) {
+  return {
+    iid: m && m.iid,
+    // Fuer die Release-Erkennung -- ohne die Zweige laesst sich ein Release-MR nicht von
+    // einem beliebigen Feature-MR unterscheiden.
+    ziel: (m && m.target_branch) || null,
+    quelle: (m && m.source_branch) || null,
+    zustand: (m && m.state) || null,
+    release: istReleaseMr(m) ? (versionAus(m) || true) : null,
+    erstelltMs: alsMs(m && m.created_at),
+    titel: titelKlar((m && m.title) || ''),
+    thema: themaVon((m && m.title) || ''),
+    beobachtet: beobachtetVon((m && m.title) || ''),
+    rauschen: istRauschen((m && m.title) || ''),
+    autor: (m && m.author && m.author.name) || null,
+    datumMs: alsMs((m && (m.merged_at || m.updated_at)) || null),
+    entwurf: !!(m && (m.draft || m.work_in_progress)),
+    url: (m && m.web_url) || null,
+  };
+}
+
+// Mehrere Seiten holen. Eine einzige Seite mit 20 Eintraegen deckte nur wenige Tage ab --
+// gemeldet: "es sind eindeutig zu wenig Updates, jeden Tag passieren Sachen".
+// ALLE SEITEN GLEICHZEITIG, nicht nacheinander.
+//
+// Hier lag die eigentliche Regression: Die Schleife holte Seite 1, dann 2, dann 3 -- jede mit
+// 12 s Zeitlimit, also bis zu 36 s allein fuer die MRs. Der Browser bricht nach 15 s ab, und
+// die Seite meldete "nicht verfuegbar". Vorher gab es nur vier parallele Aufrufe, entsprechend
+// schnell. Da die Seitenzahl ohnehin fest ist, kostet paralleles Holen nichts und die Dauer
+// faellt auf die einer einzigen Anfrage.
+async function gitlabSeitenParallel(env, pfadFuer, seiten) {
+  const roh = await Promise.allSettled(
+    Array.from({ length: seiten }, (_, i) => gitlabJson(env, pfadFuer(i + 1)))
+  );
+  const out = [];
+  // DOPPELTE HERAUSFILTERN. Beim parallelen Holen werden alle Seiten gleichzeitig angefragt;
+  // aendert sich die Liste in diesem Moment (ein neuer MR/Commit kommt dazu), verschiebt sich
+  // der Seitenschnitt und derselbe Eintrag kann auf zwei Seiten liegen. Sequenziell war das
+  // unwahrscheinlicher, parallel ist es ein echtes Rennen -- und doppelte Eintraege wuerden
+  // sowohl die Liste als auch die Zaehlung je Release verfaelschen.
+  const gesehen = new Set();
+  for (const r of roh) {
+    if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue; // gescheiterte Seite ueberspringen
+    for (const e of r.value) {
+      const id = e && (e.id != null ? 'i' + e.id : (e.iid != null ? 'm' + e.iid : (e.short_id || e.sha || null)));
+      if (id) {
+        if (gesehen.has(id)) continue;
+        gesehen.add(id);
+      }
+      out.push(e);
+    }
+  }
+  return out;
+}
+
+function gitlabMrSeiten(env, state, seiten) {
+  return gitlabSeitenParallel(env,
+    (s) => `/merge_requests?state=${state}&order_by=updated_at&sort=desc&per_page=100&page=${s}`,
+    seiten);
+}
+
+// COMMITS AUF develop.
+//
+// Gemeldet: "da wurde vor 22 Minuten etwas geaendert, suchst du richtig?" -- nein, tat ich
+// nicht. Releases, Tags, MRs und Meilensteine sagen nichts ueber die TAEGLICHE Bewegung:
+// gearbeitet wird in Commits auf dem Entwicklungszweig (bei THORNode heisst der `develop`,
+// die CI laeuft auf develop/stagenet/mainnet). Ein MR wird vielleicht alle paar Tage gemergt,
+// ein Commit faellt mehrmals taeglich. Ohne diesen Aufruf war die Seite strukturell blind
+// fuer genau das, was gefragt war.
+const DEV_BRANCH = 'develop';
+
+function gitlabCommits(env, seiten) {
+  return gitlabSeitenParallel(env,
+    (s) => `/repository/commits?ref_name=${DEV_BRANCH}&per_page=100&page=${s}`,
+    seiten);
+}
+
+// ── EINORDNUNG FUER LESER, DIE NICHT ENTWICKELN ────────────────────────────
+//
+// Gemeldet: "fasse die wichtigsten Sachen zusammen, das versteht sonst keiner". Rohtitel wie
+// "bifrost: guard against nil utxo" sagen einem Investor nichts. Hier werden sie ueber
+// Stichwoerter in Themen einsortiert und von Konventions-Praefixen befreit.
+//
+// WICHTIG, WAS DAS IST UND WAS NICHT: eine Stichwort-Heuristik, kein Textverstaendnis. Sie
+// liegt bei eindeutigen Titeln richtig und bei kreativen daneben. Deshalb wird nichts
+// weggeworfen -- alles ohne Treffer landet in "sonstiges" und bleibt sichtbar.
+const THEMEN = [
+  { key: 'handel',  re: /\b(swap|quote|slip|slippage|fee|gebuehr|price|trade|order|streaming|affiliate)\b/i },
+  // Die neuen Ketten gehoeren hier ausdruecklich hinein: ohne "monero"/"zcash"/"frost" landete
+  // ausgerechnet die XMR-Arbeit unter "Sonstiges", obwohl sie eine Chain-Anbindung ist.
+  { key: 'chains',  re: /\b(bifrost|chain|evm|utxo|btc|bitcoin|eth|ethereum|solana|sol|base|avax|bsc|doge|ltc|bch|xrp|gaia|atom|cosmos|client|rpc|scanner|monero|xmr|zcash|zec|frost|serai|tao|bittensor)\b/i },
+  { key: 'nodes',   re: /\b(node|churn|bond|validator|tss|keygen|keysign|jail|vault|asgard|yggdrasil|consensus|slash)\b/i },
+  { key: 'pools',   re: /\b(pool|liquidity|lp|savers|lending|loan|borrow|collateral|depth|rune)\b/i },
+  { key: 'fehler',  re: /\b(fix|bug|panic|nil|crash|revert|hotfix|regression|leak|deadlock)\b/i },
+  { key: 'tempo',   re: /\b(perf|performance|optimi[sz]|cache|speed|faster|memory|alloc|index)\b/i },
+  { key: 'wartung', re: /\b(test|tests|ci|lint|chore|docs|doc|bump|deps|dependency|refactor|cleanup|typo|changelog|makefile)\b/i },
+];
+
+// Reihenfolge zaehlt: "fix" gewinnt gegen "wartung", damit ein Bugfix im Testcode nicht als
+// Wartung durchgeht. Deshalb wird in dieser Liste von oben nach unten geprueft -- ausser bei
+// Wartung, die nur greift, wenn sonst nichts passt.
+// ── BEOBACHTETE THEMEN ("Highlights") ──────────────────────────────────────
+//
+// Auf Wunsch hervorgehoben: XMR (das wichtigste), ZEC, BLO, THORKit. Diese Arbeiten gehen
+// sonst zwischen hundert Commits unter, obwohl sie fuer einen Investor die eigentliche
+// Nachricht sind.
+//
+// Die Muster orientieren sich daran, wie im Repo TATSAECHLICH geschrieben wird, nicht am
+// Tickersymbol allein: Die Monero-Arbeit laeuft ueber FROST-Signaturen und den serai-Signer,
+// entsprechend heissen die Titel oft "frost" oder "serai" ohne das Wort XMR. Nur auf "xmr" zu
+// pruefen haette einen Grossteil davon verfehlt.
+//
+// prio bestimmt die Reihenfolge in der Anzeige (kleiner = weiter oben).
+const BEOBACHTET = [
+  { key: 'xmr',     prio: 1, re: /\b(xmr|monero|frost|serai|key.?image|ringct|subaddress)\b/i },
+  { key: 'zec',     prio: 2, re: /\b(zec|zcash|shielded|orchard|sapling|zip\d*)\b/i },
+  { key: 'thorkit', prio: 3, re: /\b(thorkit|thor-kit)\b/i },
+  // BLO: mir ist nicht bekannt, wofuer das steht. Bewusst ENG gefasst (nur als eigenes Wort
+  // oder Ticker), damit es nicht wahllos Treffer erzeugt. Sobald klar ist, was gemeint ist,
+  // gehoert hier das richtige Muster hin -- so, wie bei XMR auch frost/serai noetig waren.
+  { key: 'blo',     prio: 4, re: /\b(blo|\$blo)\b/i },
+];
+
+function beobachtetVon(titel) {
+  const s2 = String(titel || '');
+  for (const b of BEOBACHTET) if (b.re.test(s2)) return b.key;
+  return null;
+}
+
+function themaVon(titel) {
+  const s2 = String(titel || '');
+  // DAS PRAEFIX GEWINNT. Ohne das landete "test: extend swap sim tolerance" bei Handel,
+  // "chore: bump cosmos-sdk" bei Chains und "docs: fix typo" bei Fehlerbehebung -- die
+  // Stichwortsuche griff im Text, obwohl der Autor die Art der Aenderung vorne hingeschrieben
+  // hat. Wer sein Commit mit test:/chore:/docs: kennzeichnet, meint genau das.
+  const pre = s2.match(/^(feat|fix|chore|docs|test|refactor|perf|ci|build|style)(\([^)]*\))?\s*:/i);
+  if (pre) {
+    const k = pre[1].toLowerCase();
+    if (k === 'test' || k === 'chore' || k === 'docs' || k === 'ci' || k === 'build' || k === 'style' || k === 'refactor') return 'wartung';
+    if (k === 'perf') return 'tempo';
+    // feat/fix sagen nichts ueber den BEREICH -- dafuer zaehlt weiter der Text unten.
+  }
+  for (const th of THEMEN) {
+    if (th.key === 'wartung') continue;
+    if (th.re.test(s2)) return th.key;
+  }
+  const w = THEMEN.find((t) => t.key === 'wartung');
+  if (w.re.test(s2)) return 'wartung';
+  return 'sonstiges';
+}
+
+// "fix(bifrost): guard against nil utxo" -> "Guard against nil utxo"
+function titelKlar(roh) {
+  let x = String(roh || '').trim();
+  x = x.replace(/^(feat|fix|chore|docs|test|refactor|perf|ci|build|style)(\([^)]*\))?\s*:\s*/i, '');
+  x = x.replace(/^[a-z0-9_\-\/]{2,20}\s*:\s*/i, '');   // "bifrost: ", "x/thorchain: "
+  x = x.replace(/\s*\(!?\d+\)\s*$/, '');               // angehaengte MR-Nummer
+  if (x) x = x.charAt(0).toUpperCase() + x.slice(1);
+  return x.slice(0, 160);
+}
+
+// Reine Maschinen-Commits interessieren niemanden ausserhalb des Repos.
+const istRauschen = (t2) => /^(merge branch|merge remote|revert "merge|bump version|update changelog)/i.test(String(t2 || ''));
+
+function themenZaehlen(liste) {
+  const z = {};
+  for (const e of liste) z[e.thema] = (z[e.thema] || 0) + 1;
+  // Absteigend, damit der Schwerpunkt vorne steht.
+  return Object.entries(z).sort((a, b) => b[1] - a[1]).map(([key, n]) => ({ key, n }));
+}
+
+function commitKompakt(c) {
+  // title ist die erste Zeile der Commit-Nachricht -- genau die Kurzfassung, die hier zaehlt.
+  return {
+    sha: String((c && c.short_id) || '').slice(0, 12) || null,
+    titel: titelKlar(String((c && (c.title || c.message)) || '').split('\n')[0]),
+    thema: themaVon(String((c && (c.title || c.message)) || '')),
+    beobachtet: beobachtetVon(String((c && (c.title || c.message)) || '')),
+    rauschen: istRauschen(String((c && (c.title || c.message)) || '')),
+    autor: (c && (c.author_name)) || null,
+    datumMs: alsMs(c && (c.committed_date || c.created_at)),
+    url: (c && c.web_url) || null,
+  };
+}
+
+async function baueThornodeTimeline(env) {
+  const [relR, tagR, mergedR, offenR, meilenR, versionR, commitsR, netzR, blockR, poolsR] = await Promise.allSettled([
+    gitlabJson(env, '/releases?per_page=30'),
+    gitlabJson(env, '/repository/tags?per_page=40'),
+    // 3 Seiten = bis zu 300 gemergte MRs. Das deckt mehrere Monate ab und reicht, um jedem
+    // Release seinen Inhalt zuzuordnen.
+    gitlabMrSeiten(env, 'merged', 3),
+    gitlabMrSeiten(env, 'opened', 1),
+    gitlabJson(env, '/milestones?state=active&per_page=10'),
+    fetchFromBases(getThornodeBases(), '/thorchain/version'),
+    gitlabCommits(env, 2),
+    fetchFromBases(getThornodeBases(), '/thorchain/network'),
+    fetchFromBases(getThornodeBases(), '/thorchain/lastblock'),
+    fetchFromBases(getThornodeBases(), '/thorchain/pools'),
+  ]);
+
+  // Jede Teilquelle einzeln festhalten. Vorher verschwand ein Fehlschlag lautlos und die
+  // Seite meldete nur "nicht verfuegbar" -- ohne jeden Hinweis, WELCHE Abfrage gescheitert
+  // ist. Bei sieben GitLab-Aufrufen ist das nicht diagnostizierbar.
+  const fehler = [];
+  const w = (r, name) => {
+    if (r.status === 'fulfilled' && r.value) return r.value;
+    const grund = r.status === 'rejected' ? (r.reason?.message || String(r.reason)) : 'leer';
+    fehler.push(name + ': ' + String(grund).slice(0, 120));
+    return null;
+  };
+
+  // Releases bevorzugt aus /releases; wenn dort nichts steht (THORChain taggt nicht immer
+  // ueber die Release-Funktion), aus den Tags. Sonst bliebe die Hauptansicht leer.
+  let releases = [];
+  const rel = w(relR, 'releases');
+  if (Array.isArray(rel) && rel.length) {
+    releases = rel.map((r) => ({
+      version: r.tag_name || r.name || null,
+      datumMs: alsMs(r.released_at || r.created_at),
+      notiz: String(r.description || '').trim().slice(0, 400) || null,
+    }));
+  } else {
+    const tags = w(tagR, 'tags');
+    if (Array.isArray(tags)) {
+      releases = tags.map((t) => ({
+        version: t.name || null,
+        datumMs: alsMs(t.commit && (t.commit.created_at || t.commit.committed_date)),
+        notiz: String((t.release && t.release.description) || '').trim().slice(0, 400) || null,
+      }));
+    }
+  }
+  releases = releases.filter((r) => r.version).sort((a, b) => (b.datumMs || 0) - (a.datumMs || 0));
+
+  const merged = (w(mergedR, 'merged') || []).map(mrKompakt)
+    .filter((m) => m.datumMs)
+    .sort((a, b) => b.datumMs - a.datumMs);
+
+  // WAS STECKT IM UPDATE: jedem Release die MRs zuordnen, die zwischen dem VORIGEN Release und
+  // diesem gemergt wurden. Das ist der Inhalt der Version, ohne dass jemand Release-Notizen
+  // pflegen muss -- THORChain tut das nur sporadisch.
+  for (let i = 0; i < releases.length; i++) {
+    const bis = releases[i].datumMs;
+    const von = releases[i + 1] ? releases[i + 1].datumMs : 0;
+    if (!bis) { releases[i].aenderungen = []; releases[i].anzahl = 0; continue; }
+    const drin = merged.filter((m) => m.datumMs > von && m.datumMs <= bis);
+    releases[i].anzahl = drin.length;
+    // Fuer die Kurzfassung: Rauschen und reine Wartung raus, der Rest nach Thema gezaehlt.
+    // Die Gesamtzahl oben bleibt die ECHTE Zahl -- gekuerzt wird nur, was gezeigt wird.
+    const relevant = drin.filter((m) => !m.rauschen && m.thema !== 'wartung');
+    releases[i].themen = themenZaehlen(relevant)
+      .sort((a, b) => (a.key === 'sonstiges' ? 1 : 0) - (b.key === 'sonstiges' ? 1 : 0) || b.n - a.n);
+    // 6 fuer die Kurzansicht, aber 30 werden mitgeliefert -- sonst kann das Aufklappen von
+    // "+N weitere" nichts anzeigen, weil die Eintraege gar nicht erst beim Browser ankommen.
+    releases[i].kern = relevant.slice(0, 30);
+    releases[i].aenderungen = drin.filter((m) => !m.rauschen).slice(0, 25);
+    releases[i].vorab = istVorab(releases[i].version);
+  }
+
+  const ver = w(versionR, 'version');
+  const netzVersion = (ver && (ver.current || ver.next)) || null;
+  // Fuer den Vergleich zaehlt nur das neueste STABILE Release.
+  const neuestesStabil = releases.find((r) => !r.vorab) || null;
+  const neuesterKandidat = releases.find((r) => r.vorab) || null;
+  const kandidatIstNeuer = !!(neuesterKandidat && neuestesStabil
+    && (neuesterKandidat.datumMs || 0) > (neuestesStabil.datumMs || 0));
+
+  const meilen = w(meilenR, 'milestones');
+
+  // Offene Release-MRs zuerst (da passiert es gerade), danach die zuletzt gemergten.
+  //
+  // MIT ALTERSGRENZE. Ohne sie standen dort offene MRs von vor 128 Tagen und gemergte von vor
+  // 95 Tagen unter der Ueberschrift "Release wird ausgerollt" -- das Gegenteil der Aussage.
+  // Ein Release-MR, der seit drei Wochen offen ist, wird nicht gerade ausgerollt; er liegt.
+  const TAG = 24 * 60 * 60 * 1000;
+  const OFFEN_MAX = 21 * TAG;   // laenger offen = liegengeblieben, keine Nachricht mehr
+  const MERGED_MAX = 14 * TAG;  // laenger her = Geschichte, steht ohnehin in der Release-Liste
+  const offeneMrAlle = (w(offenR, 'opened') || []).map(mrKompakt);
+  const jetzt2 = Date.now();
+  // Die Beschreibung kommt in der MR-Liste bereits mit -- kein zusaetzlicher Abruf noetig.
+  const mitNotizen = (roh, offen) => (m) => {
+    const q = roh.find((x) => x && x.iid === m.iid);
+    return { ...m, offen, notizen: releaseNotizen(q && q.description) };
+  };
+  const rohOffen = w(offenR, 'opened') || [];
+  const rohMerged = w(mergedR, 'merged') || [];
+  const releaseMrs = [
+    ...offeneMrAlle
+      .filter((m) => m.release && m.datumMs && (jetzt2 - m.datumMs) <= OFFEN_MAX)
+      .map(mitNotizen(rohOffen, true)),
+    ...merged
+      .filter((m) => m.release && m.datumMs && (jetzt2 - m.datumMs) <= MERGED_MAX)
+      .slice(0, 2)
+      .map(mitNotizen(rohMerged, false)),
+  ].slice(0, 3);
+
+  // ── POOL-STATUS: DER EIGENTLICHE FORTSCHRITT ─────────────────────────────
+  //
+  // Code-Aenderungen zaehlen sagt nichts darueber, ob man etwas TAUSCHEN kann. Die 3.20
+  // aktivierte XMR und ZEC im Code -- ohne Pool ist trotzdem kein Handel moeglich, und
+  // genau das war Wochen nach dem Release noch der Fall, waehrend Schlagzeilen "live"
+  // meldeten. Die Kette beantwortet das eindeutig:
+  //
+  //   kein Eintrag         -- Pool noch nicht angelegt, nicht handelbar
+  //   Staged               -- angelegt, aber noch nicht freigeschaltet
+  //   Available            -- handelbar, Tiefe sagt wie gut
+  //
+  // Nur fuer die beobachteten Ketten; THORKit und BLO sind keine Ketten und bekommen nichts.
+  const POOL_KETTE = { xmr: 'XMR', zec: 'ZEC', tao: 'TAO' };
+  const poolListe = w(poolsR, 'pools');
+  const poolStatus = {};
+  if (Array.isArray(poolListe)) {
+    for (const [key, kette] of Object.entries(POOL_KETTE)) {
+      const pl = poolListe.find((x) => x && typeof x.asset === 'string' && x.asset.toUpperCase().startsWith(kette + '.'));
+      poolStatus[key] = pl
+        ? {
+            asset: String(pl.asset),
+            status: String(pl.status || ''),
+            // balance_rune kommt in 1e8-Einheiten wie ueberall bei THORChain.
+            tiefeRune: (Number(pl.balance_rune) || 0) / 1e8,
+          }
+        : null; // ausdruecklich null = geprueft und nicht vorhanden
+    }
+  }
+
+  // ── COUNTDOWN ────────────────────────────────────────────────────────────
+  //
+  // GitLab kennt KEIN Release-Datum -- es gibt dort schlicht kein Feld dafuer. Was es gibt,
+  // ist das Faelligkeitsdatum eines Meilensteins: ein Plan, kein Termin.
+  //
+  // Der belastbare Zeitpunkt kommt aus der Kette: THORChain schaltet eine neue Version beim
+  // CHURN frei, und next_churn_height gegen die aktuelle Blockhoehe ist eine harte Zahl.
+  // Bei ~6 s je Block ergibt das einen echten Countdown.
+  //
+  // WICHTIG fuer die Anzeige: Der Churn ist das FENSTER, in dem ein Update live gehen KANN --
+  // keine Zusage, dass es dann geschieht. Freigeschaltet wird erst, wenn die Supermajoritaet
+  // der Nodes die neue Version faehrt. Genauso muss es beschriftet werden.
+  const netz = w(netzR, 'network');
+  const bl = w(blockR, 'lastblock');
+  let jetztHoehe = 0;
+  try {
+    const arr = Array.isArray(bl) ? bl : (bl ? [bl] : []);
+    jetztHoehe = parseInt((arr[0] && arr[0].thorchain) || '0', 10) || 0;
+  } catch (e) { jetztHoehe = 0; }
+  const zielHoehe = Number(netz && netz.next_churn_height) || 0;
+  const BLOCK_MS = 6000;
+  let churn = null;
+  if (zielHoehe && jetztHoehe && zielHoehe > jetztHoehe) {
+    const bloecke = zielHoehe - jetztHoehe;
+    churn = {
+      jetztHoehe, zielHoehe, bloecke,
+      // Als Zeitpunkt, nicht als Restdauer: der Browser rechnet selbst herunter und bleibt
+      // auch dann richtig, wenn die Antwort 15 Minuten im Zwischenspeicher lag.
+      etaMs: Date.now() + bloecke * BLOCK_MS,
+      // Churn angehalten? Dann ist jeder Countdown irrefuehrend.
+      angehalten: Number(netz && netz.mimir && netz.mimir.HALTCHURNING) > 0,
+    };
+  }
+  // Der Plan aus GitLab, falls gepflegt -- getrennt ausgewiesen, damit niemand ihn mit dem
+  // Churn-Zeitpunkt verwechselt.
+  const meilensteinFaellig = (Array.isArray(meilen) ? meilen : [])
+    .map((m) => ({ titel: String((m && m.title) || '').slice(0, 120), faelligMs: alsMs(m && m.due_date) }))
+    .filter((m) => m.faelligMs)
+    .sort((a, b) => a.faelligMs - b.faelligMs)[0] || null;
+
+  const commits = (w(commitsR, 'commits') || []).map(commitKompakt)
+    .filter((c) => c.datumMs)
+    .sort((a, b) => b.datumMs - a.datumMs);
+  // Zeitpunkt der letzten Bewegung ueberhaupt -- damit die Seite zeigen kann, wie frisch der
+  // Stand ist, statt nur eine Liste ohne Bezug.
+  // HIGHLIGHTS: alles aus BEOBACHTET, ueber den ganzen geholten Zeitraum (nicht nur 14 Tage --
+  // eine XMR-Arbeit von vor drei Wochen ist immer noch die Nachricht). Je Thema Anzahl,
+  // juengster Zeitpunkt und die drei aktuellsten Eintraege.
+  const alleEintraege = [...commits, ...merged, ...((w(offenR, 'opened2') || []).map(mrKompakt))]
+    .filter((e) => e.beobachtet && !e.rauschen);
+  const highlights = BEOBACHTET.map((b) => {
+    const drin = alleEintraege.filter((e) => e.beobachtet === b.key)
+      .sort((a, c) => (c.datumMs || 0) - (a.datumMs || 0));
+    if (!drin.length) return null;
+    return {
+      key: b.key, prio: b.prio, anzahl: drin.length,
+      letzteMs: drin[0].datumMs || null,
+      eintraege: drin.slice(0, 3),
+    };
+  }).filter(Boolean).sort((a, b2) => a.prio - b2.prio);
+
+  // ── WER ARBEITET GERADE WORAN ────────────────────────────────────────────
+  //
+  // Gewuenscht: "hervorheben welcher dev am hustlen ist und welcher viele wichtige Sachen
+  // erledigt". Gezaehlt wird ueber die letzten 30 Tage, getrennt nach:
+  //   gesamt  -- alles (auch Wartung)
+  //   wichtig -- ohne Wartung und ohne Merge-Rauschen
+  //   fokus   -- Arbeiten an den beobachteten Integrationen (XMR, ZEC, ...)
+  //
+  // EINSCHRAENKUNG, die die Anzeige auch benennen muss: Das ist ein Mengenmass, kein
+  // Wertmass. Ein einzelner MR, der eine ganze Chain anbindet, zaehlt genauso wie ein
+  // Einzeiler. Die Sortierung nach "wichtig" und "fokus" mildert das, hebt es aber nicht auf.
+  // Eine WOCHE statt einem Monat: "wer baut gerade" soll den aktuellen Stand zeigen. Ueber
+  // 30 Tage stand oben, wer irgendwann im letzten Monat viel getan hat -- auch wenn er seit
+  // zwei Wochen nichts mehr macht.
+  const DEV_TAGE = 7;
+  const seit30 = Date.now() - DEV_TAGE * 24 * 60 * 60 * 1000;
+  const proDev = new Map();
+  for (const e of [...commits, ...merged]) {
+    if (!e.autor || !e.datumMs || e.datumMs < seit30 || e.rauschen) continue;
+    let d = proDev.get(e.autor);
+    if (!d) { d = { name: e.autor, gesamt: 0, wichtig: 0, fokus: 0, letzteMs: 0, themen: {} }; proDev.set(e.autor, d); }
+    d.gesamt++;
+    if (e.thema !== 'wartung') d.wichtig++;
+    if (e.beobachtet) d.fokus++;
+    if (e.datumMs > d.letzteMs) d.letzteMs = e.datumMs;
+    if (e.thema && e.thema !== 'wartung') d.themen[e.thema] = (d.themen[e.thema] || 0) + 1;
+  }
+  const devs = [...proDev.values()]
+    .map((d) => ({
+      ...d,
+      // Schwerpunkt dieses Entwicklers -- sagt mehr als eine nackte Zahl.
+      thema: Object.entries(d.themen).sort((a, b) => b[1] - a[1]).map(([k]) => k)[0] || null,
+      themen: undefined,
+    }))
+    // Fokus-Arbeit wiegt schwerer, danach die Menge der nicht-Wartungs-Beitraege.
+    .sort((a, b) => (b.fokus * 3 + b.wichtig) - (a.fokus * 3 + a.wichtig))
+    .slice(0, 6);
+
+  // SCHWERPUNKT SEIT DEM LETZTEN RELEASE, nicht "letzte 14 Tage".
+  //
+  // Gemeldet: "Focus last 14d macht auch keinen Sinn" -- zu Recht. 14 Tage war eine frei
+  // gegriffene Zahl, die zu nichts auf der Seite passte: Die Releases darunter liegen mal 8,
+  // mal 20 Tage auseinander, also zeigte das Fenster je nach Zufall einen Teil eines Releases
+  // oder anderthalb. "Seit dem letzten Release" beantwortet dagegen eine echte Frage: Was ist
+  // seither passiert, also was steckt im naechsten Update?
+  const letztesReleaseMs = releases.length ? (releases[0].datumMs || 0) : 0;
+  // Ohne Release-Datum bleibt der 14-Tage-Rueckfall, sonst haette die Karte gar keinen Inhalt.
+  const seitMs = letztesReleaseMs || (Date.now() - 14 * 24 * 60 * 60 * 1000);
+  const frisch = [...commits, ...merged]
+    .filter((e) => e.datumMs >= seitMs && !e.rauschen && e.thema !== 'wartung');
+  // "sonstiges" ans ENDE: Es ist der Rest-Eimer der Heuristik und stand allein wegen seiner
+  // Menge auf Platz zwei -- ueber Themen, die tatsaechlich etwas aussagen.
+  const themenAktuell = themenZaehlen(frisch)
+    .sort((a, b) => (a.key === 'sonstiges' ? 1 : 0) - (b.key === 'sonstiges' ? 1 : 0) || b.n - a.n);
+
+  const letzteAktivitaetMs = Math.max(
+    commits.length ? commits[0].datumMs : 0,
+    merged.length ? merged[0].datumMs : 0
+  ) || null;
+
+  return {
+    schema: TIMELINE_SCHEMA,
+    fehler,
+    themenAktuell,
+    // Ab wann gezaehlt wurde -- die Anzeige muss den Zeitraum benennen koennen, statt eine
+    // Zahl ohne Bezug hinzustellen.
+    themenSeitMs: seitMs,
+    themenSeitRelease: !!letztesReleaseMs,
+    highlights,
+    poolStatus,
+    // Ohne Pool-Liste bleibt poolStatus leer -- die Anzeige muss "unbekannt" von
+    // "geprueft, nicht vorhanden" unterscheiden koennen.
+    poolsGeprueft: Array.isArray(poolListe),
+    devs,
+    churn,
+    meilensteinFaellig,
+    aktivitaet14: frisch.length,
+    netzVersion,
+    branch: DEV_BRANCH,
+    commits: commits.slice(0, 150),
+    letzteAktivitaetMs,
+    stabilVersion: neuestesStabil ? neuestesStabil.version : null,
+    kandidatVersion: kandidatIstNeuer ? neuesterKandidat.version : null,
+    releases,
+    merged: merged.slice(0, 120),
+    offen: offeneMrAlle.sort((a, b) => (b.datumMs || 0) - (a.datumMs || 0)).slice(0, 60),
+    releaseMrs,
+    meilensteine: (Array.isArray(meilen) ? meilen : []).map((m) => ({
+      titel: String((m && m.title) || '').slice(0, 120),
+      url: (m && m.web_url) || null,
+    })),
+    fetchedAt: Date.now(),
+  };
+}
+
+async function handleThornodeTimeline(request, env, ctx) {
+  // Erst der Cache: er entscheidet, ob ueberhaupt jemand GitLab anfassen muss.
+  let zeile = null;
+  try {
+    zeile = await env.DB.prepare('SELECT payload, updated_at FROM thornode_timeline_cache WHERE id = 1').first();
+  } catch (e) {
+    console.warn('[rune-rewards-backend] thornode_timeline_cache nicht lesbar (Migration ausgeführt?):', e?.message || String(e));
+  }
+  // ?fresh=1 umgeht den Cache -- zum Nachsehen nach einem Deploy, ohne 15 Minuten zu warten.
+  let frischErzwungen = false;
+  try { frischErzwungen = new URL(request.url).searchParams.get('fresh') === '1'; } catch (e) {  }
+
+  const passt = (roh) => {
+    try {
+      const d = JSON.parse(roh);
+      return (d && d.schema === TIMELINE_SCHEMA) ? d : null;
+    } catch (e) { return null; }
+  };
+
+  // ERST AUSLIEFERN, DANN ERNEUERN.
+  //
+  // Gemeldet: "manchmal laedt GitLab zu lange". Vorher galt der Cache nur als brauchbar,
+  // solange er FRISCH war -- danach wartete der Browser auf neun GitLab-Abrufe, also je nach
+  // Tagesform mehrere Sekunden bis zum Zeitlimit. Dabei aendert sich der Entwicklungsstand
+  // nicht in Sekunden: Ein 20 Minuten alter Stand ist allemal besser als ein Ladekreis.
+  //
+  // Jetzt: Liegt ueberhaupt ein brauchbarer Eintrag vor, geht der SOFORT raus. Ist er nicht
+  // mehr frisch, laeuft die Erneuerung danach im Hintergrund (waitUntil) und der naechste
+  // Aufruf sieht den neuen Stand. Gewartet wird nur noch, wenn gar nichts da ist.
+  const erneuern = () => baueThornodeTimeline(env).then((d) => {
+    const ok = d.releases.length || d.merged.length || d.commits.length || d.netzVersion;
+    if (!ok) return;
+    return env.DB.prepare(
+      `INSERT INTO thornode_timeline_cache (id, payload, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+    ).bind(JSON.stringify(d), Date.now()).run();
+  }).catch((e) => {
+    console.warn('[rune-rewards-backend] /thornode-timeline Hintergrund-Erneuerung fehlgeschlagen:', e?.message || String(e));
+  });
+
+  if (!frischErzwungen && zeile && zeile.payload) {
+    const d = passt(zeile.payload);
+    if (d) {
+      const alter = Date.now() - zeile.updated_at;
+      if (alter >= TIMELINE_FRESH_MS && alter < TIMELINE_STALE_MAX_AGE_MS) {
+        // Nicht mehr frisch, aber brauchbar: ausliefern UND im Hintergrund nachziehen.
+        if (ctx && ctx.waitUntil) ctx.waitUntil(erneuern());
+      }
+      if (alter < TIMELINE_STALE_MAX_AGE_MS) {
+        return json({ ...d, stale: alter >= TIMELINE_FRESH_MS, staleSince: zeile.updated_at }, env);
+      }
+    }
+    // Falsche Schema-Version oder uralt: nichts Brauchbares -> unten live holen.
+  }
+
+  try {
+    const daten = await baueThornodeTimeline(env);
+    // Nur ablegen, wenn wirklich etwas drinsteht -- sonst ueberschreibt ein kurzer GitLab-
+    // Ausfall einen brauchbaren Cache mit einer leeren Huelle.
+    // Teilweise Daten sind besser als keine: solange irgendetwas da ist, wird ausgeliefert
+    // (die Seite zeigt, was sie hat). Nur wenn ALLES leer blieb, gilt es als Fehlschlag --
+    // und dann mit den Einzelgruenden, nicht als nacktes TIMELINE_EMPTY.
+    const brauchbar = daten.releases.length || daten.merged.length || daten.commits.length || daten.netzVersion;
+    if (!brauchbar) {
+      const e = new Error('TIMELINE_EMPTY');
+      e.detail = daten.fehler;
+      throw e;
+    }
+    // Das Ablegen darf die Antwort NIE verhindern: env.DB.prepare() wirft synchron, wenn die
+    // Tabelle fehlt (Migration noch nicht gelaufen) -- das lief am .catch() der Promise vorbei
+    // und liess den ganzen Endpunkt auf 503 kippen, obwohl die Daten fertig vorlagen. Jetzt
+    // ist der Cache reine Kür: ohne Tabelle läuft die Seite, nur eben ohne Zwischenspeicher.
+    try {
+      const schreiben = env.DB.prepare(
+        `INSERT INTO thornode_timeline_cache (id, payload, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+      ).bind(JSON.stringify(daten), Date.now()).run().catch((e) => {
+        console.warn('[rune-rewards-backend] thornode_timeline_cache-Schreiben fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
+      });
+      if (ctx && ctx.waitUntil) ctx.waitUntil(schreiben); else await schreiben;
+    } catch (e) {
+      console.warn('[rune-rewards-backend] thornode_timeline_cache nicht beschreibbar (Migration ausgeführt?):', e?.message || String(e));
+    }
+    return json({ ...daten, stale: false }, env);
+  } catch (e) {
+    console.warn('[rune-rewards-backend] /thornode-timeline fehlgeschlagen, versuche Stale-Cache:', e?.message || String(e));
+    if (zeile && zeile.payload && (Date.now() - zeile.updated_at) < TIMELINE_STALE_MAX_AGE_MS) {
+      // Auch hier nur, wenn die Form passt -- eine alte Nutzlast ist schlimmer als keine,
+      // weil die Seite sie stillschweigend als leer darstellt.
+      const d = passt(zeile.payload);
+      if (d) return json({ ...d, stale: true, staleSince: zeile.updated_at }, env);
+    }
+    return json({ error: 'TIMELINE_UNAVAILABLE', message: e?.message || String(e), detail: e?.detail || null }, env, 503);
+  }
+}
+
+const MEMOLESS_UPSTREAM_DEFAULT = 'https://api.thorchain.org/memoless/api/v1';
 const MEMOLESS_ALLOWED_PATHS = new Set(['assets', 'register', 'preflight']);
 
 async function handleMemoless(request, env) {
@@ -2016,7 +2851,25 @@ async function handleMemoless(request, env) {
     return json({ error: 'NOT_FOUND' }, env, 404);
   }
 
-  const target = `${MEMOLESS_UPSTREAM}/${sub}${url.search || ''}`;
+  if (sub === 'assets' && !(env && env.MEMOLESS_ASSETS_UPSTREAM_ONLY)) {
+    try {
+      const pools = await fetchFromBases(getThornodeBases(), '/thorchain/pools');
+      const liste = (Array.isArray(pools) ? pools : []).filter(pl => pl && pl.asset);
+      if (liste.length) {
+        return json({
+          success: true,
+          assets: liste.map(pl => ({
+            asset: String(pl.asset),
+            
+            status: String(pl.status || 'Available'),
+          })),
+        }, env);
+      }
+    } catch (e) {  }
+  }
+
+  const basis = (env && env.MEMOLESS_UPSTREAM) || MEMOLESS_UPSTREAM_DEFAULT;
+  const target = `${basis}/${sub}${url.search || ''}`;
   const init = { method: request.method, headers: { 'Content-Type': 'application/json' } };
   if (request.method === 'POST') {
     init.body = await request.text();
@@ -2065,8 +2918,14 @@ export default {
       if (url.pathname === '/recent-swaps') {
         return await handleRecentSwaps(request, env, ctx);
       }
-      if (url.pathname === '/top-pairs') {
-        return await handleTopPairs(request, env);
+      if (url.pathname === '/dex-volume') {
+        return await handleDexVolume(request, env, ctx);
+      }
+      if (url.pathname === '/rune-history') {
+        return await handleRuneHistory(request, env, ctx);
+      }
+      if (url.pathname === '/thornode-timeline') {
+        return await handleThornodeTimeline(request, env, ctx);
       }
       if (url.pathname === '/purchases') {
         return await handlePurchases(request, env, ctx);
@@ -2106,9 +2965,225 @@ export default {
   },
 };
 
+const NODE_HISTORY_MIN_INTERVAL_MS = 30 * 60 * 1000;
+
+const NODE_HISTORY_CHURNS_BACK = 50;
+const NODE_HISTORY_PER_RUN = 2;
+
+const JAIL_HISTORY_DAYS = 90;
+const JAIL_HISTORY_MAX = 500;
+
+async function syncNodeHistory(env) {
+  let zeile = null;
+  try {
+    zeile = await env.DB.prepare('SELECT payload, updated_at FROM recent_swaps_snapshot WHERE id = 1').first();
+  } catch (e) { return; }
+
+  let payload = {};
+  try { payload = zeile && zeile.payload ? JSON.parse(zeile.payload) : {}; } catch (e) { payload = {}; }
+  const zuletzt = Number(payload.nodeHistoryAt) || 0;
+  if (Date.now() - zuletzt < NODE_HISTORY_MIN_INTERVAL_MS) return;
+
+  let nodes;
+  try {
+    nodes = await fetchNodes();
+  } catch (e) {
+    console.warn('[rune-rewards-backend] Node-Verlauf: Abruf fehlgeschlagen:', e?.message || String(e));
+    return;
+  }
+  const liste = Array.isArray(nodes) ? nodes : (nodes && nodes.nodes) || [];
+  const aktiv = liste
+    .filter(n => String(n?.status || '').toLowerCase() === 'active')
+    .map(n => String(n?.node_address || '').toLowerCase())
+    .filter(Boolean);
+  if (!aktiv.length) return;
+
+  // ------------------------------------------------------------------
+  // JAIL-VERLAUF
+  //
+  // /thorchain/nodes zeigt nur den Ist-Zustand: Ist die Sperre abgelaufen, verschwindet jede
+  // Spur. Eine Node, die bei jedem zweiten Churn beim Keysign scheitert, sieht dazwischen
+  // tadellos aus.
+  //
+  // Deshalb wird bei jedem Durchgang der Jail-Zustand mit dem vorigen verglichen und nur die
+  // AENDERUNG festgehalten -- ein Ereignis je neuer Sperre, keine Momentaufnahmen.
+  const jetztMs = Date.now();
+  const alteSperren = (payload.jailState && typeof payload.jailState === 'object') ? payload.jailState : {};
+  const neueSperren = {};
+  const ereignisse = Array.isArray(payload.jailEvents) ? payload.jailEvents.slice() : [];
+  for (const n of liste) {
+    const adr = String(n?.node_address || '').toLowerCase();
+    if (!adr) continue;
+    const bis = Number(n?.jail?.release_height) || 0;
+    if (bis <= 0) continue;
+    neueSperren[adr] = bis;
+    // Neue Sperre = hoehere release_height als zuletzt gesehen. Eine gleichbleibende Hoehe
+    // ist dieselbe Sperre und darf nicht mehrfach gezaehlt werden.
+    if (bis > (Number(alteSperren[adr]) || 0)) {
+      ereignisse.push({ a: adr, r: String(n?.jail?.reason || '').slice(0, 60), t: jetztMs });
+    }
+  }
+  const grenze = jetztMs - JAIL_HISTORY_DAYS * 24 * 60 * 60 * 1000;
+  const jailEvents = ereignisse
+    .filter(e => e && Number(e.t) >= grenze)
+    .slice(-JAIL_HISTORY_MAX);
+  const jailNeu = jailEvents.length !== (Array.isArray(payload.jailEvents) ? payload.jailEvents.length : 0);
+
+  // --- GESCHEITERTE CHURN-VERSUCHE ---
+  //
+  // THORChain setzt next_churn_height auf einen NEUEN, hoeheren Block, wenn ein Churn nicht
+  // zustande kommt (etwa weil die Keygen-Runde scheitert). Von aussen sieht das aus, als
+  // springe der Countdown grundlos -- die App wirkte dadurch fehlerhaft.
+  let churnVersuche = (Array.isArray(payload.churnAttempts) ? payload.churnAttempts : [])
+    .filter(e => e && (Date.now() - (Number(e.t) || 0)) <= 7 * 24 * 60 * 60 * 1000);
+  let zielHoehe = Number(payload.churnTargetHeight) || 0;
+  let letzteChurnHoehe = Number(payload.lastChurnHeight) || 0;
+  try {
+    const netz = await fetchFromBases(getThornodeBases(), '/thorchain/network');
+    const ziel = Number(netz && netz.next_churn_height) || 0;
+    const letzte = Number(netz && netz.last_churn_height) || 0;
+    
+    const churnLaeuft = !(Number(netz && netz.mimir && netz.mimir.HALTCHURNING) > 0);
+    const fensterVorab = Date.now() - 20 * 60 * 1000;
+    const belege = (Array.isArray(payload.jailEvents) ? payload.jailEvents : [])
+      .filter(e => e && Number(e.t) >= fensterVorab && /key(gen|sign)/i.test(String(e.r || '')));
+    // Die Jail-Belege sind ZUSATZ, keine Pflicht: Ein Churn kann sich auch ohne Sperren
+    // verschieben. Die Bedingung "Ziel steigt, kein Churn, nicht angehalten" ist fuer sich
+    // aussagekraeftig.
+    if (ziel && zielHoehe && ziel > zielHoehe && letzte === letzteChurnHoehe && churnLaeuft) {
+      const schuldige = [...new Set(belege.map(e => String(e.a)))].slice(0, 40);
+      // KLASSIFIZIERUNG: keygen (Schluesselerzeugung gescheitert -- der schwerere Fall),
+      // keysign (verpasste Signaturen) oder ohne (niemand gesperrt -> Vorbedingung fehlte).
+      // Keygen hat Vorrang, wenn beides auftritt.
+      const gruende = belege.map(e => String(e.r || '').toLowerCase());
+      const art = gruende.some(g => g.includes('keygen')) ? 'keygen'
+        : gruende.some(g => g.includes('keysign')) ? 'keysign'
+        : 'ohne';
+      churnVersuche.push({
+        t: Date.now(), von: zielHoehe, bis: ziel, nodes: schuldige, art,
+        verschoben: ziel - zielHoehe,
+      });
+    }
+    if (ziel) zielHoehe = ziel;
+    if (letzte) letzteChurnHoehe = letzte;
+  } catch (e) {  }
+
+  const bekannt = new Set(Array.isArray(payload.knownActiveNodes) ? payload.knownActiveNodes : []);
+  const vorher = bekannt.size;
+  const erstBefuellung = vorher === 0;
+  for (const a of aktiv) bekannt.add(a);
+
+  const erledigt = new Set(Array.isArray(payload.historyHeightsDone) ? payload.historyHeightsDone : []);
+  let offeneHoehen = [];
+  try {
+    const churns = await fetchChurns();
+    const churnListe = Array.isArray(churns) ? churns : [];
+    offeneHoehen = churnListe
+      .map(c => Number(c && c.height))
+      .filter(h => Number.isFinite(h) && h > 1)
+      .sort((a, b) => b - a)                 
+      .slice(0, NODE_HISTORY_CHURNS_BACK);
+
+    const juengste = churnListe.length ? Math.max(...churnListe.map(c => Number(c && c.height) || 0)) : 0;
+    let jetztHoehe = 0;
+    try {
+      const bl = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+      const arr = Array.isArray(bl) ? bl : [bl];
+      jetztHoehe = parseInt(arr[0] && arr[0].thorchain || '0', 10) || 0;
+    } catch (e) {  }
+    if (juengste && jetztHoehe && jetztHoehe > juengste + 20000) {
+      const SCHRITT = 40000;
+      for (let h = juengste + SCHRITT; h < jetztHoehe; h += SCHRITT) {
+        offeneHoehen.push(h);
+      }
+    }
+
+    offeneHoehen = offeneHoehen
+      .filter(h => Number.isFinite(h) && h > 1 && !erledigt.has(h))
+      .sort((a, b) => b - a);
+  } catch (e) {
+    console.warn('[rune-rewards-backend] Node-Verlauf: Churn-Liste nicht abrufbar:', e?.message || String(e));
+  }
+
+  for (const h of offeneHoehen.slice(0, NODE_HISTORY_PER_RUN)) {
+    try {
+      
+      const alteNodes = await fetchNodesAtHeight(h - 1);
+      const alteListe = Array.isArray(alteNodes) ? alteNodes : (alteNodes && alteNodes.nodes) || [];
+      for (const n of alteListe) {
+        if (String(n?.status || '').toLowerCase() !== 'active') continue;
+        const a = String(n?.node_address || '').toLowerCase();
+        if (a) bekannt.add(a);
+      }
+      erledigt.add(h);
+    } catch (e) {
+      console.warn('[rune-rewards-backend] Node-Verlauf: Hoehe', h, 'nicht abrufbar:', e?.message || String(e));
+      
+      break;
+    }
+  }
+
+  const hoehenNeu = erledigt.size !== (Array.isArray(payload.historyHeightsDone) ? payload.historyHeightsDone.length : 0);
+  if (bekannt.size === vorher && !hoehenNeu && !jailNeu && zuletzt) return;
+
+  const neu = {
+    ...payload,
+    knownActiveNodes: [...bekannt],
+    jailState: neueSperren,
+    jailEvents,
+    historyHeightsDone: [...erledigt],
+    
+    historyPending: Math.max(0, offeneHoehen.length - NODE_HISTORY_PER_RUN),
+    
+    nodeHistoryHeights: erledigt.size,
+    churnAttempts: churnVersuche.slice(-50),
+    churnTargetHeight: zielHoehe,
+    lastChurnHeight: letzteChurnHoehe,
+    churnHeightsAt: Date.now(),
+    nodeHistoryAt: Date.now(),
+    
+    nodeHistorySince: payload.nodeHistorySince || Date.now(),
+    nodeHistorySeeded: erstBefuellung ? true : !!payload.nodeHistorySeeded,
+  };
+  try {
+    await env.DB.prepare(
+      `INSERT INTO recent_swaps_snapshot (id, payload, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+    ).bind(JSON.stringify(neu), Date.now()).run();
+  } catch (e) {
+    console.warn('[rune-rewards-backend] Node-Verlauf: Schreiben fehlgeschlagen:', e?.message || String(e));
+  }
+}
+
+// CACHE VORWAERMEN.
+//
+// Der Cron laeuft ohnehin. Wenn er den Entwicklungsstand gleich mitzieht, ist der Eintrag im
+// Normalfall immer frisch und KEIN Besucher wartet je auf GitLab -- auch der erste nicht.
+// Ohne das traf immer derjenige die kalte Stelle, der zufaellig nach Ablauf der 15 Minuten
+// als Erster die Seite oeffnete.
+const TIMELINE_WARM_MS = 10 * 60 * 1000;
+
+async function waermeTimeline(env) {
+  try {
+    const zeile = await env.DB.prepare('SELECT updated_at FROM thornode_timeline_cache WHERE id = 1').first();
+    if (zeile && (Date.now() - Number(zeile.updated_at)) < TIMELINE_WARM_MS) return;
+    const d = await baueThornodeTimeline(env);
+    if (!(d.releases.length || d.merged.length || d.commits.length || d.netzVersion)) return;
+    await env.DB.prepare(
+      `INSERT INTO thornode_timeline_cache (id, payload, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
+    ).bind(JSON.stringify(d), Date.now()).run();
+  } catch (e) {
+    // Darf den restlichen Cron-Durchgang nicht stoppen.
+    console.warn('[rune-rewards-backend] Timeline-Vorwaermen fehlgeschlagen:', e?.message || String(e));
+  }
+}
+
 async function runRefreshCycle(env) {
   await refreshChurnsCache(env);
   await collectSwapPairStats(env);
+  await syncNodeHistory(env);
+  await waermeTimeline(env);
 
   const now = Date.now();
 
@@ -2140,7 +3215,8 @@ async function refreshChurnsCache(env) {
     console.warn('[rune-rewards-backend] Churn-Liste konnte nicht geladen werden:', e.message);
     return;
   }
-  if (!Array.isArray(raw) || raw.length === 0) return;
+  
+  if (!Array.isArray(raw)) raw = [];
 
   const known = await env.DB.prepare('SELECT MAX(height) as maxHeight FROM churns_cache').first();
   const knownHeight = known?.maxHeight || 0;
@@ -2148,6 +3224,25 @@ async function refreshChurnsCache(env) {
   const fresh = raw
     .map((c) => ({ height: parseInt(c.height, 10), dateMs: Math.floor(parseInt(c.date, 10) / 1e6) }))
     .filter((c) => c.height && c.dateMs && c.height > knownHeight);
+
+  try {
+    const netz = await fetchFromBases(getThornodeBases(), '/thorchain/network');
+    const letzte = Number(netz && netz.last_churn_height) || 0;
+    const hoechste = Math.max(knownHeight, ...fresh.map(c => c.height), 0);
+    if (letzte && letzte > hoechste) {
+      const bekannteZeit = raw
+        .map(c => ({ h: parseInt(c.height, 10), t: Math.floor(parseInt(c.date, 10) / 1e6) }))
+        .filter(c => c.h && c.t)
+        .sort((a, b) => b.h - a.h)[0];
+      const datum = bekannteZeit
+        ? bekannteZeit.t + (letzte - bekannteZeit.h) * 6000
+        : Date.now();
+      fresh.push({ height: letzte, dateMs: Math.min(datum, Date.now()) });
+      console.log('[rune-rewards-backend] Churn-Hoehe aus /thorchain/network ergaenzt:', letzte);
+    }
+  } catch (e) {
+    console.warn('[rune-rewards-backend] Netzwerk-Hoehe nicht abrufbar:', e?.message || String(e));
+  }
 
   if (!fresh.length) return;
 
