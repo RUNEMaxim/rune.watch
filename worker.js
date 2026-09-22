@@ -293,7 +293,8 @@ async function fetchVolumeBundle(env, ctx) {
 async function handleVolume(request, env, ctx) {
   
   try {
-    recordVisitor(env, ctx, new URL(request.url).searchParams.get('v'));
+    const _u = new URL(request.url);
+    recordVisitor(env, ctx, _u.searchParams.get('v'), _u.searchParams.get('w') === '1');
   } catch (e) {  }
   const result = await fetchVolumeBundle(env, ctx);
   return json({ ...result.data, stale: result.stale, staleSince: result.staleSince || null }, env);
@@ -987,16 +988,32 @@ function getStatsExcludedAddresses(env) {
 // die Seite hundertmal am Tag oeffnet, bleibt es bei genau einer Zeile.
 const VISITOR_TOKEN_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
-function recordVisitor(env, ctx, token) {
+// ANTEIL GERAETE MIT WALLET: zusaetzlich ein Ja/Nein (has_wallet), ob auf dem Geraet eine
+// Wallet eingetragen ist -- nie welche. Die Spalte wird nur von 0 auf 1 gehoben (einmal je
+// Geraet und Tag), es bleibt also bei hoechstens zwei Schreibvorgaengen je Geraet und Tag.
+// Fehlt die Spalte noch (Migration nicht ausgefuehrt), faellt es auf die alte Zaehlung zurueck.
+function recordVisitor(env, ctx, token, hasWallet) {
   if (!env.DB || !ctx || typeof ctx.waitUntil !== 'function') return;
   if (!token || !VISITOR_TOKEN_RE.test(token)) return;
   const now = Date.now();
   const day = utcDayString(now);
+  const alt = () => env.DB
+    .prepare('INSERT OR IGNORE INTO visitor_days (token, day, first_seen_at) VALUES (?, ?, ?)')
+    .bind(token, day, now)
+    .run();
   ctx.waitUntil(
     env.DB
-      .prepare('INSERT OR IGNORE INTO visitor_days (token, day, first_seen_at) VALUES (?, ?, ?)')
-      .bind(token, day, now)
+      .prepare(
+        `INSERT INTO visitor_days (token, day, first_seen_at, has_wallet) VALUES (?, ?, ?, ?)
+         ON CONFLICT(token, day) DO UPDATE SET has_wallet = 1
+         WHERE excluded.has_wallet = 1 AND visitor_days.has_wallet = 0`
+      )
+      .bind(token, day, now, hasWallet ? 1 : 0)
       .run()
+      .catch((e) => {
+        console.warn('[rune-rewards-backend] recordVisitor: has_wallet fehlt (Migration 2?), alte Zaehlung:', e?.message || String(e));
+        return alt();
+      })
       .catch((e) => {
         console.warn('[rune-rewards-backend] recordVisitor fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
       })
@@ -1454,6 +1471,7 @@ async function handleStats(request, env) {
     totalRow, active1Row, active7Row, active30Row, depthRow,
     totalRequests1Row, totalRequests7Row, totalRequests30Row, trackingSinceRow,
     vis1Row, vis7Row, vis30Row, visTotalRow, visSinceRow,
+    visW1Row, visW30Row, visWSinceRow,
   ] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE 1=1${exclSql}`).bind(...excl).first(),
     env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?${exclSql}`).bind(day1, ...excl).first(),
@@ -1467,11 +1485,15 @@ async function handleStats(request, env) {
          SUM(CASE WHEN d >= 30 THEN 1 ELSE 0 END) AS n30
        FROM (
          SELECT address, COUNT(DISTINCT day) AS d FROM sync_activity_days
-         WHERE day >= ?${exclSql}
+         WHERE 1=1${exclSql}
          GROUP BY address
          HAVING d >= 2
        )`
-    ).bind(day30, ...excl).first(),
+    // UNBEGRENZT: ueber den gesamten Aufzeichnungszeitraum statt der letzten 30 Tage.
+    // Gewuenscht: "wo 30 Tage stehen bitte unbegrenzt, ich will alle Daten". Bei einer
+    // Aufzeichnung von wenigen Wochen schnitt das 30-Tage-Fenster die fruehesten Nutzer
+    // bereits ab -- genau die, deren Wiederkehr am meisten aussagt.
+    ).bind(...excl).first(),
     env.DB.prepare(`SELECT COALESCE(SUM(count), 0) AS n FROM sync_activity_counts WHERE day >= ?${exclSql}`).bind(day1, ...excl).first()
       .catch((e) => {
         console.warn('[rune-rewards-backend] sync_activity_counts (1d) nicht lesbar:', e?.message || String(e));
@@ -1501,6 +1523,10 @@ async function handleStats(request, env) {
     env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day30).first().catch(() => ({ n: null })),
     env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days').first().catch(() => ({ n: null })),
     env.DB.prepare('SELECT MIN(day) AS d FROM visitor_days').first().catch(() => ({ d: null })),
+    // Geraete mit eingetragener Wallet (has_wallet). Ohne Migration 2 -> null, Kachel zeigt "—".
+    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ? AND has_wallet = 1').bind(day1).first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ? AND has_wallet = 1').bind(day30).first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT MIN(day) AS d FROM visitor_days WHERE has_wallet = 1').first().catch(() => ({ d: null })),
   ]);
 
   const active1 = active1Row?.n || 0;
@@ -1515,13 +1541,23 @@ async function handleStats(request, env) {
   const totalRequests30 = totalRequests30Row?.n || 0;
   const trackingSince = trackingSinceRow?.d || null; 
 
-  const pctOf = (n) => active30 > 0 ? Math.round((n / active30) * 1000) / 10 : null;
+  // Bezugsgroesse der Quoten sind jetzt ALLE je erfassten Adressen -- passend zur Zaehlung
+  // ueber den ganzen Zeitraum. Mit den 30-Tage-Aktiven als Nenner haette man eine
+  // Gesamtzahl durch einen Ausschnitt geteilt, und die Quote waere ueber 100 % gerutscht.
+  const alleAdressen = totalRow?.n || 0;
+  const pctOf = (n) => alleAdressen > 0 ? Math.round((n / alleAdressen) * 1000) / 10 : null;
 
   const stats = {
     totalUniqueAddressesEver: totalRow?.n || 0,
     activeLast1d: active1,
     activeLast7d: active7,
     activeLast30d: active30,
+    // Werte ueber den GESAMTEN Aufzeichnungszeitraum. Die alten Feldnamen bleiben erhalten,
+    // damit nichts bricht, das die JSON-Ausgabe schon ausliest -- sie tragen jetzt dieselben
+    // Gesamtwerte.
+    returningAllTime: returning30,
+    retentionRateAllTime: pctOf(returning30),
+    depthBase: alleAdressen,
     returningLast30d: returning30,
     retentionRate30d: pctOf(returning30),
     engagementDepth: [
@@ -1543,7 +1579,14 @@ async function handleStats(request, env) {
     visitorsLast30d: vis30Row?.n ?? null,
     visitorsTotal: visTotalRow?.n ?? null,
     visitorsSince: visSinceRow?.d ?? null,
+    visitorsWithWalletLast1d: visW1Row?.n ?? null,
+    visitorsWithWalletLast30d: visW30Row?.n ?? null,
+    visitorsWithWalletSince: visWSinceRow?.d ?? null,
   };
+  // Anteil in Prozent, eine Nachkommastelle. Nenner = alle Geraete im selben Zeitraum.
+  const walletPct = (n, total) => (n == null || !total) ? null : Math.round((n / total) * 1000) / 10;
+  stats.walletShareLast1d = walletPct(stats.visitorsWithWalletLast1d, stats.visitorsLast1d);
+  stats.walletShareLast30d = walletPct(stats.visitorsWithWalletLast30d, stats.visitorsLast30d);
 
   const wantsHtml = (request.headers.get('Accept') || '').includes('text/html');
   if (!wantsHtml) {
@@ -1687,11 +1730,11 @@ async function handleStats(request, env) {
           <div class="tile-hint">alle Sync-Aufrufe der letzten 24h, nicht Tage-dedupliziert</div>
         </div>
         ${tile('total', 'Adressen insgesamt', stats.totalUniqueAddressesEver, trackingHint)}
-        ${tile('returning', 'Wiederkehrer – 30 Tage', stats.returningLast30d, '≥2 verschiedene Tage synchronisiert')}
-        ${tile('rate', 'Retention-Quote', stats.retentionRate30d == null ? '—' : stats.retentionRate30d + '%', 'Anteil Wiederkehrer an aktiven Adressen (30T)')}
+        ${tile('returning', 'Wiederkehrer – gesamt', stats.returningAllTime, '≥2 verschiedene Tage synchronisiert, seit Aufzeichnungsbeginn')}
+        ${tile('rate', 'Retention-Quote', stats.retentionRateAllTime == null ? '—' : stats.retentionRateAllTime + '%', 'Anteil Wiederkehrer an allen Adressen')}
         ${tile('avgreq', 'Ø Requests je aktiver Adresse', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'letzte 24h, je in 24h aktiver Adresse')}
         <div class="tile wide">
-          <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Nutzungstiefe (letzte 30 Tage)</div>
+          <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Nutzungstiefe (gesamt)</div>
           ${stats.engagementDepth.map(row => `
             <div class="depth-row">
               <div class="depth-label">≥ ${row.minDays} Tage</div>
@@ -1701,7 +1744,7 @@ async function handleStats(request, env) {
               <div class="depth-pct" id="v-depth-pct-${row.minDays}">${row.pct == null ? '—' : row.pct + '%'}</div>
               <div class="depth-count" id="v-depth-count-${row.minDays}">(${row.count})</div>
             </div>`).join('')}
-          <div class="tile-hint" style="margin-top:8px;">Anteil der in den letzten 30 Tagen aktiven Adressen (<span id="v-depth-base">${stats.activeLast30d}</span>), die an mindestens X verschiedenen Tagen synchronisiert haben. Jede Stufe ist in der vorherigen enthalten.</div>
+          <div class="tile-hint" style="margin-top:8px;">Anteil aller erfassten Adressen (<span id="v-depth-base">${stats.depthBase}</span>), die seit Aufzeichnungsbeginn an mindestens X verschiedenen Tagen synchronisiert haben. Jede Stufe ist in der vorherigen enthalten.</div>
         </div>
       </div>
       <div class="swipe-hint">← wischen für Besucher →</div>
@@ -1714,6 +1757,10 @@ async function handleStats(request, env) {
         ${tile('vis7', 'Geräte – 7 Tage', stats.visitorsLast7d)}
         ${tile('vis30', 'Geräte – 30 Tage', stats.visitorsLast30d)}
         ${tile('vistotal', 'Geräte insgesamt', stats.visitorsTotal, visitorHint)}
+        ${tile('wshare1', 'Mit Wallet – 24h', stats.walletShareLast1d == null ? null : stats.walletShareLast1d + '%',
+          stats.visitorsWithWalletLast1d == null ? 'noch keine Daten' : `${stats.visitorsWithWalletLast1d} von ${stats.visitorsLast1d} Geräten haben eine Wallet eingetragen`)}
+        ${tile('wshare30', 'Mit Wallet – 30 Tage', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
+          stats.visitorsWithWalletLast30d == null ? 'noch keine Daten' : `${stats.visitorsWithWalletLast30d} von ${stats.visitorsLast30d} Geräten` + (stats.visitorsWithWalletSince ? ` · erfasst seit ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
       <div class="note">
         Gezählt werden <b>Geräte</b>, nicht Menschen: Handy und PC derselben Person sind zwei.
@@ -1725,6 +1772,11 @@ async function handleStats(request, env) {
         Der Unterschied zu Seite 1: Dort zählen nur Nutzer <b>mit eingetragener Wallet</b> — nur
         die synchronisieren überhaupt. Hier zählt jeder Besuch, auch wer nur den Chart ansieht.
         Die beiden Zahlen werden nie übereinstimmen.
+        <br><br>
+        „Mit Wallet“: Der Browser meldet zusätzlich nur ein Ja/Nein, ob auf dem Gerät eine
+        Wallet eingetragen ist — nie welche. Der Anteil zeigt, wie viele Besucher den Schritt
+        vom Anschauen zum Eintragen machen. Er wird erst ab dem Update erfasst; ältere Tage
+        zählen als „ohne Wallet“, der 30-Tage-Wert ist anfangs also zu niedrig.
       </div>
     </section>
   </div>
@@ -1767,15 +1819,22 @@ async function handleStats(request, env) {
     setText('v-active', latestStats.activeLast1d);
     setText('v-requests', requestsVal);
     setText('v-total', latestStats.totalUniqueAddressesEver);
-    setText('v-returning', latestStats.returningLast30d);
-    setText('v-rate', latestStats.retentionRate30d == null ? '—' : latestStats.retentionRate30d + '%');
+    setText('v-returning', latestStats.returningAllTime);
+    setText('v-rate', latestStats.retentionRateAllTime == null ? '—' : latestStats.retentionRateAllTime + '%');
     setText('v-avgreq', avgVal == null ? '—' : avgVal);
-    setText('v-depth-base', latestStats.activeLast30d);
+    setText('v-depth-base', latestStats.depthBase);
     setText('v-vis1', latestStats.visitorsLast1d);
     setText('v-vis7', latestStats.visitorsLast7d);
     setText('v-vis30', latestStats.visitorsLast30d);
     setText('v-vistotal', latestStats.visitorsTotal);
     setText('h-vistotal', latestStats.visitorsSince ? 'seit ' + deDate(latestStats.visitorsSince) : 'noch keine Aufzeichnung');
+    setText('v-wshare1', latestStats.walletShareLast1d == null ? '—' : latestStats.walletShareLast1d + '%');
+    setText('v-wshare30', latestStats.walletShareLast30d == null ? '—' : latestStats.walletShareLast30d + '%');
+    setText('h-wshare1', latestStats.visitorsWithWalletLast1d == null ? 'noch keine Daten'
+      : latestStats.visitorsWithWalletLast1d + ' von ' + latestStats.visitorsLast1d + ' Geräten haben eine Wallet eingetragen');
+    setText('h-wshare30', latestStats.visitorsWithWalletLast30d == null ? 'noch keine Daten'
+      : latestStats.visitorsWithWalletLast30d + ' von ' + latestStats.visitorsLast30d + ' Geräten'
+        + (latestStats.visitorsWithWalletSince ? ' · erfasst seit ' + deDate(latestStats.visitorsWithWalletSince) : ''));
     (latestStats.engagementDepth || []).forEach(row => {
       const bar = document.getElementById('v-depth-bar-' + row.minDays);
       if (bar) bar.style.width = (row.pct == null ? 0 : row.pct) + '%';
@@ -1939,6 +1998,19 @@ async function baueDexVergleich() {
     .map((r) => { const nurAbgeschlossen = r.filter((e) => e.day < heute); return nurAbgeschlossen.length ? nurAbgeschlossen[nurAbgeschlossen.length - 1].day : null; })
     .filter(Boolean);
   const stichtag = letzteTage.length ? letzteTage.sort()[0] : null;
+  // Welche Quelle haengt hinterher? Der Stichtag ist bewusst der FRUEHESTE gemeinsame Tag
+  // (sonst stuende ein voller Tag THORChain gegen einen halben Tag Chainflip). Nur sagte die
+  // Anzeige nie, WORAUF sie wartet -- gemeldet: "warum noch nicht der 20., es ist doch nach
+  // 0:00 UTC". Midgard hat den Tag sofort, DefiLlama aggregiert Stunden spaeter.
+  const letzterTagJe = {};
+  for (const [key, r] of Object.entries(reihen)) {
+    const fertig = (r || []).filter((e) => e.day < heute);
+    letzterTagJe[key] = fertig.length ? fertig[fertig.length - 1].day : null;
+  }
+  const neuesterTag = letzteTage.length ? letzteTage.slice().sort().pop() : null;
+  const nachzuegler = stichtag && neuesterTag && neuesterTag > stichtag
+    ? Object.entries(letzterTagJe).filter(([, d]) => d === stichtag).map(([k]) => k)
+    : [];
 
   const ALLE = [{ key: 'thorchain', name: 'THORChain', source: 'midgard' },
     ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name, source: 'defillama' }))];
@@ -2005,7 +2077,11 @@ async function baueDexVergleich() {
   }
 
   return {
-    asOfDay: stichtag,            
+    asOfDay: stichtag,
+    // Liegt bei mindestens einer Quelle schon ein spaeterer Tag vor, steht hier welcher --
+    // und welche Quellen ihn noch nicht haben.
+    naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
+    wartetAuf: nachzuegler,
     sources: { thorchain: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
     
     thorNodePoolSplit: midgardSplitRoh,
@@ -2157,7 +2233,7 @@ const GITLAB_API = 'https://gitlab.com/api/v4/projects/thorchain%2Fthornode';
 // weiter die ALTE Nutzlast ausgeliefert, der die neuen Felder schlicht fehlten. Die Version
 // wird mitgespeichert; passt sie nicht, gilt der Eintrag als ungueltig und wird neu geholt.
 // Bei jeder Aenderung an der Form von baueThornodeTimeline hochzaehlen.
-const TIMELINE_SCHEMA = 13;
+const TIMELINE_SCHEMA = 15;
 const TIMELINE_FRESH_MS = 15 * 60 * 1000;
 const TIMELINE_STALE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -2667,15 +2743,36 @@ async function baueThornodeTimeline(env) {
   const DEV_TAGE = 7;
   const seit30 = Date.now() - DEV_TAGE * 24 * 60 * 60 * 1000;
   const proDev = new Map();
-  for (const e of [...commits, ...merged]) {
+  // OFFENE ARBEIT ZAEHLT MIT -- getrennt ausgewiesen.
+  //
+  // Gemeldet als Frage: "wo guckst du hin?" -- bis hierher nur auf Commits und GEMERGTE MRs.
+  // Damit fiel die gesamte Spalte "In Arbeit" aus der Bewertung: Wer ein Dutzend Entwuerfe
+  // offen hat und noch nichts gemergt, erschien als untaetig. Gerade die XMR-Arbeit laeuft
+  // aber ueber genau solche offenen MRs.
+  //
+  // Warum trotzdem GETRENNT und nicht einfach dazuaddiert: Ein offener MR ist angefangen,
+  // nicht erledigt. Beides in einen Topf zu werfen wuerde "hat viel vor" mit "hat viel
+  // geliefert" verwechseln. Deshalb eine eigene Zahl, und in der Sortierung geringer
+  // gewichtet als fertige Arbeit.
+  const quellen = [
+    ...commits.map((e) => ({ e, offen: false })),
+    ...merged.map((e) => ({ e, offen: false })),
+    ...offeneMrAlle.map((e) => ({ e, offen: true })),
+  ];
+  for (const { e, offen } of quellen) {
     if (!e.autor || !e.datumMs || e.datumMs < seit30 || e.rauschen) continue;
     let d = proDev.get(e.autor);
-    if (!d) { d = { name: e.autor, gesamt: 0, wichtig: 0, fokus: 0, letzteMs: 0, themen: {} }; proDev.set(e.autor, d); }
-    d.gesamt++;
-    if (e.thema !== 'wartung') d.wichtig++;
-    if (e.beobachtet) d.fokus++;
+    if (!d) { d = { name: e.autor, gesamt: 0, wichtig: 0, fokus: 0, offen: 0, letzteMs: 0, themen: {} }; proDev.set(e.autor, d); }
     if (e.datumMs > d.letzteMs) d.letzteMs = e.datumMs;
     if (e.thema && e.thema !== 'wartung') d.themen[e.thema] = (d.themen[e.thema] || 0) + 1;
+    // ALLES ZAEHLT. Vorher fiel Wartung (Tests, CI, Abhaengigkeiten, Dokumentation) aus der
+    // Bewertung -- wer die Testabdeckung in Ordnung haelt, erschien als weniger aktiv als
+    // jemand mit derselben Menge Feature-Arbeit. Fuer "wer arbeitet gerade viel" ist das die
+    // falsche Unterscheidung: Es ist alles Arbeit.
+    d.gesamt++;
+    if (e.beobachtet) d.fokus++;
+    if (offen) { d.offen++; continue; }
+    d.wichtig++;
   }
   const devs = [...proDev.values()]
     .map((d) => ({
@@ -2685,7 +2782,10 @@ async function baueThornodeTimeline(env) {
       themen: undefined,
     }))
     // Fokus-Arbeit wiegt schwerer, danach die Menge der nicht-Wartungs-Beitraege.
-    .sort((a, b) => (b.fokus * 3 + b.wichtig) - (a.fokus * 3 + a.wichtig))
+    // Fokus-Arbeit dreifach, fertige Arbeit einfach, offene Arbeit halb -- angefangen zaehlt,
+    // aber weniger als geliefert.
+    // Fokus-Arbeit (XMR, ZEC ...) wiegt dreifach, fertige Arbeit einfach, offene halb.
+    .sort((a, b) => (b.fokus * 3 + b.wichtig + b.offen * 0.5) - (a.fokus * 3 + a.wichtig + a.offen * 0.5))
     .slice(0, 6);
 
   // SCHWERPUNKT SEIT DEM LETZTEN RELEASE, nicht "letzte 14 Tage".
@@ -2868,28 +2968,76 @@ async function handleMemoless(request, env) {
     } catch (e) {  }
   }
 
-  const basis = (env && env.MEMOLESS_UPSTREAM) || MEMOLESS_UPSTREAM_DEFAULT;
-  const target = `${basis}/${sub}${url.search || ''}`;
-  const init = { method: request.method, headers: { 'Content-Type': 'application/json' } };
-  if (request.method === 'POST') {
-    init.body = await request.text();
+  // EIGENE INSTANZ ZUERST, OEFFENTLICHER DIENST ALS RUECKFALL.
+  //
+  // Hintergrund: Der oeffentliche Dienst auf api.thorchain.org haengt beim Registrieren sein
+  // eigenes Affiliate "uws" (1 bps) an jeden Swap-Memo -- das ist dort eine Betreiber-
+  // Einstellung (INJECT_AFFILIATE_IN_SWAPS / AFFILIATE_THORNAME), belegt durch Midgard und den
+  // Quellcode (github.com/familiarcow/thorchain-memoless-api). Wer nur "maxim" im Memo will,
+  // betreibt eine eigene Instanz mit INJECT_AFFILIATE_IN_SWAPS=false.
+  //
+  //   MEMOLESS_UPSTREAM   Adresse der eigenen Instanz, z.B. https://.../api/v1
+  //   MEMOLESS_API_KEY    (Secret) wird NUR an die eigene Instanz als "x-api-key" geschickt
+  //
+  // Ist die eigene Instanz nicht erreichbar, weicht der Worker auf den oeffentlichen Dienst aus,
+  // damit Swaps nie am eigenen Server scheitern -- "uws" steht dann nur in diesem Notfall im
+  // Memo. Das Ausweichen ist gefahrlos, weil die App die Vorpruefung mit Asset + Referenz
+  // aufruft: Die Referenz steht on-chain, JEDE Instanz kann sie pruefen, egal welche
+  // registriert hat.
+  //
+  // Zeitbudget: Die App wartet 20 s. Eigene Instanz hoechstens 8 s, danach oeffentlich 11 s.
+  const eigene = env && env.MEMOLESS_UPSTREAM ? String(env.MEMOLESS_UPSTREAM).replace(/\/+$/, '') : null;
+  const body = request.method === 'POST' ? await request.text() : undefined;
+  const versuche = [];
+  if (eigene && eigene !== MEMOLESS_UPSTREAM_DEFAULT) {
+    const kopf = { 'Content-Type': 'application/json' };
+    if (env.MEMOLESS_API_KEY) kopf['x-api-key'] = String(env.MEMOLESS_API_KEY);
+    versuche.push({ name: 'own', basis: eigene, headers: kopf, timeoutMs: 8000 });
   }
+  versuche.push({
+    name: 'public', basis: MEMOLESS_UPSTREAM_DEFAULT,
+    headers: { 'Content-Type': 'application/json' },
+    timeoutMs: versuche.length ? 11000 : 15000
+  });
 
-  try {
-    const res = await fetchWithTimeout(target, { ...init, timeoutMs: 15000 });
-    const text = await res.text();
-    return new Response(text, {
-      status: res.status,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-store',
-        ...corsHeaders(env),
-      },
-    });
-  } catch (e) {
-    const code = e?.name === 'AbortError' ? 'MEMOLESS_TIMEOUT' : 'MEMOLESS_UPSTREAM_FAILED';
-    return json({ error: { code, message: e?.message || String(e) } }, env, 502);
+  // Ausweichen nur bei Fehlern, die an der INSTANZ liegen: nicht erreichbar, Zeitlimit,
+  // Serverfehler, Drosselung, falscher Schluessel. Ein 400 (ungueltige Anfrage) wuerde der
+  // oeffentliche Dienst genauso ablehnen -- dort bleibt die Antwort der eigenen Instanz stehen.
+  const weichAus = (status) => status >= 500 || status === 401 || status === 403 || status === 429;
+  let letzterFehler = null;
+  for (let i = 0; i < versuche.length; i++) {
+    const v = versuche[i];
+    const istLetzter = i === versuche.length - 1;
+    try {
+      const res = await fetchWithTimeout(`${v.basis}/${sub}${url.search || ''}`, {
+        method: request.method, headers: v.headers, body, timeoutMs: v.timeoutMs
+      });
+      if (!istLetzter && weichAus(res.status)) {
+        console.warn(`[rune-rewards-backend] memoless ${sub}: eigene Instanz HTTP ${res.status}, weiche auf oeffentlichen Dienst aus`);
+        continue;
+      }
+      const text = await res.text();
+      return new Response(text, {
+        status: res.status,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          // Welche Instanz geantwortet hat -- zum Nachpruefen, ob der Rueckfall gegriffen hat.
+          'X-Memoless-Upstream': v.name,
+          ...corsHeaders(env),
+        },
+      });
+    } catch (e) {
+      letzterFehler = e;
+      if (!istLetzter) {
+        console.warn(`[rune-rewards-backend] memoless ${sub}: eigene Instanz nicht erreichbar (${e?.message || e}), weiche aus`);
+        continue;
+      }
+    }
   }
+  const e = letzterFehler;
+  const code = e?.name === 'AbortError' ? 'MEMOLESS_TIMEOUT' : 'MEMOLESS_UPSTREAM_FAILED';
+  return json({ error: { code, message: e?.message || String(e) } }, env, 502);
 }
 
 export default {
