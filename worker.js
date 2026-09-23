@@ -2128,6 +2128,32 @@ async function fetchMidgardHourlyPerDay() {
 // Wichtig: Das ist ein ROLLIERENDER 24-Stunden-Wert, kein Kalendertag. Er taugt deshalb nur
 // als Notnagel fuer den letzten Tag, und die Karte weist ihn als solchen aus (siehe
 // thorchainNotfallQuelle in der Antwort).
+// TAGESREIHE VON VANAHEIMEX (Quelle der Balken auf thorchain.net).
+//
+// Deren Chart liest data.swaps.intervals und rechnet totalVolumeUSD/100 -- also GENAU das
+// Midgard-Format, nur von einer eigenen, laufenden Instanz. Damit lassen sich ganze Tage
+// ersetzen, nicht nur ein rollierender 24h-Wert.
+//
+// Reihenfolge im Worker: Midgard-Tageswerte, dann Midgard-Stundenwerte, dann diese Reihe,
+// zuletzt der 24h-Notnagel.
+async function fetchVanaheimexDaily() {
+  try {
+    const json = await fetchFromBases(['https://vanaheimex.com'], '/api/dashboardPlots', { timeoutMs: 9000 });
+    const intervalle = (json && json.swaps && json.swaps.intervals) || [];
+    const proTag = new Map();
+    for (const iv of intervalle) {
+      const ende = parseInt(iv.endTime, 10);
+      if (!Number.isFinite(ende)) continue;
+      const usd = parseFloat(iv.totalVolumeUSD) / 1e2;
+      if (!Number.isFinite(usd) || usd <= 0) continue;
+      proTag.set(tagesSchluessel(ende - 1), usd);
+    }
+    return proTag;
+  } catch (e) {
+    return new Map();
+  }
+}
+
 async function fetchVanaheimex24h() {
   try {
     const json = await fetchFromBases(['https://vanaheimex.com'], '/api/dashboardData', { timeoutMs: 8000 });
@@ -2175,6 +2201,7 @@ async function baueDexVergleich() {
     fetchMidgardDailyVolume(30),
     fetchMidgardDailyFees(30),
     fetchMidgardHourlyPerDay(),
+    fetchVanaheimexDaily(),
     fetchVanaheimex24h(),
     ...DEX_PROTOCOLS.map((p) => fetchLlamaFees(p.slug)),
     ...DEX_PROTOCOLS.map((p) => fetchLlamaSupplySide(p.slug)),
@@ -2204,21 +2231,36 @@ async function baueDexVergleich() {
   const midgardReihe = roh[DEX_PROTOCOLS.length].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length].value : null;
   const midgardFees = roh[DEX_PROTOCOLS.length + 1].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 1].value : null;
   const midgardStunden = roh[DEX_PROTOCOLS.length + 2].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 2].value : new Map();
-  const vanaheimex24h = roh[DEX_PROTOCOLS.length + 3].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 3].value : null;
+  const vanaheimexTage = roh[DEX_PROTOCOLS.length + 3].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 3].value : new Map();
+  const vanaheimex24h = roh[DEX_PROTOCOLS.length + 4].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 4].value : null;
   const llamaFees = {}, llamaSupply = {};
-  // +4: davor stehen Midgard-Tageswerte, Midgard-Gebuehren, die Stundenwerte und der
-  // Notfallwert von vanaheimex.
+  // +5: davor stehen Midgard-Tageswerte, Midgard-Gebuehren, die Stundenwerte, die Tagesreihe
+  // von vanaheimex und dessen 24h-Notnagel.
   DEX_PROTOCOLS.forEach((p, i) => {
-    const r = roh[DEX_PROTOCOLS.length + 4 + i];
+    const r = roh[DEX_PROTOCOLS.length + 5 + i];
     if (r && r.status === 'fulfilled' && r.value) llamaFees[p.key] = r.value;
-    const r2 = roh[DEX_PROTOCOLS.length + 4 + DEX_PROTOCOLS.length + i];
+    const r2 = roh[DEX_PROTOCOLS.length + 5 + DEX_PROTOCOLS.length + i];
     if (r2 && r2.status === 'fulfilled' && r2.value) llamaSupply[p.key] = r2.value;
   });
 
   if (midgardReihe && midgardReihe.length) reihen['thorchain'] = midgardReihe.slice().sort((a, b) => a.day < b.day ? -1 : 1);
   else fehler['thorchain'] = 'MIDGARD_NO_DATA';
 
-  // Tage ohne Wert aus den Stundenwerten derselben Quelle nachtragen (siehe
+  // ZUERST die vollstaendige Tagesreihe von vanaheimex (Quelle der Balken auf thorchain.net):
+  // ein echter, ganzer Tageswert ist verlaesslicher als zusammengezaehlte Stunden. Erst was
+  // dort fehlt, wird anschliessend aus Midgards Stundenwerten gebildet.
+  const thorVanaTage = [];
+  if (reihen['thorchain'] && vanaheimexTage && vanaheimexTage.size) {
+    reihen['thorchain'] = reihen['thorchain'].map((eintrag) => {
+      if (eintrag.volume != null) return eintrag;
+      const wert = vanaheimexTage.get(eintrag.day);
+      if (!(wert > 0)) return eintrag;
+      thorVanaTage.push(eintrag.day);
+      return { day: eintrag.day, volume: wert, quelle: 'vanaheimex-tag' };
+    });
+  }
+
+  // Danach die Reste aus Midgards Stundenwerten (siehe
   // fetchMidgardHourlyPerDay). Nur vollstaendige Tage, und nur, wenn tatsaechlich Swaps
   // gezaehlt wurden -- sonst bliebe es bei "kein Wert".
   const thorStundenTage = [];
@@ -2226,8 +2268,13 @@ async function baueDexVergleich() {
     reihen['thorchain'] = reihen['thorchain'].map((eintrag) => {
       if (eintrag.volume != null) return eintrag;
       const std = midgardStunden.get(eintrag.day);
-      if (!std || std.stunden < 24 || std.mitDaten === 0 || !(std.usd > 0)) return eintrag;
-      thorStundenTage.push(eintrag.day);
+      // Gemessen: fuer den 22.09. liefert Midgard nur 23 Stundenintervalle -- die letzte Stunde
+      // vor Mitternacht fehlt ganz. Die urspruengliche Bedingung "alle 24" verwarf deshalb
+      // jeden Tag. Jetzt reichen 20 Stunden MIT Daten; der Tag ist dann leicht zu niedrig,
+      // aber um Groessenordnungen richtiger als gar kein Wert. Wie viele Stunden es waren,
+      // steht in der Antwort.
+      if (!std || std.mitDaten < 20 || !(std.usd > 0)) return eintrag;
+      thorStundenTage.push({ tag: eintrag.day, stunden: std.mitDaten });
       return { day: eintrag.day, volume: std.usd, quelle: 'midgard-stunden' };
     });
   }
@@ -2235,15 +2282,15 @@ async function baueDexVergleich() {
   // Wenn danach IMMER NOCH kein einziger der letzten beiden Tage einen Wert hat, greift die
   // letzte Absicherung: der rollierende 24-Stunden-Wert von vanaheimex (Quelle von
   // thorchain.net). Er wird dem letzten fehlenden Tag zugeordnet und offen ausgewiesen.
+  // Greift, sobald der LETZTE Tag der Reihe noch immer keinen Wert hat -- vorher verlangte die
+  // Regel zwei leere Tage in Folge und sprang deshalb nie an.
   let thorNotfall = null;
-  if (reihen['thorchain'] && vanaheimex24h) {
-    const letzte = reihen['thorchain'].slice(-2);
-    const alleLeer = letzte.length > 0 && letzte.every((e) => e.volume == null);
-    if (alleLeer) {
-      const ziel = letzte[letzte.length - 1].day;
+  if (reihen['thorchain'] && reihen['thorchain'].length && vanaheimex24h) {
+    const letzter = reihen['thorchain'][reihen['thorchain'].length - 1];
+    if (letzter && letzter.volume == null) {
       reihen['thorchain'] = reihen['thorchain'].map((e) =>
-        e.day === ziel ? { day: e.day, volume: vanaheimex24h, quelle: 'vanaheimex-24h' } : e);
-      thorNotfall = ziel;
+        e.day === letzter.day ? { day: e.day, volume: vanaheimex24h, quelle: 'vanaheimex-24h' } : e);
+      thorNotfall = letzter.day;
     }
   }
 
@@ -2349,6 +2396,8 @@ async function baueDexVergleich() {
     sources: { thorchain: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
     // Tage, deren Wert aus den Stundenwerten stammt, weil die Tagesreihe leer war.
     thorchainStundenTage: thorStundenTage,
+    // Tage, die aus der Tagesreihe von vanaheimex stammen.
+    thorchainVanaheimexTage: thorVanaTage,
     // Tag, der notfalls mit dem rollierenden 24h-Wert von vanaheimex gefuellt wurde.
     thorchainNotfallQuelle: thorNotfall ? { tag: thorNotfall, quelle: 'vanaheimex-24h' } : null,
     
