@@ -1934,9 +1934,11 @@ function merkeSplit(intervalle) {
 // Ausdruecklich NICHT selbst umgerechnet: ein geschaetzter Dollarwert waere nicht von einem
 // gemessenen zu unterscheiden. Solche Tage bekommen volume = null und gelten als "kein Wert";
 // die Karte zeigt dann einen Strich und nennt die Quelle als Ursache.
-function preisFehlt(iv) {
-  const p = parseFloat(iv && iv.runePriceUSD);
-  return !(Number.isFinite(p) && p > 0);
+// Entscheidend ist NICHT, ob runePriceUSD fehlt (gemeldet: es war gesetzt und der Dollarwert
+// trotzdem 0), sondern ob Midgard RUNE-Volumen meldet, aber keinen Dollarbetrag dazu. Genau
+// dann ist der Wert unbekannt -- und nicht null Dollar.
+function ohneDollarwert(usd, runeBasis) {
+  return !(Number.isFinite(usd) && usd > 0) && Number(runeBasis) > 0;
 }
 
 async function fetchMidgardDailyFees(tage) {
@@ -1948,9 +1950,9 @@ async function fetchMidgardDailyFees(tage) {
     const preis = parseFloat(iv.runePriceUSD);
     const ende = parseInt(iv.endTime, 10);
     const tag = tagesSchluessel(ende - 1);
-    // Kein Kurs -> kein Dollarwert. null statt 0, damit die Karte einen Strich zeigt.
-    if (preisFehlt(iv) && Number(iv.liquidityFees) > 0) return { day: tag, volume: null };
     const usd = Number.isFinite(feesRune) && Number.isFinite(preis) ? feesRune * preis : 0;
+    // Gebuehren in RUNE vorhanden, aber kein Dollarbetrag -> unbekannt, nicht 0.
+    if (ohneDollarwert(usd, iv.liquidityFees)) return { day: tag, volume: null };
     return { day: tag, volume: usd };
   });
 }
@@ -1964,8 +1966,8 @@ async function fetchMidgardDailyVolume(tage) {
     const vol = parseFloat(iv.totalVolumeUSD) / 1e2;
     const ende = parseInt(iv.endTime, 10);
     const tag = tagesSchluessel(ende - 1);
-    // Swaps vorhanden, aber kein Kurs -> Dollarwert unbekannt, nicht null Dollar.
-    if (preisFehlt(iv) && Number(iv.totalVolume) > 0) return { day: tag, volume: null };
+    // Swaps in RUNE vorhanden, aber kein Dollarbetrag -> unbekannt, nicht null Dollar.
+    if (ohneDollarwert(vol, iv.totalVolume)) return { day: tag, volume: null };
     return { day: tag, volume: Number.isFinite(vol) ? vol : 0 };
   });
 }
