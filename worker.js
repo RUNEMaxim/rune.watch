@@ -2086,6 +2086,58 @@ async function fetchMidgardDailyFees(tage) {
   });
 }
 
+// TAGESLUECKEN AUS STUNDENWERTEN SCHLIESSEN.
+//
+// Nachgemessen bei Liquify: fuer den 22.09. meldete die TAGES-Reihe totalCount 0, waehrend die
+// STUNDEN-Reihe desselben Tages normale Werte hatte (17-22 Uhr UTC: 26, 57, 65, 38, 54 Mio.
+// USD). Bei Midgard haengt also nur die Tagesaggregation, nicht die Datenbank.
+//
+// Deshalb: Stundenwerte mitholen (100 Intervalle, gut vier Tage) und je Tag aufsummieren.
+// Benutzt wird das NUR fuer Tage, die in der Tagesreihe fehlen, und nur, wenn alle 24 Stunden
+// vorliegen -- ein halber Tag waere schlimmer als gar keiner.
+async function fetchMidgardHourlyPerDay() {
+  try {
+    const json = await fetchFromBases(getMidgardBases(), '/history/swaps?interval=hour&count=100', { timeoutMs: 12000 });
+    const intervalle = (json && json.intervals) || [];
+    const proTag = new Map();
+    for (const iv of intervalle) {
+      const ende = parseInt(iv.endTime, 10);
+      if (!Number.isFinite(ende)) continue;
+      const tag = tagesSchluessel(ende - 1);
+      const usd = parseFloat(iv.totalVolumeUSD) / 1e2;
+      const anzahl = Number(iv.totalCount) || 0;
+      const bisher = proTag.get(tag) || { usd: 0, stunden: 0, mitDaten: 0 };
+      bisher.usd += Number.isFinite(usd) ? usd : 0;
+      bisher.stunden += 1;
+      if (anzahl > 0) bisher.mitDaten += 1;
+      proTag.set(tag, bisher);
+    }
+    return proTag;
+  } catch (e) {
+    return new Map();
+  }
+}
+
+// LETZTE ABSICHERUNG: vanaheimex.com/api/dashboardData.
+//
+// Das ist der Server, aus dem der offizielle Explorer thorchain.net seine "Volume (24hr)"-Zahl
+// nimmt (stats.volume24USD, dort ebenfalls durch 100 geteilt). Er wird NUR angefragt, wenn
+// sowohl die Tages- als auch die Stundenreihe von Midgard nichts hergeben -- also wenn bei
+// Liquify wirklich alles haengt.
+//
+// Wichtig: Das ist ein ROLLIERENDER 24-Stunden-Wert, kein Kalendertag. Er taugt deshalb nur
+// als Notnagel fuer den letzten Tag, und die Karte weist ihn als solchen aus (siehe
+// thorchainNotfallQuelle in der Antwort).
+async function fetchVanaheimex24h() {
+  try {
+    const json = await fetchFromBases(['https://vanaheimex.com'], '/api/dashboardData', { timeoutMs: 8000 });
+    const roh = Number(json && json.stats && json.stats.volume24USD);
+    return Number.isFinite(roh) && roh > 0 ? roh / 1e2 : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function fetchMidgardDailyVolume(tage) {
   const json = await fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&count=${Math.min(100, tage + 2)}`, { timeoutMs: 12000 });
   const intervalle = (json && json.intervals) || [];
@@ -2122,6 +2174,8 @@ async function baueDexVergleich() {
     ...DEX_PROTOCOLS.map((p) => fetchLlamaSummary(p.slug)),
     fetchMidgardDailyVolume(30),
     fetchMidgardDailyFees(30),
+    fetchMidgardHourlyPerDay(),
+    fetchVanaheimex24h(),
     ...DEX_PROTOCOLS.map((p) => fetchLlamaFees(p.slug)),
     ...DEX_PROTOCOLS.map((p) => fetchLlamaSupplySide(p.slug)),
   ]);
@@ -2149,16 +2203,50 @@ async function baueDexVergleich() {
 
   const midgardReihe = roh[DEX_PROTOCOLS.length].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length].value : null;
   const midgardFees = roh[DEX_PROTOCOLS.length + 1].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 1].value : null;
+  const midgardStunden = roh[DEX_PROTOCOLS.length + 2].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 2].value : new Map();
+  const vanaheimex24h = roh[DEX_PROTOCOLS.length + 3].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 3].value : null;
   const llamaFees = {}, llamaSupply = {};
+  // +4: davor stehen Midgard-Tageswerte, Midgard-Gebuehren, die Stundenwerte und der
+  // Notfallwert von vanaheimex.
   DEX_PROTOCOLS.forEach((p, i) => {
-    const r = roh[DEX_PROTOCOLS.length + 2 + i];
+    const r = roh[DEX_PROTOCOLS.length + 4 + i];
     if (r && r.status === 'fulfilled' && r.value) llamaFees[p.key] = r.value;
-    const r2 = roh[DEX_PROTOCOLS.length + 2 + DEX_PROTOCOLS.length + i];
+    const r2 = roh[DEX_PROTOCOLS.length + 4 + DEX_PROTOCOLS.length + i];
     if (r2 && r2.status === 'fulfilled' && r2.value) llamaSupply[p.key] = r2.value;
   });
 
   if (midgardReihe && midgardReihe.length) reihen['thorchain'] = midgardReihe.slice().sort((a, b) => a.day < b.day ? -1 : 1);
   else fehler['thorchain'] = 'MIDGARD_NO_DATA';
+
+  // Tage ohne Wert aus den Stundenwerten derselben Quelle nachtragen (siehe
+  // fetchMidgardHourlyPerDay). Nur vollstaendige Tage, und nur, wenn tatsaechlich Swaps
+  // gezaehlt wurden -- sonst bliebe es bei "kein Wert".
+  const thorStundenTage = [];
+  if (reihen['thorchain'] && midgardStunden && midgardStunden.size) {
+    reihen['thorchain'] = reihen['thorchain'].map((eintrag) => {
+      if (eintrag.volume != null) return eintrag;
+      const std = midgardStunden.get(eintrag.day);
+      if (!std || std.stunden < 24 || std.mitDaten === 0 || !(std.usd > 0)) return eintrag;
+      thorStundenTage.push(eintrag.day);
+      return { day: eintrag.day, volume: std.usd, quelle: 'midgard-stunden' };
+    });
+  }
+
+  // Wenn danach IMMER NOCH kein einziger der letzten beiden Tage einen Wert hat, greift die
+  // letzte Absicherung: der rollierende 24-Stunden-Wert von vanaheimex (Quelle von
+  // thorchain.net). Er wird dem letzten fehlenden Tag zugeordnet und offen ausgewiesen.
+  let thorNotfall = null;
+  if (reihen['thorchain'] && vanaheimex24h) {
+    const letzte = reihen['thorchain'].slice(-2);
+    const alleLeer = letzte.length > 0 && letzte.every((e) => e.volume == null);
+    if (alleLeer) {
+      const ziel = letzte[letzte.length - 1].day;
+      reihen['thorchain'] = reihen['thorchain'].map((e) =>
+        e.day === ziel ? { day: e.day, volume: vanaheimex24h, quelle: 'vanaheimex-24h' } : e);
+      thorNotfall = ziel;
+    }
+  }
+
 
   const heute = tagesSchluessel(Math.floor(Date.now() / 1000));
   const letzteTage = Object.values(reihen).filter((r) => r.length)
@@ -2259,6 +2347,10 @@ async function baueDexVergleich() {
     naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
     wartetAuf: nachzuegler,
     sources: { thorchain: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
+    // Tage, deren Wert aus den Stundenwerten stammt, weil die Tagesreihe leer war.
+    thorchainStundenTage: thorStundenTage,
+    // Tag, der notfalls mit dem rollierenden 24h-Wert von vanaheimex gefuellt wurde.
+    thorchainNotfallQuelle: thorNotfall ? { tag: thorNotfall, quelle: 'vanaheimex-24h' } : null,
     
     thorNodePoolSplit: midgardSplitRoh,
     protocols: protokolle,
