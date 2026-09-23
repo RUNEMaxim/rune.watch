@@ -1462,6 +1462,78 @@ async function handleSwapHistory(request, env, ctx) {
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
 }
 
+// RUNEBOND-EINTRAEGE.
+//
+// RUNEBond ist die Vermittlungsstelle zwischen Bond Providern und Node-Betreibern. Wer dort
+// gelistet ist, nimmt ausdruecklich Bond Provider an -- genau die Information fehlt in
+// /thorchain/nodes. Die Liste kommt aus deren oeffentlicher API (/api/nodes, Felder laut
+// ihrem npm-Client @hippocampus-web3/runebond-client).
+//
+// UEBER DEN WORKER, nicht aus dem Browser: einmal je 10 Minuten geholt und hier
+// zwischengespeichert, damit ihre API nicht von jedem Besucher einzeln getroffen wird.
+// Die Basisadresse steht in RUNEBOND_API_BASE (Variable), falls sie sich aendert.
+// Mehrere Kandidaten, der Reihe nach: welche Adresse ihre oeffentliche API bedient, steht
+// nirgends. Ihr npm-Client (@hippocampus-web3/runebond-client) kennt nur die PFADE (/api/nodes),
+// die Basis wird beim Aufruf gesetzt. Antwortet eine, wird sie fuer diesen Lauf gemerkt.
+// Mit gesetzter Variable RUNEBOND_API_BASE faellt das Raten weg.
+const RUNEBOND_API_BASES = [
+  'https://api.runebond.com',
+  'https://app.runebond.com',
+  'https://runebond.com',
+  'https://integrators.runebond.com',
+];
+const RUNEBOND_CACHE_MS = 10 * 60 * 1000;
+let runebondCache = { at: 0, data: null };
+
+async function handleRunebondNodes(request, env, ctx) {
+  const jetzt = Date.now();
+  if (runebondCache.data && jetzt - runebondCache.at < RUNEBOND_CACHE_MS) {
+    return json(runebondCache.data, env);
+  }
+  const kandidaten = (env && env.RUNEBOND_API_BASE)
+    ? [String(env.RUNEBOND_API_BASE).replace(/\/+$/, '')]
+    : RUNEBOND_API_BASES;
+  const kopf = { accept: 'application/json' };
+  // Optionaler Schluessel fuer die Integrators-API (integrators.runebond.com verlangt einen).
+  if (env && env.RUNEBOND_API_KEY) kopf['x-api-key'] = String(env.RUNEBOND_API_KEY);
+  try {
+    let roh = null, letzterFehler = null, basisGenutzt = null;
+    for (const basis of kandidaten) {
+      try {
+        const res = await fetchWithTimeout(`${basis}/api/nodes?limit=200`, { timeoutMs: 6000, headers: kopf });
+        if (!res.ok) { letzterFehler = new Error(basis + ' HTTP_' + res.status); continue; }
+        const j = await res.json();
+        const hatDaten = Array.isArray(j) ? j.length : Array.isArray(j?.data) ? j.data.length : 0;
+        if (!hatDaten) { letzterFehler = new Error(basis + ' LEER'); continue; }
+        roh = j; basisGenutzt = basis; break;
+      } catch (e) { letzterFehler = e; }
+    }
+    if (!roh) throw letzterFehler || new Error('KEINE_QUELLE');
+    // Antwort ist {data: [...]} oder direkt ein Array -- beides zulassen.
+    const liste = Array.isArray(roh) ? roh : (Array.isArray(roh?.data) ? roh.data : []);
+    const eintraege = liste
+      .filter((e) => e && e.nodeAddress && !e.isDelisted)
+      .map((e) => ({
+        addr: String(e.nodeAddress).toLowerCase(),
+        name: e.name || null,
+        minRune: Number(e.minRune) || null,
+        maxRune: Number(e.maxRune) || null,
+        fee: Number.isFinite(Number(e.feePercentage)) ? Number(e.feePercentage) : null,
+        providers: Number.isFinite(Number(e.bondProvidersCount)) ? Number(e.bondProvidersCount) : null,
+      }));
+    // "base" steht mit in der Antwort -- so ist beim Nachsehen sofort klar, welche Adresse
+    // tatsaechlich geantwortet hat.
+    const daten = { listings: eintraege, fetchedAt: jetzt, base: basisGenutzt, error: null };
+    runebondCache = { at: jetzt, data: daten };
+    return json(daten, env);
+  } catch (e) {
+    // Faellt weich aus: die Node-Karte zeigt dann einfach keine Markierungen.
+    const daten = { listings: [], fetchedAt: jetzt, error: String(e?.message || e) };
+    runebondCache = { at: jetzt - (RUNEBOND_CACHE_MS - 60000), data: daten };
+    return json(daten, env);
+  }
+}
+
 // AUSGEHENDE KLICKS (z.B. auf die RUNEBond-Empfehlung).
 //
 // Gezaehlt wird, WIE OFT und von WIE VIELEN Geraeten geklickt wurde -- mehr nicht. Kein Ziel
@@ -3190,6 +3262,9 @@ export default {
       }
       if (url.pathname === '/swap-history') {
         return await handleSwapHistory(request, env, ctx);
+      }
+      if (url.pathname === '/runebond-nodes') {
+        return await handleRunebondNodes(request, env, ctx);
       }
       if (url.pathname === '/click') {
         return await handleClick(request, env, ctx);
