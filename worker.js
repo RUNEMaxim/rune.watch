@@ -227,10 +227,13 @@ function fetchVolumeBundleLive() {
     //   1. Tage, die Liquify gar nicht oder leer liefert, werden daraus ergaenzt.
     //   2. Der LAUFENDE Tag kommt ueberhaupt erst dadurch in die Reihe -- Midgard liefert ihn
     //      nicht, solange dessen Tagesaggregation haengt.
-    const [hourResult, dayResult, vanaResult] = await Promise.allSettled([
+    const [hourResult, dayResult, vanaResult, rollierendResult] = await Promise.allSettled([
       fetchVolumeInterval('hour', 24),
       fetchVolumeInterval('day', 30),
       fetchVanaheimexSwapIntervals(),
+      // Rollierende 24 Stunden, exakt die Zahl, die thorchain.net oben anzeigt
+      // (stats.volume24USD, dort ebenfalls durch 100 geteilt).
+      fetchVanaheimex24h(),
     ]);
     const tage = dayResult.status === 'fulfilled' ? dayResult.value : null;
     const vana = vanaResult.status === 'fulfilled' ? vanaResult.value : null;
@@ -239,6 +242,7 @@ function fetchVolumeBundleLive() {
       hourError: hourResult.status === 'rejected' ? (hourResult.reason?.message || String(hourResult.reason)) : null,
       day: mischeTagesreihe(tage, vana),
       dayError: dayResult.status === 'rejected' ? (dayResult.reason?.message || String(dayResult.reason)) : null,
+      rolling24Usd: rollierendResult.status === 'fulfilled' ? rollierendResult.value : null,
     };
   })();
   promise.catch(() => {
@@ -347,7 +351,13 @@ async function handleVolume(request, env, ctx) {
     recordVisitor(env, ctx, _u.searchParams.get('v'), _u.searchParams.get('w') === '1');
   } catch (e) {  }
   const result = await fetchVolumeBundle(env, ctx);
-  return json({ ...result.data, stale: result.stale, staleSince: result.staleSince || null }, env);
+  // Der rollierende 24h-Wert ist eine Momentaufnahme -- er wird bei jeder Anfrage frisch
+  // geholt, damit die Kopfzahl nicht aus dem Zwischenspeicher veraltet.
+  let rolling24Usd = result.data && result.data.rolling24Usd;
+  if (rolling24Usd == null) {
+    try { rolling24Usd = await fetchVanaheimex24h(); } catch (e) { rolling24Usd = null; }
+  }
+  return json({ ...result.data, rolling24Usd, stale: result.stale, staleSince: result.staleSince || null }, env);
 }
 
 function fetchRecentSwapActions() {
