@@ -24,6 +24,12 @@ name = "rune-rewards-backend"
 main = "worker.js"
 compatibility_date = "2026-09-01"
 
+# DER WICHTIGE SCHALTER: ohne ihn LOESCHT jeder Deploy alle Variablen und Secrets, die im
+# Dashboard gesetzt wurden -- genau so sind MEMOLESS_UPSTREAM, MEMOLESS_API_KEY und die
+# uebrigen Schluessel verschwunden, nachdem ueber GitHub deployt wurde. Mit keep_vars bleiben
+# sie erhalten, und die Schluessel muessen NICHT in dieses oeffentliche Repo.
+keep_vars = true
+
 # Beobachtbarkeit: Logs im Dashboard unter "Observability" -- hilfreich, wenn wieder etwas
 # stillschweigend ausfaellt (z.B. Midgard ohne Kurse).
 [observability]
