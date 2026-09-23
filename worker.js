@@ -1574,6 +1574,18 @@ async function handleRunebondNodes(request, env, ctx) {
   }
 }
 
+// EIGENE ADRESSE? -- gibt NUR ein Ja/Nein zurueck.
+//
+// Die App fragt das, um die Spenden- und Bonding-Banner bei den eigenen Adressen des Betreibers
+// zu unterdruecken. Welche Adressen das sind, steht in STATS_EXCLUDED_ADDRESSES (dieselbe
+// Liste, die schon aus der Besucherstatistik ausgenommen ist) und verlaesst den Worker nicht.
+async function handleIsOwner(request, env) {
+  const url = new URL(request.url);
+  const address = String(url.searchParams.get('address') || '').trim().toLowerCase();
+  if (!address) return json({ owner: false }, env);
+  return json({ owner: getStatsExcludedAddresses(env).has(address) }, env);
+}
+
 // AUSGEHENDE KLICKS (z.B. auf die RUNEBond-Empfehlung).
 //
 // Gezaehlt wird, WIE OFT und von WIE VIELEN Geraeten geklickt wurde -- mehr nicht. Kein Ziel
@@ -3472,6 +3484,9 @@ export default {
       }
       if (url.pathname === '/runebond-nodes') {
         return await handleRunebondNodes(request, env, ctx);
+      }
+      if (url.pathname === '/is-owner') {
+        return await handleIsOwner(request, env);
       }
       if (url.pathname === '/click') {
         return await handleClick(request, env, ctx);
