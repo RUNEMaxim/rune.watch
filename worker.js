@@ -61,6 +61,16 @@ function getMidgardBases() {
     bases.push(`https://gateway.liquify.com/api=${key}/v2`);
   }
   bases.push('https://gateway.liquify.com/chain/thorchain_midgard/v2');
+  // KEIN ERSATZ VORHANDEN -- bewusst so belassen, damit hier niemand (auch ich nicht) wieder
+  // tote Adressen eintraegt: ninerealms wurde im April 2026 abgeschaltet, thorchain.network
+  // ist tot, midgard.thorchain.info existiert nicht, midgard.thorswap.net gibt 502. Liquify
+  // ist damit faktisch die einzige grosse oeffentliche Midgard-Instanz und ein einzelner
+  // Ausfallpunkt (gemeldet, als sie mit inSync:false und vier Tage altem lastThorNode keine
+  // Kurse mehr lieferte). Faellt sie aus, zeigt die Karte einen Strich und nennt die Quelle,
+  // statt zu schaetzen. Eine eigene Instanz braucht Archiv-Node samt TimescaleDB.
+  // Eine neue Adresse gehoert per Variable MIDGARD_EXTRA_BASES ergaenzt, nicht hier fest
+  // eingetragen -- erst pruefen: /v2/health muss inSync true und einen aktuellen
+  // lastThorNode melden.
   if (env.MIDGARD_EXTRA_BASES) {
     for (const b of String(env.MIDGARD_EXTRA_BASES).split(',')) {
       const t2 = b.trim().replace(/\/+$/, '');
@@ -1914,6 +1924,21 @@ function merkeSplit(intervalle) {
     : null;
 }
 
+// FEHLENDE KURSE BEI MIDGARD (gemeldet: "THORChain zeigt 0 bei Volumen und Gebuehren").
+//
+// Midgards Health meldete inSync:false und lastThorNode VIER TAGE zurueck. Die Datenbank hat
+// die Swaps des Tages, aber ohne THORNode-Daten fehlt der RUNE-Kurs: runePriceUSD kommt als 0,
+// und damit sind ALLE Dollarwerte des Tages 0 -- auch totalVolumeUSD. Das RUNE-Volumen selbst
+// ist da (deshalb laeuft die Volumenkarte weiter, die rechnet in RUNE).
+//
+// Ausdruecklich NICHT selbst umgerechnet: ein geschaetzter Dollarwert waere nicht von einem
+// gemessenen zu unterscheiden. Solche Tage bekommen volume = null und gelten als "kein Wert";
+// die Karte zeigt dann einen Strich und nennt die Quelle als Ursache.
+function preisFehlt(iv) {
+  const p = parseFloat(iv && iv.runePriceUSD);
+  return !(Number.isFinite(p) && p > 0);
+}
+
 async function fetchMidgardDailyFees(tage) {
   const json = await fetchFromBases(getMidgardBases(), `/history/earnings?interval=day&count=${Math.min(100, tage + 2)}`, { timeoutMs: 12000 });
   const intervalle = (json && json.intervals) || [];
@@ -1922,8 +1947,11 @@ async function fetchMidgardDailyFees(tage) {
     const feesRune = Number(iv.liquidityFees) / 1e8;
     const preis = parseFloat(iv.runePriceUSD);
     const ende = parseInt(iv.endTime, 10);
+    const tag = tagesSchluessel(ende - 1);
+    // Kein Kurs -> kein Dollarwert. null statt 0, damit die Karte einen Strich zeigt.
+    if (preisFehlt(iv) && Number(iv.liquidityFees) > 0) return { day: tag, volume: null };
     const usd = Number.isFinite(feesRune) && Number.isFinite(preis) ? feesRune * preis : 0;
-    return { day: tagesSchluessel(ende - 1), volume: usd };
+    return { day: tag, volume: usd };
   });
 }
 
@@ -1931,23 +1959,31 @@ async function fetchMidgardDailyVolume(tage) {
   const json = await fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&count=${Math.min(100, tage + 2)}`, { timeoutMs: 12000 });
   const intervalle = (json && json.intervals) || [];
   return intervalle.map((iv) => {
-    
+    // Midgard liefert totalVolumeUSD in CENT -- daher /1e2 (gegengerechnet: totalVolume/1e8
+    // mal runePriceUSD ergibt denselben Betrag).
     const vol = parseFloat(iv.totalVolumeUSD) / 1e2;
-    
     const ende = parseInt(iv.endTime, 10);
-    return { day: tagesSchluessel(ende - 1), volume: Number.isFinite(vol) ? vol : 0 };
+    const tag = tagesSchluessel(ende - 1);
+    // Swaps vorhanden, aber kein Kurs -> Dollarwert unbekannt, nicht null Dollar.
+    if (preisFehlt(iv) && Number(iv.totalVolume) > 0) return { day: tag, volume: null };
+    return { day: tag, volume: Number.isFinite(vol) ? vol : 0 };
   });
 }
 
 function summiereTage(reihe, tage, letzterTag) {
   
   const grenze = new Date(letzterTag + 'T00:00:00.000Z').getTime() - (tage - 1) * 86400000;
-  let summe = 0, gezaehlt = 0;
+  let summe = 0, gezaehlt = 0, ohneWert = 0;
   for (const e of reihe) {
     const t = new Date(e.day + 'T00:00:00.000Z').getTime();
-    if (t >= grenze && e.day <= letzterTag) { summe += e.volume; gezaehlt++; }
+    if (t >= grenze && e.day <= letzterTag) {
+      // volume === null: Quelle hatte an dem Tag keinen Kurs (siehe preisFehlt). Solche Tage
+      // duerfen die Summe nicht als 0 verwaessern -- sie werden gezaehlt und gemeldet.
+      if (e.volume == null) { ohneWert++; continue; }
+      summe += e.volume; gezaehlt++;
+    }
   }
-  return { summe, tage: gezaehlt };
+  return { summe, tage: gezaehlt, ohneWert };
 }
 
 async function baueDexVergleich() {
@@ -2022,10 +2058,17 @@ async function baueDexVergleich() {
     const d1 = summiereTage(reihe, 1, stichtag);
     const d7 = summiereTage(reihe, 7, stichtag);
     const d30 = summiereTage(reihe, 30, stichtag);
+    // Kein einziger Tag mit Wert, aber Tage ohne Kurs -> Wert unbekannt (null), nicht 0.
+    // Die Karte zeigt dafuer einen Strich und nennt die Quelle (siehe quelleProblem).
+    const wert = (x) => (x.tage === 0 && x.ohneWert > 0) ? null : x.summe;
+    const luecken = d30.ohneWert > 0;
     return {
       key: p.key, name: p.name, source: p.source,
-      d1: d1.summe, d7: d7.summe, d30: d30.summe,
+      d1: wert(d1), d7: wert(d7), d30: wert(d30),
       days1: d1.tage, days7: d7.tage, days30: d30.tage,
+      // Welche Quelle hakt -- die Karte zeigt das als Hinweis an.
+      quelleProblem: luecken ? (p.source === 'midgard' ? 'midgard' : p.source) : null,
+      tageOhneWert: luecken ? { d1: d1.ohneWert, d7: d7.ohneWert, d30: d30.ohneWert } : null,
       
       series: reihe.filter((e) => e.day <= stichtag).slice(-30),
       error: null,
@@ -2063,7 +2106,9 @@ async function baueDexVergleich() {
     const reihe = feeReihen[p.key];
     if (reihe && reihe.length && stichtag) {
       const f1 = summiereTage(reihe, 1, stichtag), f7 = summiereTage(reihe, 7, stichtag), f30 = summiereTage(reihe, 30, stichtag);
-      p.fees = { d1: f1.summe, d7: f7.summe, d30: f30.summe, days1: f1.tage, days7: f7.tage, days30: f30.tage };
+      p.fees = { d1: (f1.tage === 0 && f1.ohneWert > 0) ? null : f1.summe,
+                 d7: (f7.tage === 0 && f7.ohneWert > 0) ? null : f7.summe,
+                 d30: (f30.tage === 0 && f30.ohneWert > 0) ? null : f30.summe, days1: f1.tage, days7: f7.tage, days30: f30.tage };
       p.feeSeries = reihe.filter((e) => e.day <= stichtag).slice(-30);
       p.feeBasis = p.key === 'thorchain' ? 'midgard-liquidityFees' : 'defillama-supplySide';
     } else { p.fees = null; p.feeBasis = null; }
