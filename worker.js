@@ -1603,17 +1603,19 @@ async function handleStats(request, env) {
     return json(stats, env);
   }
 
+  // Datum auf der Statistikseite englisch: 22 Sep 2026 statt 22.09.2026.
   const deDate = (isoDay) => {
     if (!isoDay) return null;
     const [y, m, d] = isoDay.split('-');
-    return `${d}.${m}.${y}`;
+    const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m, 10) - 1] || m;
+    return `${parseInt(d, 10)} ${mon} ${y}`;
   };
   const trackingHint = stats.trackingSince
-    ? `seit ${deDate(stats.trackingSince)} · ${stats.trackingSinceDays} Tage`
-    : 'noch keine Aufzeichnung';
+    ? `since ${deDate(stats.trackingSince)} · ${stats.trackingSinceDays} days`
+    : 'not recording yet';
   const visitorHint = stats.visitorsSince
-    ? `seit ${deDate(stats.visitorsSince)}`
-    : 'noch keine Aufzeichnung';
+    ? `since ${deDate(stats.visitorsSince)}`
+    : 'not recording yet';
 
   const tile = (key, label, value, hint) => `
     <div class="tile">
@@ -1623,7 +1625,7 @@ async function handleStats(request, env) {
     </div>`;
 
   const html = `<!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1716,87 +1718,87 @@ async function handleStats(request, env) {
 </style>
 </head>
 <body>
-  <h1>rune.watch — Sync-Aktivität</h1>
-  <div class="subtitle">Adressbasiert, geräteübergreifend (nicht Cloudflare "Visits") · Aufzeichnung <span id="v-since">${trackingHint}</span></div>
+  <h1>rune.watch — sync activity</h1>
+  <div class="subtitle">Address based, across devices (not Cloudflare "visits") · recording <span id="v-since">${trackingHint}</span></div>
 
   <div class="pager" id="pager">
     <section class="page">
-      <div class="page-title">1 · Adressen (mit eingetragener Wallet)</div>
+      <div class="page-title">1 · Addresses (wallet entered)</div>
       <div class="grid">
         <div class="tile">
           <div class="tile-head">
-            <div class="tile-label" style="margin-top:0">Aktive Adressen</div>
+            <div class="tile-label" style="margin-top:0">Active addresses</div>
             <div class="tile-period">24h</div>
           </div>
           <div class="tile-value" id="v-active">${stats.activeLast1d}</div>
-          <div class="tile-hint">Adressen, die in den letzten 24h synchronisiert haben</div>
+          <div class="tile-hint">addresses that synced in the last 24h</div>
         </div>
         <div class="tile">
           <div class="tile-head">
-            <div class="tile-label" style="margin-top:0">Requests gesamt</div>
+            <div class="tile-label" style="margin-top:0">Total requests</div>
             <div class="tile-period">24h</div>
           </div>
           <div class="tile-value" id="v-requests">${stats.totalRequestsLast1d}</div>
-          <div class="tile-hint">alle Sync-Aufrufe der letzten 24h, nicht Tage-dedupliziert</div>
+          <div class="tile-hint">all sync calls in the last 24h, not deduplicated per day</div>
         </div>
-        ${tile('total', 'Adressen insgesamt', stats.totalUniqueAddressesEver, trackingHint)}
-        ${tile('returning', 'Wiederkehrer – gesamt', stats.returningAllTime, '≥2 verschiedene Tage synchronisiert, seit Aufzeichnungsbeginn')}
-        ${tile('rate', 'Retention-Quote', stats.retentionRateAllTime == null ? '—' : stats.retentionRateAllTime + '%', 'Anteil Wiederkehrer an allen Adressen')}
-        ${tile('avgreq', 'Ø Requests je aktiver Adresse', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'letzte 24h, je in 24h aktiver Adresse')}
+        ${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint)}
+        ${tile('returning', 'Returning – all time', stats.returningAllTime, 'synced on ≥2 separate days since recording began')}
+        ${tile('rate', 'Retention rate', stats.retentionRateAllTime == null ? '—' : stats.retentionRateAllTime + '%', 'share of returning addresses among all addresses')}
+        ${tile('avgreq', 'Ø requests per active address', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'last 24h, per address active in those 24h')}
         <div class="tile wide">
-          <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Nutzungstiefe (gesamt)</div>
+          <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Usage depth (all time)</div>
           ${stats.engagementDepth.map(row => `
             <div class="depth-row">
-              <div class="depth-label">≥ ${row.minDays} Tage</div>
+              <div class="depth-label">≥ ${row.minDays} days</div>
               <div class="depth-bar-track">
                 <div class="depth-bar-fill" id="v-depth-bar-${row.minDays}" style="width:${row.pct == null ? 0 : row.pct}%"></div>
               </div>
               <div class="depth-pct" id="v-depth-pct-${row.minDays}">${row.pct == null ? '—' : row.pct + '%'}</div>
               <div class="depth-count" id="v-depth-count-${row.minDays}">(${row.count})</div>
             </div>`).join('')}
-          <div class="tile-hint" style="margin-top:8px;">Anteil aller erfassten Adressen (<span id="v-depth-base">${stats.depthBase}</span>), die seit Aufzeichnungsbeginn an mindestens X verschiedenen Tagen synchronisiert haben. Jede Stufe ist in der vorherigen enthalten.</div>
+          <div class="tile-hint" style="margin-top:8px;">Share of all recorded addresses (<span id="v-depth-base">${stats.depthBase}</span>) that synced on at least X separate days since recording began. Each step is contained in the one above.</div>
         </div>
       </div>
-      <div class="swipe-hint">← wischen für Besucher →</div>
+      <div class="swipe-hint">← swipe for visitors →</div>
     </section>
 
     <section class="page">
-      <div class="page-title">2 · Besucher (anonym, alle Geräte)</div>
+      <div class="page-title">2 · Visitors (anonymous, all devices)</div>
       <div class="grid">
-        ${tile('vis1', 'Geräte – 24h', stats.visitorsLast1d, 'unterschiedliche Geräte in den letzten 24h')}
-        ${tile('vis7', 'Geräte – 7 Tage', stats.visitorsLast7d)}
-        ${tile('vis30', 'Geräte – 30 Tage', stats.visitorsLast30d)}
-        ${tile('vistotal', 'Geräte insgesamt', stats.visitorsTotal, visitorHint)}
-        ${tile('wshare1', 'Mit Wallet – 24h', stats.walletShareLast1d == null ? null : stats.walletShareLast1d + '%',
-          stats.visitorsWithWalletLast1d == null ? 'noch keine Daten' : `${stats.visitorsWithWalletLast1d} von ${stats.visitorsLast1d} Geräten haben eine Wallet eingetragen`)}
-        ${tile('wshare30', 'Mit Wallet – 30 Tage', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
-          stats.visitorsWithWalletLast30d == null ? 'noch keine Daten' : `${stats.visitorsWithWalletLast30d} von ${stats.visitorsLast30d} Geräten` + (stats.visitorsWithWalletSince ? ` · erfasst seit ${deDate(stats.visitorsWithWalletSince)}` : ''))}
+        ${tile('vis1', 'Devices – 24h', stats.visitorsLast1d, 'distinct devices in the last 24h')}
+        ${tile('vis7', 'Devices – 7 days', stats.visitorsLast7d)}
+        ${tile('vis30', 'Devices – 30 days', stats.visitorsLast30d)}
+        ${tile('vistotal', 'Devices total', stats.visitorsTotal, visitorHint)}
+        ${tile('wshare1', 'With wallet – 24h', stats.walletShareLast1d == null ? null : stats.walletShareLast1d + '%',
+          stats.visitorsWithWalletLast1d == null ? 'no data yet' : `${stats.visitorsWithWalletLast1d} of ${stats.visitorsLast1d} devices have a wallet entered`)}
+        ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
+          stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
       <div class="note">
-        Gezählt werden <b>Geräte</b>, nicht Menschen: Handy und PC derselben Person sind zwei.
-        Wer Browserdaten löscht oder privat surft, zählt beim nächsten Besuch erneut — die Zahl
-        ist also eher eine Obergrenze. Grundlage ist eine Zufallszahl, die der Browser selbst
-        erzeugt und im localStorage ablegt; keine IP, kein Fingerprint, kein Cookie, keine
-        Verknüpfung mit einer Wallet.
+        What is counted are <b>devices</b>, not people: phone and desktop of the same person are
+        two. Anyone who clears browser data or browses privately counts again on the next visit —
+        so the number is more of an upper bound. It is based on a random id the browser itself
+        generates and stores in localStorage; no IP, no fingerprint, no cookie, no link to a
+        wallet.
         <br><br>
-        Der Unterschied zu Seite 1: Dort zählen nur Nutzer <b>mit eingetragener Wallet</b> — nur
-        die synchronisieren überhaupt. Hier zählt jeder Besuch, auch wer nur den Chart ansieht.
-        Die beiden Zahlen werden nie übereinstimmen.
+        The difference to page 1: there only users <b>with a wallet entered</b> are counted — only
+        those sync at all. Here every visit counts, including people who only look at the chart.
+        The two numbers will never match.
         <br><br>
-        „Mit Wallet“: Der Browser meldet zusätzlich nur ein Ja/Nein, ob auf dem Gerät eine
-        Wallet eingetragen ist — nie welche. Der Anteil zeigt, wie viele Besucher den Schritt
-        vom Anschauen zum Eintragen machen. Er wird erst ab dem Update erfasst; ältere Tage
-        zählen als „ohne Wallet“, der 30-Tage-Wert ist anfangs also zu niedrig.
+        "With wallet": the browser additionally reports only a yes/no, whether a wallet is entered
+        on that device — never which one. The share shows how many visitors take the step from
+        looking to entering. It is only recorded from the update onwards; earlier days count as
+        "without wallet", so the 30-day value is too low at first.
       </div>
     </section>
   </div>
 
   <div class="dots">
-    <button class="dot-nav active" data-page="0" aria-label="Seite 1: Adressen"></button>
-    <button class="dot-nav" data-page="1" aria-label="Seite 2: Besucher"></button>
+    <button class="dot-nav active" data-page="0" aria-label="Page 1: addresses"></button>
+    <button class="dot-nav" data-page="1" aria-label="Page 2: visitors"></button>
   </div>
 
-  <div class="refresh"><span class="dot"></span><span id="stamp">Stand: ${new Date().toLocaleString('de-DE', { timeZone: 'UTC' })} UTC · aktualisiert live</span></div>
+  <div class="refresh"><span class="dot"></span><span id="stamp">As of ${new Date().toLocaleString('en-GB', { timeZone: 'UTC' })} UTC · updating live</span></div>
 <script>
   const REFRESH_MS = 1000;
   let latestStats = null;
@@ -1809,7 +1811,8 @@ async function handleStats(request, env) {
   function deDate(isoDay) {
     if (!isoDay) return null;
     const p = isoDay.split('-');
-    return p[2] + '.' + p[1] + '.' + p[0];
+    const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(p[1], 10) - 1] || p[1];
+    return parseInt(p[2], 10) + ' ' + mon + ' ' + p[0];
   }
 
   function renderSelected() {
@@ -1821,8 +1824,8 @@ async function handleStats(request, env) {
     const avgVal = latestStats.activeLast1d > 0
       ? Math.round((requestsVal / latestStats.activeLast1d) * 10) / 10 : null;
     const trackingHint = latestStats.trackingSince
-      ? 'seit ' + deDate(latestStats.trackingSince) + ' · ' + latestStats.trackingSinceDays + ' Tage'
-      : 'noch keine Aufzeichnung';
+      ? 'since ' + deDate(latestStats.trackingSince) + ' · ' + latestStats.trackingSinceDays + ' days'
+      : 'not recording yet';
 
     setText('v-since', trackingHint);
     setText('h-total', trackingHint);
@@ -1837,14 +1840,14 @@ async function handleStats(request, env) {
     setText('v-vis7', latestStats.visitorsLast7d);
     setText('v-vis30', latestStats.visitorsLast30d);
     setText('v-vistotal', latestStats.visitorsTotal);
-    setText('h-vistotal', latestStats.visitorsSince ? 'seit ' + deDate(latestStats.visitorsSince) : 'noch keine Aufzeichnung');
+    setText('h-vistotal', latestStats.visitorsSince ? 'since ' + deDate(latestStats.visitorsSince) : 'not recording yet');
     setText('v-wshare1', latestStats.walletShareLast1d == null ? '—' : latestStats.walletShareLast1d + '%');
     setText('v-wshare30', latestStats.walletShareLast30d == null ? '—' : latestStats.walletShareLast30d + '%');
-    setText('h-wshare1', latestStats.visitorsWithWalletLast1d == null ? 'noch keine Daten'
-      : latestStats.visitorsWithWalletLast1d + ' von ' + latestStats.visitorsLast1d + ' Geräten haben eine Wallet eingetragen');
-    setText('h-wshare30', latestStats.visitorsWithWalletLast30d == null ? 'noch keine Daten'
-      : latestStats.visitorsWithWalletLast30d + ' von ' + latestStats.visitorsLast30d + ' Geräten'
-        + (latestStats.visitorsWithWalletSince ? ' · erfasst seit ' + deDate(latestStats.visitorsWithWalletSince) : ''));
+    setText('h-wshare1', latestStats.visitorsWithWalletLast1d == null ? 'no data yet'
+      : latestStats.visitorsWithWalletLast1d + ' of ' + latestStats.visitorsLast1d + ' devices have a wallet entered');
+    setText('h-wshare30', latestStats.visitorsWithWalletLast30d == null ? 'no data yet'
+      : latestStats.visitorsWithWalletLast30d + ' of ' + latestStats.visitorsLast30d + ' devices'
+        + (latestStats.visitorsWithWalletSince ? ' · recorded since ' + deDate(latestStats.visitorsWithWalletSince) : ''));
     (latestStats.engagementDepth || []).forEach(row => {
       const bar = document.getElementById('v-depth-bar-' + row.minDays);
       if (bar) bar.style.width = (row.pct == null ? 0 : row.pct) + '%';
@@ -1860,7 +1863,7 @@ async function handleStats(request, env) {
       latestStats = await res.json();
       renderSelected();
       document.getElementById('stamp').textContent =
-        'Stand: ' + new Date().toLocaleTimeString('de-DE', { timeZone: 'UTC' }) + ' UTC · aktualisiert live';
+        'As of ' + new Date().toLocaleTimeString('en-GB', { timeZone: 'UTC' }) + ' UTC · updating live';
     } catch (e) { /* nächster Tick versucht es erneut */ }
   }
 
