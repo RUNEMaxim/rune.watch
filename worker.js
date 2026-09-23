@@ -1934,11 +1934,14 @@ function merkeSplit(intervalle) {
 // Ausdruecklich NICHT selbst umgerechnet: ein geschaetzter Dollarwert waere nicht von einem
 // gemessenen zu unterscheiden. Solche Tage bekommen volume = null und gelten als "kein Wert";
 // die Karte zeigt dann einen Strich und nennt die Quelle als Ursache.
-// Entscheidend ist NICHT, ob runePriceUSD fehlt (gemeldet: es war gesetzt und der Dollarwert
-// trotzdem 0), sondern ob Midgard RUNE-Volumen meldet, aber keinen Dollarbetrag dazu. Genau
-// dann ist der Wert unbekannt -- und nicht null Dollar.
-function ohneDollarwert(usd, runeBasis) {
-  return !(Number.isFinite(usd) && usd > 0) && Number(runeBasis) > 0;
+// WANN IST EIN TAG "KEINE DATEN" STATT "NULL DOLLAR"?
+//
+// Nachgesehen in Liquifys Midgard: der 22.09. kam mit totalCount 0 und ueberall Nullen zurueck,
+// der Tag davor mit 203.099 Swaps. Ein Tag mit NULL Swaps kommt bei THORChain praktisch nicht
+// vor -- das ist ein Loch in der Datenbank der Quelle, keine echte Null. Genau daran wird es
+// erkannt: keine einzige Transaktion gezaehlt -> Wert unbekannt.
+function tagOhneDaten(anzahl) {
+  return !(Number(anzahl) > 0);
 }
 
 async function fetchMidgardDailyFees(tage) {
@@ -1951,8 +1954,8 @@ async function fetchMidgardDailyFees(tage) {
     const ende = parseInt(iv.endTime, 10);
     const tag = tagesSchluessel(ende - 1);
     const usd = Number.isFinite(feesRune) && Number.isFinite(preis) ? feesRune * preis : 0;
-    // Gebuehren in RUNE vorhanden, aber kein Dollarbetrag -> unbekannt, nicht 0.
-    if (ohneDollarwert(usd, iv.liquidityFees)) return { day: tag, volume: null };
+    // Keine Gebuehren an einem ganzen Tag gibt es bei laufendem Netz nicht -> Luecke.
+    if (tagOhneDaten(iv.liquidityFees)) return { day: tag, volume: null };
     return { day: tag, volume: usd };
   });
 }
@@ -1966,8 +1969,8 @@ async function fetchMidgardDailyVolume(tage) {
     const vol = parseFloat(iv.totalVolumeUSD) / 1e2;
     const ende = parseInt(iv.endTime, 10);
     const tag = tagesSchluessel(ende - 1);
-    // Swaps in RUNE vorhanden, aber kein Dollarbetrag -> unbekannt, nicht null Dollar.
-    if (ohneDollarwert(vol, iv.totalVolume)) return { day: tag, volume: null };
+    // Kein einziger Swap an dem Tag -> Luecke bei der Quelle, kein Volumen von 0.
+    if (tagOhneDaten(iv.totalCount)) return { day: tag, volume: null };
     return { day: tag, volume: Number.isFinite(vol) ? vol : 0 };
   });
 }
