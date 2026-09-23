@@ -185,19 +185,55 @@ function fetchVolumeInterval(interval, count) {
 let volumeCache = null; 
 const VOLUME_CACHE_MS = 5000;
 
+// Rohe Tagesintervalle von vanaheimex (Midgard-Format, eigene laufende Instanz).
+async function fetchVanaheimexSwapIntervals() {
+  try {
+    const json = await fetchFromBases(['https://vanaheimex.com'], '/api/dashboardPlots', { timeoutMs: 9000 });
+    const iv = (json && json.swaps && json.swaps.intervals) || [];
+    return Array.isArray(iv) && iv.length ? iv : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Midgard bleibt fuehrend; vanaheimex fuellt fehlende oder leere Tage und haengt den laufenden
+// Tag an, den Midgard derzeit gar nicht liefert. Verglichen wird ueber endTime, damit beide
+// Reihen sicher denselben Tag meinen.
+function mischeTagesreihe(midgard, vana) {
+  if (!vana || !vana.length) return midgard;
+  if (!midgard || !midgard.intervals || !midgard.intervals.length) return { intervals: vana, meta: (midgard && midgard.meta) || null };
+  const hatWert = (iv) => Number(iv && iv.totalCount) > 0;
+  const nachEnde = new Map();
+  for (const iv of midgard.intervals) nachEnde.set(String(iv.endTime), iv);
+  for (const iv of vana) {
+    const vorhanden = nachEnde.get(String(iv.endTime));
+    if (!vorhanden || !hatWert(vorhanden)) nachEnde.set(String(iv.endTime), iv);
+  }
+  const zusammen = [...nachEnde.values()].sort((a, b) => Number(a.endTime) - Number(b.endTime));
+  return { ...midgard, intervals: zusammen };
+}
+
 function fetchVolumeBundleLive() {
   if (volumeCache && Date.now() - volumeCache.atMs < VOLUME_CACHE_MS) {
     return volumeCache.promise;
   }
   const promise = (async () => {
-    const [hourResult, dayResult] = await Promise.allSettled([
+    // Dritte Anfrage: dieselbe Tagesreihe von vanaheimex, aus der thorchain.net seine Balken
+    // zeichnet. Sie dient hier zweierlei (gemeldet: "ich will den heutigen Tag sehen"):
+    //   1. Tage, die Liquify gar nicht oder leer liefert, werden daraus ergaenzt.
+    //   2. Der LAUFENDE Tag kommt ueberhaupt erst dadurch in die Reihe -- Midgard liefert ihn
+    //      nicht, solange dessen Tagesaggregation haengt.
+    const [hourResult, dayResult, vanaResult] = await Promise.allSettled([
       fetchVolumeInterval('hour', 24),
       fetchVolumeInterval('day', 30),
+      fetchVanaheimexSwapIntervals(),
     ]);
+    const tage = dayResult.status === 'fulfilled' ? dayResult.value : null;
+    const vana = vanaResult.status === 'fulfilled' ? vanaResult.value : null;
     return {
       hour: hourResult.status === 'fulfilled' ? hourResult.value : null,
       hourError: hourResult.status === 'rejected' ? (hourResult.reason?.message || String(hourResult.reason)) : null,
-      day: dayResult.status === 'fulfilled' ? dayResult.value : null,
+      day: mischeTagesreihe(tage, vana),
       dayError: dayResult.status === 'rejected' ? (dayResult.reason?.message || String(dayResult.reason)) : null,
     };
   })();
@@ -2145,8 +2181,17 @@ async function fetchVanaheimexDaily() {
       const ende = parseInt(iv.endTime, 10);
       if (!Number.isFinite(ende)) continue;
       const usd = parseFloat(iv.totalVolumeUSD) / 1e2;
-      if (!Number.isFinite(usd) || usd <= 0) continue;
-      proTag.set(tagesSchluessel(ende - 1), usd);
+      // GEBUEHREN aus derselben Reihe: totalFees steht in RUNE-Basiseinheiten, mal Tageskurs.
+      // /api/rawEarnings liefert nur meta ohne intervals, taugt also nicht. Gegengerechnet am
+      // 21.09.: 96.838 RUNE * 0,6345 = 61,4 Tsd. $ -- dieselbe Groesse, die Midgard meldet.
+      const feesRune = Number(iv.totalFees) / 1e8;
+      const preis = parseFloat(iv.runePriceUSD);
+      const feesUsd = Number.isFinite(feesRune) && Number.isFinite(preis) ? feesRune * preis : 0;
+      if (!(usd > 0) && !(feesUsd > 0)) continue;
+      proTag.set(tagesSchluessel(ende - 1), {
+        volumen: usd > 0 ? usd : null,
+        gebuehren: feesUsd > 0 ? feesUsd : null,
+      });
     }
     return proTag;
   } catch (e) {
@@ -2254,9 +2299,9 @@ async function baueDexVergleich() {
     reihen['thorchain'] = reihen['thorchain'].map((eintrag) => {
       if (eintrag.volume != null) return eintrag;
       const wert = vanaheimexTage.get(eintrag.day);
-      if (!(wert > 0)) return eintrag;
+      if (!wert || !(wert.volumen > 0)) return eintrag;
       thorVanaTage.push(eintrag.day);
-      return { day: eintrag.day, volume: wert, quelle: 'vanaheimex-tag' };
+      return { day: eintrag.day, volume: wert.volumen, quelle: 'vanaheimex-tag' };
     });
   }
 
@@ -2356,6 +2401,18 @@ async function baueDexVergleich() {
   
   const feeReihen = {}, feeAllReihen = {};
   if (midgardFees && midgardFees.length) feeReihen['thorchain'] = midgardFees;
+  // Fehlende Gebuehrentage aus derselben vanaheimex-Reihe (totalFees * Tageskurs), damit die
+  // Spalte "Fees earned" nicht leer bleibt, waehrend Liquifys Tagesaggregation haengt.
+  const thorGebuehrenTage = [];
+  if (feeReihen['thorchain'] && vanaheimexTage && vanaheimexTage.size) {
+    feeReihen['thorchain'] = feeReihen['thorchain'].map((eintrag) => {
+      if (eintrag.volume != null) return eintrag;
+      const wert = vanaheimexTage.get(eintrag.day);
+      if (!wert || !(wert.gebuehren > 0)) return eintrag;
+      thorGebuehrenTage.push(eintrag.day);
+      return { day: eintrag.day, volume: wert.gebuehren, quelle: 'vanaheimex-tag' };
+    });
+  }
   for (const p of DEX_PROTOCOLS) {
     const supply = alsReihe(llamaSupply[p.key]);
     if (supply) feeReihen[p.key] = supply;
@@ -2398,6 +2455,8 @@ async function baueDexVergleich() {
     thorchainStundenTage: thorStundenTage,
     // Tage, die aus der Tagesreihe von vanaheimex stammen.
     thorchainVanaheimexTage: thorVanaTage,
+    // Gebuehrentage, die aus der vanaheimex-Reihe stammen.
+    thorchainGebuehrenTage: thorGebuehrenTage,
     // Tag, der notfalls mit dem rollierenden 24h-Wert von vanaheimex gefuellt wurde.
     thorchainNotfallQuelle: thorNotfall ? { tag: thorNotfall, quelle: 'vanaheimex-24h' } : null,
     
