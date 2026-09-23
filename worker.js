@@ -2508,9 +2508,70 @@ function baueDexVergleichCached() {
 
 const DEX_VOLUME_STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+// VERGANGENE TAGE FESTHALTEN (gemeldet: "dann springt es manchmal rueber zu Liquify").
+//
+// Midgard hat Vorrang, vanaheimex fuellt Luecken. Liquifys Tagesaggregation haengt derzeit
+// unregelmaessig: sobald sie fuer einen Moment wieder Werte liefert, gewann sie -- und ein
+// laengst abgeschlossener Tag sprang zwischen zwei Zahlen hin und her.
+//
+// Deshalb gilt jetzt: Was ein Tag beim ersten Mal bekommen hat, behaelt er. Nur der HEUTIGE
+// Tag darf sich noch aendern, denn der waechst ja noch. Grundlage ist der zuletzt geschriebene
+// Stand aus dem Zwischenspeicher -- dafuer braucht es keine neue Tabelle.
+function haltAlteTageFest(neu, alt) {
+  if (!alt || !Array.isArray(alt.protocols) || !Array.isArray(neu.protocols)) return neu;
+  const heute = utcDayString(Date.now());
+  const altNach = new Map(alt.protocols.map((p) => [p.key, p]));
+
+  const mische = (neueReihe, alteReihe) => {
+    if (!Array.isArray(neueReihe) || !Array.isArray(alteReihe) || !alteReihe.length) return neueReihe;
+    const frueher = new Map(alteReihe.map((e) => [e.day, e]));
+    return neueReihe.map((e) => {
+      if (!e || e.day >= heute) return e;            // laufender Tag bleibt beweglich
+      const a = frueher.get(e.day);
+      if (!a || a.volume == null) return e;          // frueher kein Wert -> neuen nehmen
+      return a;                                       // sonst: beim ersten Wert bleiben
+    });
+  };
+
+  const stichtag = neu.asOfDay;
+
+  for (const p of neu.protocols) {
+    const a = altNach.get(p.key);
+    if (!a) continue;
+    const vorherSerie = p.series;
+    const vorherFees = p.feeSeries;
+    p.series = mische(p.series, a.series);
+    p.feeSeries = mische(p.feeSeries, a.feeSeries);
+
+    // Summen neu bilden, sonst passten d1/d7/d30 nicht mehr zu den festgehaltenen Tagen.
+    if (stichtag && p.series !== vorherSerie) {
+      const s1 = summiereTage(p.series, 1, stichtag);
+      const s7 = summiereTage(p.series, 7, stichtag);
+      const s30 = summiereTage(p.series, 30, stichtag);
+      const wert = (x) => (x.tage === 0 && x.ohneWert > 0) ? null : x.summe;
+      p.d1 = wert(s1); p.d7 = wert(s7); p.d30 = wert(s30);
+      p.days1 = s1.tage; p.days7 = s7.tage; p.days30 = s30.tage;
+    }
+    if (stichtag && p.feeSeries && p.fees && p.feeSeries !== vorherFees) {
+      const f1 = summiereTage(p.feeSeries, 1, stichtag);
+      const f7 = summiereTage(p.feeSeries, 7, stichtag);
+      const f30 = summiereTage(p.feeSeries, 30, stichtag);
+      const wert = (x) => (x.tage === 0 && x.ohneWert > 0) ? null : x.summe;
+      p.fees = { ...p.fees, d1: wert(f1), d7: wert(f7), d30: wert(f30),
+                 days1: f1.tage, days7: f7.tage, days30: f30.tage };
+    }
+  }
+  return neu;
+}
+
 async function handleDexVolume(request, env, ctx) {
   try {
     const daten = await baueDexVergleichCached();
+    // Zuletzt ausgelieferten Stand lesen, um vergangene Tage daraus zu uebernehmen.
+    try {
+      const vorher = await env.DB.prepare('SELECT payload FROM dex_volume_cache WHERE id = 1').first();
+      if (vorher && vorher.payload) haltAlteTageFest(daten, JSON.parse(vorher.payload));
+    } catch (e) {/* ohne Vorstand einfach die neuen Werte nehmen */}
     const brauchbar = daten.protocols.some((p) => p.d1 != null);
     if (brauchbar) {
       const schreiben = env.DB.prepare(
