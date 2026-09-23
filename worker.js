@@ -196,20 +196,24 @@ async function fetchVanaheimexSwapIntervals() {
   }
 }
 
-// Midgard bleibt fuehrend; vanaheimex fuellt fehlende oder leere Tage und haengt den laufenden
-// Tag an, den Midgard derzeit gar nicht liefert. Verglichen wird ueber endTime, damit beide
-// Reihen sicher denselben Tag meinen.
+// Midgard bleibt fuehrend; vanaheimex fuellt fehlende oder leere Tage und liefert den laufenden
+// Tag, den Midgard derzeit gar nicht befuellt.
+//
+// SCHLUESSEL IST startTime, NICHT endTime (gemeldet: "der aktuelle Balken fehlt"). Beim
+// laufenden Tag setzt Midgard endTime auf Mitternacht, vanaheimex auf JETZT -- ueber endTime
+// verglichen landeten beide Eintraege nebeneinander in der Reihe, der leere von Midgard als
+// letzter. Genau der wurde dann als letzter Balken gezeichnet: null.
 function mischeTagesreihe(midgard, vana) {
   if (!vana || !vana.length) return midgard;
   if (!midgard || !midgard.intervals || !midgard.intervals.length) return { intervals: vana, meta: (midgard && midgard.meta) || null };
   const hatWert = (iv) => Number(iv && iv.totalCount) > 0;
-  const nachEnde = new Map();
-  for (const iv of midgard.intervals) nachEnde.set(String(iv.endTime), iv);
+  const nachStart = new Map();
+  for (const iv of midgard.intervals) nachStart.set(String(iv.startTime), iv);
   for (const iv of vana) {
-    const vorhanden = nachEnde.get(String(iv.endTime));
-    if (!vorhanden || !hatWert(vorhanden)) nachEnde.set(String(iv.endTime), iv);
+    const vorhanden = nachStart.get(String(iv.startTime));
+    if (!vorhanden || !hatWert(vorhanden)) nachStart.set(String(iv.startTime), iv);
   }
-  const zusammen = [...nachEnde.values()].sort((a, b) => Number(a.endTime) - Number(b.endTime));
+  const zusammen = [...nachStart.values()].sort((a, b) => Number(a.startTime) - Number(b.startTime));
   return { ...midgard, intervals: zusammen };
 }
 
@@ -2178,8 +2182,11 @@ async function fetchVanaheimexDaily() {
     const intervalle = (json && json.swaps && json.swaps.intervals) || [];
     const proTag = new Map();
     for (const iv of intervalle) {
-      const ende = parseInt(iv.endTime, 10);
-      if (!Number.isFinite(ende)) continue;
+      // Tag ueber startTime bestimmen, nicht ueber endTime: beim LAUFENDEN Tag setzt
+      // vanaheimex endTime auf "jetzt", Midgard auf Mitternacht -- ueber endTime gerechnet
+      // landeten dieselben Tage auf zwei verschiedenen Schluesseln.
+      const start = parseInt(iv.startTime, 10);
+      if (!Number.isFinite(start)) continue;
       const usd = parseFloat(iv.totalVolumeUSD) / 1e2;
       // GEBUEHREN aus derselben Reihe: totalFees steht in RUNE-Basiseinheiten, mal Tageskurs.
       // /api/rawEarnings liefert nur meta ohne intervals, taugt also nicht. Gegengerechnet am
@@ -2188,7 +2195,7 @@ async function fetchVanaheimexDaily() {
       const preis = parseFloat(iv.runePriceUSD);
       const feesUsd = Number.isFinite(feesRune) && Number.isFinite(preis) ? feesRune * preis : 0;
       if (!(usd > 0) && !(feesUsd > 0)) continue;
-      proTag.set(tagesSchluessel(ende - 1), {
+      proTag.set(tagesSchluessel(start), {
         volumen: usd > 0 ? usd : null,
         gebuehren: feesUsd > 0 ? feesUsd : null,
       });
