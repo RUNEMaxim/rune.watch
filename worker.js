@@ -1462,6 +1462,39 @@ async function handleSwapHistory(request, env, ctx) {
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
 }
 
+// AUSGEHENDE KLICKS (z.B. auf die RUNEBond-Empfehlung).
+//
+// Gezaehlt wird, WIE OFT und von WIE VIELEN Geraeten geklickt wurde -- mehr nicht. Kein Ziel
+// ausserhalb der Liste unten, keine Adresse, kein Verweis auf eine Wallet. Das Geraet ist
+// derselbe anonyme Zufallswert wie bei der Besucherzaehlung (siehe recordVisitor).
+//
+// Braucht einmalig:
+//   CREATE TABLE IF NOT EXISTS outbound_clicks (
+//     id INTEGER PRIMARY KEY AUTOINCREMENT,
+//     target TEXT NOT NULL, token TEXT, day TEXT NOT NULL, at INTEGER NOT NULL);
+//   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
+const CLICK_TARGETS = new Set(['runebond']);
+
+async function handleClick(request, env, ctx) {
+  const url = new URL(request.url);
+  const target = String(url.searchParams.get('t') || '').toLowerCase();
+  // Antwort immer 204, auch bei unbekanntem Ziel: der Klick des Nutzers soll nie an einer
+  // Fehlermeldung haengen bleiben, das Ziel oeffnet ja parallel.
+  if (!CLICK_TARGETS.has(target) || !env.DB) return new Response(null, { status: 204 });
+  const token = url.searchParams.get('v');
+  const now = Date.now();
+  const sauber = token && VISITOR_TOKEN_RE.test(token) ? token : null;
+  if (ctx && typeof ctx.waitUntil === 'function') {
+    ctx.waitUntil(
+      env.DB.prepare('INSERT INTO outbound_clicks (target, token, day, at) VALUES (?, ?, ?, ?)')
+        .bind(target, sauber, utcDayString(now), now)
+        .run()
+        .catch((e) => console.warn('[rune-rewards-backend] Klick nicht gezaehlt (Migration 3?):', e?.message || String(e)))
+    );
+  }
+  return new Response(null, { status: 204 });
+}
+
 async function handleStats(request, env) {
   const url = new URL(request.url);
   const key = url.searchParams.get('key');
@@ -1482,6 +1515,7 @@ async function handleStats(request, env) {
     totalRequests1Row, totalRequests7Row, totalRequests30Row, trackingSinceRow,
     vis1Row, vis7Row, vis30Row, visTotalRow, visSinceRow,
     visW1Row, visW30Row, visWSinceRow,
+    klick1Row, klick30Row, klickGesamtRow, klickGeraeteRow,
   ] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE 1=1${exclSql}`).bind(...excl).first(),
     env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?${exclSql}`).bind(day1, ...excl).first(),
@@ -1537,6 +1571,11 @@ async function handleStats(request, env) {
     env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ? AND has_wallet = 1').bind(day1).first().catch(() => ({ n: null })),
     env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ? AND has_wallet = 1').bind(day30).first().catch(() => ({ n: null })),
     env.DB.prepare('SELECT MIN(day) AS d FROM visitor_days WHERE has_wallet = 1').first().catch(() => ({ d: null })),
+    // Klicks auf die RUNEBond-Empfehlung. Ohne Migration 3 -> null, Kacheln zeigen "—".
+    env.DB.prepare("SELECT COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond' AND day >= ?").bind(day1).first().catch(() => ({ n: null })),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond' AND day >= ?").bind(day30).first().catch(() => ({ n: null })),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond'").first().catch(() => ({ n: null })),
+    env.DB.prepare("SELECT COUNT(DISTINCT token) AS n FROM outbound_clicks WHERE target = 'runebond' AND token IS NOT NULL").first().catch(() => ({ n: null })),
   ]);
 
   const active1 = active1Row?.n || 0;
@@ -1592,6 +1631,10 @@ async function handleStats(request, env) {
     visitorsWithWalletLast1d: visW1Row?.n ?? null,
     visitorsWithWalletLast30d: visW30Row?.n ?? null,
     visitorsWithWalletSince: visWSinceRow?.d ?? null,
+    runebondClicksLast1d: klick1Row?.n ?? null,
+    runebondClicksLast30d: klick30Row?.n ?? null,
+    runebondClicksTotal: klickGesamtRow?.n ?? null,
+    runebondClickDevices: klickGeraeteRow?.n ?? null,
   };
   // Anteil in Prozent, eine Nachkommastelle. Nenner = alle Geraete im selben Zeitraum.
   const walletPct = (n, total) => (n == null || !total) ? null : Math.round((n / total) * 1000) / 10;
@@ -1771,6 +1814,10 @@ async function handleStats(request, env) {
         ${tile('vistotal', 'Devices total', stats.visitorsTotal, visitorHint)}
         ${tile('wshare1', 'With wallet – 24h', stats.walletShareLast1d == null ? null : stats.walletShareLast1d + '%',
           stats.visitorsWithWalletLast1d == null ? 'no data yet' : `${stats.visitorsWithWalletLast1d} of ${stats.visitorsLast1d} devices have a wallet entered`)}
+        ${tile('rb1', 'RUNEBond clicks – 24h', stats.runebondClicksLast1d,
+          stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
+        ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
+          stats.runebondClicksLast30d == null ? 'no data yet' : `${stats.runebondClicksLast30d} clicks in 30 days`)}
         ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
           stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
@@ -1841,6 +1888,10 @@ async function handleStats(request, env) {
     setText('v-vis30', latestStats.visitorsLast30d);
     setText('v-vistotal', latestStats.visitorsTotal);
     setText('h-vistotal', latestStats.visitorsSince ? 'since ' + deDate(latestStats.visitorsSince) : 'not recording yet');
+    setText('v-rb1', latestStats.runebondClicksLast1d == null ? '—' : latestStats.runebondClicksLast1d);
+    setText('h-rb1', latestStats.runebondClicksTotal == null ? 'no data yet' : latestStats.runebondClicksTotal + ' in total');
+    setText('v-rbdev', latestStats.runebondClickDevices == null ? '—' : latestStats.runebondClickDevices);
+    setText('h-rbdev', latestStats.runebondClicksLast30d == null ? 'no data yet' : latestStats.runebondClicksLast30d + ' clicks in 30 days');
     setText('v-wshare1', latestStats.walletShareLast1d == null ? '—' : latestStats.walletShareLast1d + '%');
     setText('v-wshare30', latestStats.walletShareLast30d == null ? '—' : latestStats.walletShareLast30d + '%');
     setText('h-wshare1', latestStats.visitorsWithWalletLast1d == null ? 'no data yet'
@@ -3139,6 +3190,9 @@ export default {
       }
       if (url.pathname === '/swap-history') {
         return await handleSwapHistory(request, env, ctx);
+      }
+      if (url.pathname === '/click') {
+        return await handleClick(request, env, ctx);
       }
       if (url.pathname === '/stats') {
         return await handleStats(request, env);
