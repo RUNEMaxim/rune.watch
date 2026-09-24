@@ -2089,11 +2089,21 @@ async function handleStats(request, env) {
 // die Ingress/Egress/Broker-Gebuehren als EINZIGEN Posten in dailyUserFees meldet, gilt:
 //   Swap Fees + Network Fees = dailyFees - dailyUserFees
 //
-// NEAR Intents bleibt vorerst bei dailySupplySideRevenue (der Adapter meldet kein dailyUserFees,
-// und der Protokollanteil laesst sich ueber die API nicht von den Affiliate-Gebuehren trennen).
+// NEAR INTENTS: KEIN VERGLEICHBARER WERT VORHANDEN (geprueft in fees/near-intents/index.ts).
+//   dailyFees      = Protokollgebuehr + Affiliate-Gebuehren der Frontends, beide unter EINEM
+//                    Label ('Swap Fees') -- ueber die API nicht trennbar. Die Affiliate-Gebuehren
+//                    sind das Gegenstueck zu Chainflips Broker-Gebuehren, gehoeren also nicht rein.
+//   dailySupplySide = dailyFees minus das, was NEAR in seine Wallets ueberweist: also Gebuehren,
+//                    die Solver und fremde Frontends behalten. Wird an Ueberweisungstagen
+//                    negativ (allowNegativeValue) -- daher die -70,8K.
+//   dailyRevenue   = diese Ueberweisungen selbst, schubweise gebucht, enthaelt u. a. die
+//                    Frontend-Einnahmen von near.com.
+// Das eigentliche Gegenstueck zu THORChains liquidityFees waere der SPREAD der Solver -- der wird
+// nirgends veroeffentlicht und steckt in keiner dieser Zahlen. Deshalb zeigt "Fees earned" fuer
+// NEAR Intents bewusst keinen Wert, statt eine Zahl, die etwas anderes misst.
 const DEX_PROTOCOLS = [
   { key: 'chainflip', name: 'Chainflip', slug: 'chainflip', feeFormel: 'fees-minus-userfees' },
-  { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents', feeFormel: 'supplyside' },
+  { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents', feeFormel: 'nicht-vergleichbar' },
 ];
 const LLAMA_BASES = ['https://api.llama.fi'];
 
@@ -2486,11 +2496,13 @@ async function baueDexVergleich() {
         });
         feeBasisJe[p.key] = 'defillama-fees-minus-userFees';
       }
-    } else {
+    } else if (p.feeFormel === 'supplyside') {
       const supply = alsReihe(llamaSupply[p.key]);
       if (supply) { feeReihen[p.key] = supply; feeBasisJe[p.key] = 'defillama-supplySide'; }
     }
+    // 'nicht-vergleichbar': bewusst keine Reihe (siehe DEX_PROTOCOLS).
   }
+  const nichtVergleichbar = new Set(DEX_PROTOCOLS.filter((p) => p.feeFormel === 'nicht-vergleichbar').map((p) => p.key));
   for (const p of protokolle) {
     
     const j = llamaFees[p.key];
@@ -2506,7 +2518,9 @@ async function baueDexVergleich() {
                  d30: (f30.tage === 0 && f30.ohneWert > 0) ? null : f30.summe, days1: f1.tage, days7: f7.tage, days30: f30.tage };
       p.feeSeries = reihe.filter((e) => e.day <= stichtag).slice(-30);
       p.feeBasis = feeBasisJe[p.key] || null;
-    } else { p.fees = null; p.feeBasis = null; }
+    } else { p.fees = null; p.feeBasis = null; p.feeSeries = []; }
+    // Die Karte zeigt dafuer einen Strich mit Erklaerung statt die Zeile auszublenden.
+    p.feeNichtVergleichbar = nichtVergleichbar.has(p.key);
     
     const alles = feeAllReihen[p.key];
     if (alles && alles.length && stichtag) {
@@ -2586,7 +2600,7 @@ function haltAlteTageFest(neu, alt) {
     p.series = mische(p.series, a.series);
     // Wurde die Berechnungsgrundlage geaendert (z. B. Chainflip ohne Gas/Broker), duerfen die
     // festgehaltenen alten Tageswerte nicht zurueckkommen -- sonst bliebe die alte Zahl stehen.
-    if (a.feeBasis === p.feeBasis) p.feeSeries = mische(p.feeSeries, a.feeSeries);
+    if (p.feeBasis && a.feeBasis === p.feeBasis) p.feeSeries = mische(p.feeSeries, a.feeSeries);
 
     // Summen neu bilden, sonst passten d1/d7/d30 nicht mehr zu den festgehaltenen Tagen.
     if (stichtag && p.series !== vorherSerie) {
