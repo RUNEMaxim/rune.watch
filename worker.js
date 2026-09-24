@@ -2075,9 +2075,25 @@ async function handleStats(request, env) {
   });
 }
 
+// WELCHE GEBUEHREN ZAEHLEN (gemeldet: "Chainflip nimmt mit weniger Volumen mehr ein als THORChain?").
+//
+// THORChain zaehlt ueber Midgard nur liquidityFees: die komplette Swap-Gebuehr, bevor sie auf
+// Nodes, Pools, POL, TCY usw. verteilt wird. Gas fuer Outbounds und Affiliate-Gebuehren der
+// Frontends stecken da NICHT drin.
+//
+// Bei Chainflip stand hier bisher dailySupplySideRevenue. Laut DefiLlama-Adapter
+// (dimension-adapters, fees/chainflip/index.ts) ist das Swap Fees an die LPs PLUS
+// "Ingress, Egress, Broker Fees" -- also durchgereichte Gas-Kosten der Ein-/Auszahlung und die
+// Gebuehren der Frontends. Die Netzwerkgebuehr (0,1 %, Buy & Burn) fehlte dagegen.
+// Das Gegenstueck zu THORChains liquidityFees ist Swap Fees + Network Fees. Weil der Adapter
+// die Ingress/Egress/Broker-Gebuehren als EINZIGEN Posten in dailyUserFees meldet, gilt:
+//   Swap Fees + Network Fees = dailyFees - dailyUserFees
+//
+// NEAR Intents bleibt vorerst bei dailySupplySideRevenue (der Adapter meldet kein dailyUserFees,
+// und der Protokollanteil laesst sich ueber die API nicht von den Affiliate-Gebuehren trennen).
 const DEX_PROTOCOLS = [
-  { key: 'chainflip', name: 'Chainflip', slug: 'chainflip' },
-  { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents' },
+  { key: 'chainflip', name: 'Chainflip', slug: 'chainflip', feeFormel: 'fees-minus-userfees' },
+  { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents', feeFormel: 'supplyside' },
 ];
 const LLAMA_BASES = ['https://api.llama.fi'];
 
@@ -2096,6 +2112,10 @@ async function fetchLlamaFees(slug) {
 
 async function fetchLlamaSupplySide(slug) {
   return fetchFromBases(LLAMA_BASES, `/summary/fees/${slug}?excludeTotalDataChartBreakdown=true&dataType=dailySupplySideRevenue`, { timeoutMs: 12000 });
+}
+
+async function fetchLlamaUserFees(slug) {
+  return fetchFromBases(LLAMA_BASES, `/summary/fees/${slug}?excludeTotalDataChartBreakdown=true&dataType=dailyUserFees`, { timeoutMs: 12000 });
 }
 
 let midgardSplitRoh = null;
@@ -2279,6 +2299,8 @@ async function baueDexVergleich() {
     fetchVanaheimex24h(),
     ...DEX_PROTOCOLS.map((p) => fetchLlamaFees(p.slug)),
     ...DEX_PROTOCOLS.map((p) => fetchLlamaSupplySide(p.slug)),
+    // Ganz hinten angehaengt, damit sich die Indizes davor nicht verschieben.
+    ...DEX_PROTOCOLS.map((p) => p.feeFormel === 'fees-minus-userfees' ? fetchLlamaUserFees(p.slug) : Promise.resolve(null)),
   ]);
 
   const reihen = {};
@@ -2307,7 +2329,7 @@ async function baueDexVergleich() {
   const midgardStunden = roh[DEX_PROTOCOLS.length + 2].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 2].value : new Map();
   const vanaheimexTage = roh[DEX_PROTOCOLS.length + 3].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 3].value : new Map();
   const vanaheimex24h = roh[DEX_PROTOCOLS.length + 4].status === 'fulfilled' ? roh[DEX_PROTOCOLS.length + 4].value : null;
-  const llamaFees = {}, llamaSupply = {};
+  const llamaFees = {}, llamaSupply = {}, llamaUser = {};
   // +5: davor stehen Midgard-Tageswerte, Midgard-Gebuehren, die Stundenwerte, die Tagesreihe
   // von vanaheimex und dessen 24h-Notnagel.
   DEX_PROTOCOLS.forEach((p, i) => {
@@ -2315,6 +2337,8 @@ async function baueDexVergleich() {
     if (r && r.status === 'fulfilled' && r.value) llamaFees[p.key] = r.value;
     const r2 = roh[DEX_PROTOCOLS.length + 5 + DEX_PROTOCOLS.length + i];
     if (r2 && r2.status === 'fulfilled' && r2.value) llamaSupply[p.key] = r2.value;
+    const r3 = roh[DEX_PROTOCOLS.length + 5 + 2 * DEX_PROTOCOLS.length + i];
+    if (r3 && r3.status === 'fulfilled' && r3.value) llamaUser[p.key] = r3.value;
   });
 
   if (midgardReihe && midgardReihe.length) reihen['thorchain'] = midgardReihe.slice().sort((a, b) => a.day < b.day ? -1 : 1);
@@ -2442,11 +2466,30 @@ async function baueDexVergleich() {
       return { day: eintrag.day, volume: wert.gebuehren, quelle: 'vanaheimex-tag' };
     });
   }
+  const feeBasisJe = { thorchain: 'midgard-liquidityFees' };
   for (const p of DEX_PROTOCOLS) {
-    const supply = alsReihe(llamaSupply[p.key]);
-    if (supply) feeReihen[p.key] = supply;
     const alles = alsReihe(llamaFees[p.key]);
     if (alles) feeAllReihen[p.key] = alles;
+    if (p.feeFormel === 'fees-minus-userfees') {
+      // Nur Tage, fuer die BEIDE Reihen vorliegen. Fehlt dailyUserFees fuer einen Tag, ist der
+      // Wert unbekannt (null) -- auf keinen Fall die Bruttozahl samt Gas und Broker zeigen.
+      const user = alsReihe(llamaUser[p.key]);
+      if (alles && user) {
+        const userJeTag = new Map(user.map((e) => [e.day, e.volume]));
+        feeReihen[p.key] = alles.map((e) => {
+          const u = userJeTag.get(e.day);
+          if (!Number.isFinite(u)) return { day: e.day, volume: null };
+          const netto = e.volume - u;
+          // Mehr Nutzergebuehren als Gesamtgebuehren kann es nach der Adapter-Logik nicht geben;
+          // taucht das auf, ist der Tag in der Quelle kaputt, nicht negativ.
+          return { day: e.day, volume: netto >= 0 ? netto : null };
+        });
+        feeBasisJe[p.key] = 'defillama-fees-minus-userFees';
+      }
+    } else {
+      const supply = alsReihe(llamaSupply[p.key]);
+      if (supply) { feeReihen[p.key] = supply; feeBasisJe[p.key] = 'defillama-supplySide'; }
+    }
   }
   for (const p of protokolle) {
     
@@ -2462,7 +2505,7 @@ async function baueDexVergleich() {
                  d7: (f7.tage === 0 && f7.ohneWert > 0) ? null : f7.summe,
                  d30: (f30.tage === 0 && f30.ohneWert > 0) ? null : f30.summe, days1: f1.tage, days7: f7.tage, days30: f30.tage };
       p.feeSeries = reihe.filter((e) => e.day <= stichtag).slice(-30);
-      p.feeBasis = p.key === 'thorchain' ? 'midgard-liquidityFees' : 'defillama-supplySide';
+      p.feeBasis = feeBasisJe[p.key] || null;
     } else { p.fees = null; p.feeBasis = null; }
     
     const alles = feeAllReihen[p.key];
@@ -2541,7 +2584,9 @@ function haltAlteTageFest(neu, alt) {
     const vorherSerie = p.series;
     const vorherFees = p.feeSeries;
     p.series = mische(p.series, a.series);
-    p.feeSeries = mische(p.feeSeries, a.feeSeries);
+    // Wurde die Berechnungsgrundlage geaendert (z. B. Chainflip ohne Gas/Broker), duerfen die
+    // festgehaltenen alten Tageswerte nicht zurueckkommen -- sonst bliebe die alte Zahl stehen.
+    if (a.feeBasis === p.feeBasis) p.feeSeries = mische(p.feeSeries, a.feeSeries);
 
     // Summen neu bilden, sonst passten d1/d7/d30 nicht mehr zu den festgehaltenen Tagen.
     if (stichtag && p.series !== vorherSerie) {
