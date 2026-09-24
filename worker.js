@@ -2477,6 +2477,7 @@ async function baueDexVergleich() {
     });
   }
   const feeBasisJe = { thorchain: 'midgard-liquidityFees' };
+  const rohReihen = {};
   for (const p of DEX_PROTOCOLS) {
     const alles = alsReihe(llamaFees[p.key]);
     if (alles) feeAllReihen[p.key] = alles;
@@ -2500,7 +2501,13 @@ async function baueDexVergleich() {
       const supply = alsReihe(llamaSupply[p.key]);
       if (supply) { feeReihen[p.key] = supply; feeBasisJe[p.key] = 'defillama-supplySide'; }
     }
-    // 'nicht-vergleichbar': bewusst keine Reihe (siehe DEX_PROTOCOLS).
+    // 'nicht-vergleichbar': bewusst keine Reihe fuer den Vergleich (siehe DEX_PROTOCOLS).
+    // Auf Wunsch wird DefiLlamas Supply-Side-Wert trotzdem als Rohzahl mitgeliefert -- er
+    // erscheint in der Karte, zaehlt aber weder in die Anteile noch in den Chart.
+    if (p.feeFormel === 'nicht-vergleichbar') {
+      const supply = alsReihe(llamaSupply[p.key]);
+      if (supply) rohReihen[p.key] = supply;
+    }
   }
   const nichtVergleichbar = new Set(DEX_PROTOCOLS.filter((p) => p.feeFormel === 'nicht-vergleichbar').map((p) => p.key));
   for (const p of protokolle) {
@@ -2521,6 +2528,14 @@ async function baueDexVergleich() {
     } else { p.fees = null; p.feeBasis = null; p.feeSeries = []; }
     // Die Karte zeigt dafuer einen Strich mit Erklaerung statt die Zeile auszublenden.
     p.feeNichtVergleichbar = nichtVergleichbar.has(p.key);
+    const roh = rohReihen[p.key];
+    if (p.feeNichtVergleichbar && roh && roh.length && stichtag) {
+      const r1 = summiereTage(roh, 1, stichtag), r7 = summiereTage(roh, 7, stichtag), r30 = summiereTage(roh, 30, stichtag);
+      p.feesRoh = { d1: r1.tage ? r1.summe : null, d7: r7.tage ? r7.summe : null, d30: r30.tage ? r30.summe : null,
+                    basis: 'defillama-supplySide' };
+      // Tagesreihe dazu fuer den Chart -- auch negative Tage, genau so, wie DefiLlama sie meldet.
+      p.feeRohSeries = roh.filter((e) => e.day <= stichtag).slice(-30);
+    } else { p.feesRoh = null; p.feeRohSeries = null; }
     
     const alles = feeAllReihen[p.key];
     if (alles && alles.length && stichtag) {
