@@ -2607,43 +2607,9 @@ function haltAlteTageFest(neu, alt) {
 
   const stichtag = neu.asOfDay;
 
-  // DEFILLAMA-KORREKTUREN SICHTBAR MACHEN (gemeldet: "wieso hat sich NEARs Wert im Laufe des
-  // Tages veraendert?"). DefiLlama rechnet die letzten Tage bei spaeteren Laeufen neu -- das sind
-  // echte Korrekturen, kein Hin- und Herspringen zwischen Quellen. Fuer DefiLlama-Protokolle gilt
-  // deshalb: den NEUEN Wert nehmen und festhalten, dass und wie er sich geaendert hat
-  // (erster gesehener Wert, jetziger Wert, wann entdeckt). THORChain bleibt beim Festhalten.
-  // Vorher wurde NEARs Rohreihe (feeRohSeries) gar nicht festgehalten -- daher die Aenderung.
-  const jetztMs = Date.now();
-  const protokolliere = (p, a, name, basisGleich) => {
-    const neuR = p[name], altR = a[name];
-    const altK = (a.korrekturen && a.korrekturen[name]) || {};
-    const k = {};
-    if (!Array.isArray(neuR)) return;
-    const frueher = new Map((Array.isArray(altR) ? altR : []).map((e) => [e.day, e]));
-    const tageDrin = new Set(neuR.map((e) => e && e.day));
-    // Bereits bekannte Korrekturen weitertragen (der "vorher"-Wert bleibt der ERSTE gesehene).
-    for (const [day, rec] of Object.entries(altK)) if (tageDrin.has(day)) k[day] = rec;
-    if (basisGleich) for (const e of neuR) {
-      if (!e || e.day >= heute || e.volume == null) continue;
-      const alt = frueher.get(e.day);
-      if (!alt || alt.volume == null) continue;
-      const diff = Math.abs(e.volume - alt.volume);
-      if (diff <= Math.max(1, Math.abs(alt.volume) * 0.005)) continue;
-      const bekannt = k[e.day];
-      k[e.day] = { vorher: bekannt ? bekannt.vorher : alt.volume, jetzt: e.volume, erkanntMs: jetztMs };
-    }
-    if (Object.keys(k).length) (p.korrekturen || (p.korrekturen = {}))[name] = k;
-  };
-
   for (const p of neu.protocols) {
     const a = altNach.get(p.key);
     if (!a) continue;
-    if (p.source === 'defillama') {
-      protokolliere(p, a, 'series', true);
-      protokolliere(p, a, 'feeSeries', !!(p.feeBasis && a.feeBasis === p.feeBasis));
-      protokolliere(p, a, 'feeRohSeries', true);
-      continue; // neue Werte bleiben stehen, Summen stimmen damit schon
-    }
     const vorherSerie = p.series;
     const vorherFees = p.feeSeries;
     p.series = mische(p.series, a.series);
@@ -2680,8 +2646,6 @@ async function handleDexVolume(request, env, ctx) {
       const vorher = await env.DB.prepare('SELECT payload FROM dex_volume_cache WHERE id = 1').first();
       if (vorher && vorher.payload) haltAlteTageFest(daten, JSON.parse(vorher.payload));
     } catch (e) {/* ohne Vorstand einfach die neuen Werte nehmen */}
-    // Wann wurden die Daten zuletzt bei den Quellen geholt? (Zwischenspeicher: 10 Minuten)
-    daten.abgerufenMs = (dexVolumeCache && dexVolumeCache.atMs) || Date.now();
     const brauchbar = daten.protocols.some((p) => p.d1 != null);
     if (brauchbar) {
       const schreiben = env.DB.prepare(
