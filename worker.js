@@ -196,25 +196,28 @@ async function fetchVanaheimexSwapIntervals() {
   }
 }
 
-// Midgard bleibt fuehrend; vanaheimex fuellt fehlende oder leere Tage und liefert den laufenden
-// Tag, den Midgard derzeit gar nicht befuellt.
+// VANAHEIMEX IST FUEHREND (Entscheidung: "Liquify ist mir unzuverlaessig geworden").
+// Jeder Tag, den vanaheimex mit Werten liefert, kommt von dort. Midgard (Liquify) fuellt nur
+// noch Tage, die bei vanaheimex fehlen oder leer sind -- und springt ganz ein, wenn vanaheimex
+// ausfaellt (siehe den Fall !vana unten).
 //
 // SCHLUESSEL IST startTime, NICHT endTime (gemeldet: "der aktuelle Balken fehlt"). Beim
 // laufenden Tag setzt Midgard endTime auf Mitternacht, vanaheimex auf JETZT -- ueber endTime
 // verglichen landeten beide Eintraege nebeneinander in der Reihe, der leere von Midgard als
 // letzter. Genau der wurde dann als letzter Balken gezeichnet: null.
 function mischeTagesreihe(midgard, vana) {
-  if (!vana || !vana.length) return midgard;
-  if (!midgard || !midgard.intervals || !midgard.intervals.length) return { intervals: vana, meta: (midgard && midgard.meta) || null };
-  const hatWert = (iv) => Number(iv && iv.totalCount) > 0;
+  if (!vana || !vana.length) return midgard ? { ...midgard, quelle: 'midgard' } : midgard;
+  if (!midgard || !midgard.intervals || !midgard.intervals.length) return { intervals: vana, meta: (midgard && midgard.meta) || null, quelle: 'vanaheimex' };
+  const hatWert = (iv) => Number(iv && iv.totalCount) > 0 || Number(iv && iv.totalVolumeUSD) > 0;
   const nachStart = new Map();
-  for (const iv of midgard.intervals) nachStart.set(String(iv.startTime), iv);
-  for (const iv of vana) {
+  // Erst vanaheimex eintragen, dann Midgard nur dort, wo vanaheimex nichts hat.
+  for (const iv of vana) if (hatWert(iv)) nachStart.set(String(iv.startTime), iv);
+  for (const iv of midgard.intervals) {
     const vorhanden = nachStart.get(String(iv.startTime));
-    if (!vorhanden || !hatWert(vorhanden)) nachStart.set(String(iv.startTime), iv);
+    if (!vorhanden) nachStart.set(String(iv.startTime), iv);
   }
   const zusammen = [...nachStart.values()].sort((a, b) => Number(a.startTime) - Number(b.startTime));
-  return { ...midgard, intervals: zusammen };
+  return { ...midgard, intervals: zusammen, quelle: 'vanaheimex' };
 }
 
 function fetchVolumeBundleLive() {
@@ -2351,21 +2354,28 @@ async function baueDexVergleich() {
     if (r3 && r3.status === 'fulfilled' && r3.value) llamaUser[p.key] = r3.value;
   });
 
-  if (midgardReihe && midgardReihe.length) reihen['thorchain'] = midgardReihe.slice().sort((a, b) => a.day < b.day ? -1 : 1);
-  else fehler['thorchain'] = 'MIDGARD_NO_DATA';
-
-  // ZUERST die vollstaendige Tagesreihe von vanaheimex (Quelle der Balken auf thorchain.net):
-  // ein echter, ganzer Tageswert ist verlaesslicher als zusammengezaehlte Stunden. Erst was
-  // dort fehlt, wird anschliessend aus Midgards Stundenwerten gebildet.
+  // VANAHEIMEX ZUERST, Midgard (Liquify) nur als Absicherung.
+  //
+  // Die Tagesreihe entsteht aus der Vereinigung beider Quellen: Jeder Tag, fuer den vanaheimex
+  // einen Wert hat, kommt von dort. Midgard fuellt nur Tage, die bei vanaheimex fehlen, und
+  // traegt die ganze Reihe, wenn vanaheimex komplett ausfaellt.
+  const heuteTag = tagesSchluessel(Math.floor(Date.now() / 1000));
   const thorVanaTage = [];
-  if (reihen['thorchain'] && vanaheimexTage && vanaheimexTage.size) {
-    reihen['thorchain'] = reihen['thorchain'].map((eintrag) => {
-      if (eintrag.volume != null) return eintrag;
-      const wert = vanaheimexTage.get(eintrag.day);
-      if (!wert || !(wert.volumen > 0)) return eintrag;
-      thorVanaTage.push(eintrag.day);
-      return { day: eintrag.day, volume: wert.volumen, quelle: 'vanaheimex-tag' };
+  const thorMidgardTage = [];
+  {
+    const midgardNach = new Map((midgardReihe || []).map((e) => [e.day, e]));
+    const vana = vanaheimexTage || new Map();
+    const alleTage = [...new Set([...midgardNach.keys(), ...vana.keys()])]
+      .filter((d) => d <= heuteTag).sort();
+    const reihe = alleTage.map((day) => {
+      const v = vana.get(day);
+      if (v && v.volumen > 0) { thorVanaTage.push(day); return { day, volume: v.volumen, quelle: 'vanaheimex-tag' }; }
+      const m = midgardNach.get(day);
+      if (m && m.volume != null) { thorMidgardTage.push(day); return { day, volume: m.volume, quelle: 'midgard' }; }
+      return { day, volume: null };
     });
+    if (reihe.length) reihen['thorchain'] = reihe;
+    else fehler['thorchain'] = 'VANAHEIMEX_UND_MIDGARD_OHNE_DATEN';
   }
 
   // Danach die Reste aus Midgards Stundenwerten (siehe
@@ -2422,7 +2432,7 @@ async function baueDexVergleich() {
     ? Object.entries(letzterTagJe).filter(([, d]) => d === stichtag).map(([k]) => k)
     : [];
 
-  const ALLE = [{ key: 'thorchain', name: 'THORChain', source: 'midgard' },
+  const ALLE = [{ key: 'thorchain', name: 'THORChain', source: thorMidgardTage.length && !thorVanaTage.length ? 'midgard' : 'vanaheimex' },
     ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name, source: 'defillama' }))];
   const protokolle = ALLE.map((p) => {
     const reihe = reihen[p.key] || [];
@@ -2441,7 +2451,7 @@ async function baueDexVergleich() {
       d1: wert(d1), d7: wert(d7), d30: wert(d30),
       days1: d1.tage, days7: d7.tage, days30: d30.tage,
       // Welche Quelle hakt -- die Karte zeigt das als Hinweis an.
-      quelleProblem: luecken ? (p.source === 'midgard' ? 'midgard' : p.source) : null,
+      quelleProblem: luecken ? p.source : null,
       tageOhneWert: luecken ? { d1: d1.ohneWert, d7: d7.ohneWert, d30: d30.ohneWert } : null,
       
       series: reihe.filter((e) => e.day <= stichtag).slice(-30),
@@ -2463,20 +2473,27 @@ async function baueDexVergleich() {
   };
   
   const feeReihen = {}, feeAllReihen = {};
-  if (midgardFees && midgardFees.length) feeReihen['thorchain'] = midgardFees;
-  // Fehlende Gebuehrentage aus derselben vanaheimex-Reihe (totalFees * Tageskurs), damit die
-  // Spalte "Fees earned" nicht leer bleibt, waehrend Liquifys Tagesaggregation haengt.
+  // Gebuehren ebenso: vanaheimex (totalFees * Tageskurs) zuerst, Midgards liquidityFees nur
+  // fuer Tage, die bei vanaheimex fehlen.
   const thorGebuehrenTage = [];
-  if (feeReihen['thorchain'] && vanaheimexTage && vanaheimexTage.size) {
-    feeReihen['thorchain'] = feeReihen['thorchain'].map((eintrag) => {
-      if (eintrag.volume != null) return eintrag;
-      const wert = vanaheimexTage.get(eintrag.day);
-      if (!wert || !(wert.gebuehren > 0)) return eintrag;
-      thorGebuehrenTage.push(eintrag.day);
-      return { day: eintrag.day, volume: wert.gebuehren, quelle: 'vanaheimex-tag' };
+  const thorGebuehrenMidgardTage = [];
+  {
+    const midgardNach = new Map((midgardFees || []).map((e) => [e.day, e]));
+    const vana = vanaheimexTage || new Map();
+    const alleTage = [...new Set([...midgardNach.keys(), ...vana.keys()])]
+      .filter((d) => d <= heuteTag).sort();
+    const reihe = alleTage.map((day) => {
+      const v = vana.get(day);
+      if (v && v.gebuehren > 0) { thorGebuehrenTage.push(day); return { day, volume: v.gebuehren, quelle: 'vanaheimex-tag' }; }
+      const m = midgardNach.get(day);
+      if (m && m.volume != null) { thorGebuehrenMidgardTage.push(day); return { day, volume: m.volume, quelle: 'midgard' }; }
+      return { day, volume: null };
     });
+    if (reihe.length) feeReihen['thorchain'] = reihe;
   }
-  const feeBasisJe = { thorchain: 'midgard-liquidityFees' };
+  // Neuer Name der Grundlage -> haltAlteTageFest verwirft die frueher festgehaltenen
+  // Midgard-Gebuehrentage einmalig und uebernimmt die vanaheimex-Werte.
+  const feeBasisJe = { thorchain: 'vanaheimex-totalFees' };
   const rohReihen = {};
   for (const p of DEX_PROTOCOLS) {
     const alles = alsReihe(llamaFees[p.key]);
@@ -2551,11 +2568,14 @@ async function baueDexVergleich() {
     // und welche Quellen ihn noch nicht haben.
     naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
     wartetAuf: nachzuegler,
-    sources: { thorchain: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
+    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
     // Tage, deren Wert aus den Stundenwerten stammt, weil die Tagesreihe leer war.
     thorchainStundenTage: thorStundenTage,
-    // Tage, die aus der Tagesreihe von vanaheimex stammen.
+    // Tage, die aus der Tagesreihe von vanaheimex stammen (Normalfall).
     thorchainVanaheimexTage: thorVanaTage,
+    // Tage, fuer die vanaheimex nichts hatte und Midgard (Liquify) einspringen musste.
+    thorchainMidgardTage: thorMidgardTage,
+    thorchainGebuehrenMidgardTage: thorGebuehrenMidgardTage,
     // Gebuehrentage, die aus der vanaheimex-Reihe stammen.
     thorchainGebuehrenTage: thorGebuehrenTage,
     // Tag, der notfalls mit dem rollierenden 24h-Wert von vanaheimex gefuellt wurde.
@@ -2601,6 +2621,10 @@ function haltAlteTageFest(neu, alt) {
       if (!e || e.day >= heute) return e;            // laufender Tag bleibt beweglich
       const a = frueher.get(e.day);
       if (!a || a.volume == null) return e;          // frueher kein Wert -> neuen nehmen
+      // vanaheimex hat Vorrang: Ein frueher festgehaltener Midgard-Wert (ohne quelle oder
+      // 'midgard') wird durch einen vanaheimex-Wert ersetzt -- aber nie umgekehrt. Faellt
+      // vanaheimex kurz aus, bleibt der Tag also bei seinem vanaheimex-Wert stehen.
+      if (e.quelle === 'vanaheimex-tag' && a.quelle !== 'vanaheimex-tag' && e.volume != null) return e;
       return a;                                       // sonst: beim ersten Wert bleiben
     });
   };
