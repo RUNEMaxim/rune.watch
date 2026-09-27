@@ -3604,6 +3604,56 @@ async function handleMemoless(request, env) {
   return json({ error: { code, message: e?.message || String(e) } }, env, 502);
 }
 
+// SLASH-CHECK (auf Wunsch: "es gab Slashes, Bonder haben RUNE verloren, Refund kommt mit 3.21 --
+// welche Nodes sind betroffen?"). Gleiche Methode wie die THORChain-Devs in den Refund-Migrationen
+// ("bond-diff" zwischen zwei Blockhoehen): Bond jeder Node bei `from` und bei `to` vergleichen.
+// Waehrend eines Halts ist der Churn pausiert, Rewards landen erst beim Churn im Bond -- ein
+// Rueckgang ohne Status-/Anbieterwechsel ist deshalb praktisch immer ein Slash. Zusaetzlich je
+// Node die Bond Provider mit ihrem Verlust (die Bonder, die den Refund bekommen sollen).
+async function handleSlashCheck(request, env) {
+  const url = new URL(request.url);
+  const from = parseInt(url.searchParams.get('from') || '', 10);
+  let to = parseInt(url.searchParams.get('to') || '', 10);
+  if (!Number.isFinite(from) || from <= 0) return json({ error: { code: 'BAD_FROM', message: 'from (Blockhoehe) fehlt' } }, env, 400);
+  try {
+    const [a, b] = await Promise.all([
+      fetchNodesAtHeight(from),
+      Number.isFinite(to) && to > 0 ? fetchNodesAtHeight(to) : fetchNodes(),
+    ]);
+    const bondOf = n => Number(n && n.total_bond) / 1e8 || 0;
+    const provOf = n => {
+      const m = new Map();
+      for (const p of ((n && n.bond_providers && n.bond_providers.providers) || [])) m.set(p.bond_address, Number(p.bond) / 1e8 || 0);
+      return m;
+    };
+    const vorher = new Map((Array.isArray(a) ? a : []).map(n => [n.node_address, n]));
+    const out = [];
+    let summe = 0;
+    for (const n of (Array.isArray(b) ? b : [])) {
+      const v = vorher.get(n.node_address);
+      if (!v) continue;
+      const diff = bondOf(n) - bondOf(v);
+      if (!(diff < -0.01)) continue;
+      const pv = provOf(v), pn = provOf(n);
+      // Anbieterwechsel (jemand hat abgezogen) ist kein Slash -> markieren statt verschweigen
+      const anbieterWeg = [...pv.keys()].filter(k => !pn.has(k));
+      const bonder = [...pn.entries()].map(([addr, jetzt]) => ({ addr, verlust: jetzt - (pv.get(addr) || 0) }))
+        .filter(x => x.verlust < -0.01).sort((x, y) => x.verlust - y.verlust);
+      out.push({
+        node: n.node_address, operator: n.node_operator_address, status: n.status, statusVorher: v.status,
+        bondVorher: bondOf(v), bondJetzt: bondOf(n), diff, bonder, unsicher: anbieterWeg.length > 0 || v.status !== n.status,
+      });
+      if (!(anbieterWeg.length > 0 || v.status !== n.status)) summe += diff;
+    }
+    out.sort((x, y) => x.diff - y.diff);
+    return new Response(JSON.stringify({ from, to: Number.isFinite(to) && to > 0 ? to : null, nodes: out, summe }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...corsHeaders(env) },
+    });
+  } catch (e) {
+    return json({ error: { code: 'SLASH_CHECK_FAILED', message: e?.message || String(e) } }, env, 502);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -3614,6 +3664,9 @@ export default {
       const url = new URL(request.url);
       if (url.pathname === '/bond-history') {
         return await handleBondHistory(request, env, ctx);
+      }
+      if (url.pathname === '/slash-check') {
+        return await handleSlashCheck(request, env);
       }
       if (url.pathname === '/bond-ledger') {
         return await handleBondLedger(request, env);
