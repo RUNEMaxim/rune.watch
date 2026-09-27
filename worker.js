@@ -3616,10 +3616,15 @@ async function handleSlashCheck(request, env) {
   let to = parseInt(url.searchParams.get('to') || '', 10);
   if (!Number.isFinite(from) || from <= 0) return json({ error: { code: 'BAD_FROM', message: 'from (Blockhoehe) fehlt' } }, env, 400);
   try {
-    const [a, b] = await Promise.all([
+    // Vaults zum START (vor dem Vorfall): wer war Mitglied welches Asgard-Vaults? Ein Double Spend
+    // wird nur den Mitgliedern des Vaults angelastet, der die Auszahlung signiert hat.
+    const [a, b, vaults] = await Promise.all([
       fetchNodesAtHeight(from),
       Number.isFinite(to) && to > 0 ? fetchNodesAtHeight(to) : fetchNodes(),
+      fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/vaults/asgard?height=${from}`).catch(() => []),
     ]);
+    const vaultVonPub = new Map();
+    for (const v of (Array.isArray(vaults) ? vaults : [])) for (const m of (v.membership || [])) vaultVonPub.set(m, v);
     const bondOf = n => Number(n && n.total_bond) / 1e8 || 0;
     const provOf = n => {
       const m = new Map();
@@ -3639,14 +3644,25 @@ async function handleSlashCheck(request, env) {
       const anbieterWeg = [...pv.keys()].filter(k => !pn.has(k));
       const bonder = [...pn.entries()].map(([addr, jetzt]) => ({ addr, verlust: jetzt - (pv.get(addr) || 0) }))
         .filter(x => x.verlust < -0.01).sort((x, y) => x.verlust - y.verlust);
+      const pub = (v.pub_key_set && v.pub_key_set.secp256k1) || (n.pub_key_set && n.pub_key_set.secp256k1) || null;
+      const vault = pub ? vaultVonPub.get(pub) : null;
       out.push({
+        vault: vault ? vault.pub_key : null,
         node: n.node_address, operator: n.node_operator_address, status: n.status, statusVorher: v.status,
         bondVorher: bondOf(v), bondJetzt: bondOf(n), diff, bonder, unsicher: anbieterWeg.length > 0 || v.status !== n.status,
       });
       if (!(anbieterWeg.length > 0 || v.status !== n.status)) summe += diff;
     }
     out.sort((x, y) => x.diff - y.diff);
-    return new Response(JSON.stringify({ from, to: Number.isFinite(to) && to > 0 ? to : null, nodes: out, summe }), {
+    // Zusammenfassung je Vault: wie viele seiner Mitglieder haben (sicher) Bond verloren?
+    const vListe = (Array.isArray(vaults) ? vaults : []).map(v => {
+      const treffer = out.filter(x => x.vault === v.pub_key && !x.unsicher);
+      const addr = c => ((v.addresses || []).find(x => String(x.chain).toUpperCase() === c) || {}).address || null;
+      return { pub_key: v.pub_key, status: v.status, mitglieder: (v.membership || []).length, betroffen: treffer.length,
+        verlust: treffer.reduce((s2, x) => s2 + x.diff, 0), btc: addr('BTC'),
+        adressen: Object.fromEntries((v.addresses || []).map(x => [String(x.chain).toUpperCase(), x.address])) };
+    }).filter(v => v.betroffen > 0).sort((x, y) => x.verlust - y.verlust);
+    return new Response(JSON.stringify({ from, to: Number.isFinite(to) && to > 0 ? to : null, nodes: out, summe, vaults: vListe }), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...corsHeaders(env) },
     });
   } catch (e) {
