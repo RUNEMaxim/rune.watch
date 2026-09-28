@@ -1564,8 +1564,10 @@ async function handleRunebondNodes(request, env, ctx) {
     if (!roh) throw letzterFehler || new Error('KEINE_QUELLE');
     // Antwort ist {data: [...]} oder direkt ein Array -- beides zulassen.
     const liste = Array.isArray(roh) ? roh : (Array.isArray(roh?.data) ? roh.data : []);
+    // Felder laut @hippocampus-web3/runebond-client (NodeListingDto). Ausgeblendete Eintraege
+    // (isHidden.hide) zeigt RUNEBond selbst nicht an -- dann hier auch nicht.
     const eintraege = liste
-      .filter((e) => e && e.nodeAddress && !e.isDelisted)
+      .filter((e) => e && e.nodeAddress && !e.isDelisted && !(e.isHidden && e.isHidden.hide))
       .map((e) => ({
         addr: String(e.nodeAddress).toLowerCase(),
         name: e.name || null,
@@ -1573,6 +1575,11 @@ async function handleRunebondNodes(request, env, ctx) {
         maxRune: Number(e.maxRune) || null,
         fee: Number.isFinite(Number(e.feePercentage)) ? Number(e.feePercentage) : null,
         providers: Number.isFinite(Number(e.bondProvidersCount)) ? Number(e.bondProvidersCount) : null,
+        // Ziel-Bond des Betreibers (RUNE) -- mit dem aktuellen Bond ergibt das den freien Platz
+        target: Number(e.targetTotalBond) > 0 ? Number(e.targetTotalBond) : null,
+        status: e.status ? String(e.status) : null,
+        yieldGuard: !!(e.isYieldGuarded && e.isYieldGuarded.hide),
+        maxTimeToLeave: Number(e.maxTimeToLeave) > 0 ? Number(e.maxTimeToLeave) : null,
       }));
     // "base" steht mit in der Antwort -- so ist beim Nachsehen sofort klar, welche Adresse
     // tatsaechlich geantwortet hat.
