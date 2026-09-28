@@ -1682,6 +1682,8 @@ async function handleIsOwner(request, env) {
 //     target TEXT NOT NULL, token TEXT, day TEXT NOT NULL, at INTEGER NOT NULL);
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 const CLICK_TARGETS = new Set(['runebond']);
+const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
+let klickSpalteGeprueft = false;
 
 async function handleClick(request, env, ctx) {
   const url = new URL(request.url);
@@ -1692,13 +1694,23 @@ async function handleClick(request, env, ctx) {
   const token = url.searchParams.get('v');
   const now = Date.now();
   const sauber = token && VISITOR_TOKEN_RE.test(token) ? token : null;
+  // HERKUNFT des Klicks (banner / node / liste / karte) -- nur feste Werte, alles andere leer.
+  const qRoh = String(url.searchParams.get('q') || '').toLowerCase();
+  const quelle = CLICK_QUELLEN.has(qRoh) ? qRoh : null;
   if (ctx && typeof ctx.waitUntil === 'function') {
-    ctx.waitUntil(
-      env.DB.prepare('INSERT INTO outbound_clicks (target, token, day, at) VALUES (?, ?, ?, ?)')
-        .bind(target, sauber, utcDayString(now), now)
-        .run()
-        .catch((e) => console.warn('[rune-rewards-backend] Klick nicht gezaehlt (Migration 3?):', e?.message || String(e)))
-    );
+    ctx.waitUntil((async () => {
+      // Spalte "quelle" legt der Worker beim ersten Mal selbst an (SQLite kennt kein
+      // "ADD COLUMN IF NOT EXISTS" -- existiert sie schon, schlaegt das still fehl).
+      if (!klickSpalteGeprueft) {
+        klickSpalteGeprueft = true;
+        await env.DB.prepare('ALTER TABLE outbound_clicks ADD COLUMN quelle TEXT').run().catch(() => {});
+      }
+      await env.DB.prepare('INSERT INTO outbound_clicks (target, token, day, at, quelle) VALUES (?, ?, ?, ?, ?)')
+        .bind(target, sauber, utcDayString(now), now, quelle).run()
+        .catch(() => env.DB.prepare('INSERT INTO outbound_clicks (target, token, day, at) VALUES (?, ?, ?, ?)')
+          .bind(target, sauber, utcDayString(now), now).run())
+        .catch((e) => console.warn('[rune-rewards-backend] Klick nicht gezaehlt (Migration 3?):', e?.message || String(e)));
+    })());
   }
   return new Response(null, { status: 204 });
 }
@@ -1723,7 +1735,7 @@ async function handleStats(request, env) {
     totalRequests1Row, totalRequests7Row, totalRequests30Row, trackingSinceRow,
     vis1Row, vis7Row, vis30Row, visTotalRow, visSinceRow,
     visW1Row, visW30Row, visWSinceRow,
-    klick1Row, klick30Row, klickGesamtRow, klickGeraeteRow,
+    klick1Row, klick30Row, klickGesamtRow, klickGeraeteRow, klickQuellenRows,
   ] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE 1=1${exclSql}`).bind(...excl).first(),
     env.DB.prepare(`SELECT COUNT(DISTINCT address) AS n FROM sync_activity_days WHERE day >= ?${exclSql}`).bind(day1, ...excl).first(),
@@ -1784,6 +1796,8 @@ async function handleStats(request, env) {
     env.DB.prepare("SELECT COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond' AND day >= ?").bind(day30).first().catch(() => ({ n: null })),
     env.DB.prepare("SELECT COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond'").first().catch(() => ({ n: null })),
     env.DB.prepare("SELECT COUNT(DISTINCT token) AS n FROM outbound_clicks WHERE target = 'runebond' AND token IS NOT NULL").first().catch(() => ({ n: null })),
+    // Aufteilung nach Herkunft (30 Tage); alte Klicks ohne Quelle erscheinen als "–".
+    env.DB.prepare("SELECT COALESCE(quelle, '-') AS q, COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond' AND day >= ? GROUP BY q ORDER BY n DESC").bind(day30).all().catch(() => ({ results: null })),
   ]);
 
   const active1 = active1Row?.n || 0;
@@ -1843,6 +1857,7 @@ async function handleStats(request, env) {
     runebondClicksLast30d: klick30Row?.n ?? null,
     runebondClicksTotal: klickGesamtRow?.n ?? null,
     runebondClickDevices: klickGeraeteRow?.n ?? null,
+    runebondClicksBySource30d: klickQuellenRows && Array.isArray(klickQuellenRows.results) ? klickQuellenRows.results : null,
   };
   // Anteil in Prozent, eine Nachkommastelle. Nenner = alle Geraete im selben Zeitraum.
   const walletPct = (n, total) => (n == null || !total) ? null : Math.round((n / total) * 1000) / 10;
@@ -2026,6 +2041,8 @@ async function handleStats(request, env) {
           stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
         ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
           stats.runebondClicksLast30d == null ? 'no data yet' : `${stats.runebondClicksLast30d} clicks in 30 days`)}
+        ${tile('rbsrc', 'RUNEBond clicks by source – 30 days', stats.runebondClicksBySource30d && stats.runebondClicksBySource30d.length ? stats.runebondClicksBySource30d.map(r => ({ banner: 'Banner', node: 'Node card', liste: 'RUNEBond list', karte: 'Bond card', '-': 'older' }[r.q] || r.q) + ' ' + r.n).join(' · ') : null,
+          'where the click came from')}
         ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
           stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
