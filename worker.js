@@ -1681,6 +1681,9 @@ async function handleIsOwner(request, env) {
 //     id INTEGER PRIMARY KEY AUTOINCREMENT,
 //     target TEXT NOT NULL, token TEXT, day TEXT NOT NULL, at INTEGER NOT NULL);
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
+// Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
+// wirklich live ist.
+const WORKER_VERSION = '2026-09-28-1440';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2041,8 +2044,17 @@ async function handleStats(request, env) {
           stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
         ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
           stats.runebondClicksLast30d == null ? 'no data yet' : `${stats.runebondClicksLast30d} clicks in 30 days`)}
-        ${tile('rbsrc', 'RUNEBond clicks by source – 30 days', stats.runebondClicksBySource30d && stats.runebondClicksBySource30d.length ? stats.runebondClicksBySource30d.map(r => ({ banner: 'Banner', node: 'Node card', liste: 'RUNEBond list', karte: 'Bond card', '-': 'older' }[r.q] || r.q) + ' ' + r.n).join(' · ') : null,
-          'where the click came from')}
+        ${(() => {
+          // Aufteilung nach Herkunft: gross die Summe (30 Tage), darunter je Quelle eine Zeile.
+          // Vorher stand die ganze Aufzaehlung als "Zahl" in der grossen Schrift der Kachel.
+          const rows = stats.runebondClicksBySource30d;
+          const namen = { banner: 'Banner (top of the app)', node: 'Node card (node window)', liste: 'RUNEBond × RUNE.WATCH list', karte: 'Bond card', '-': 'before sources were recorded' };
+          if (!rows || !rows.length) return tile('rbsrc', 'RUNEBond clicks by source – 30 days', null, 'no data yet');
+          const summe = rows.reduce((a, r) => a + (Number(r.n) || 0), 0);
+          const zeilen = rows.map(r => `${namen[r.q] || r.q}: <b>${Number(r.n) || 0}</b>`).join('<br>');
+          return tile('rbsrc', 'RUNEBond clicks by source – 30 days', summe, zeilen);
+        })()}
+        <div class="tile"><div class="tile-label">Worker version</div><div class="tile-hint">${WORKER_VERSION}</div></div>
         ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
           stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
