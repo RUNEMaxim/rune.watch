@@ -1538,6 +1538,63 @@ const RUNEBOND_API_BASES = [
 const RUNEBOND_CACHE_MS = 10 * 60 * 1000;
 let runebondCache = { at: 0, data: null };
 
+
+// RUNEBOND-EINTRAEGE DIREKT VON DER CHAIN (ohne API-Schluessel).
+// Laut RUNEBond-Doku ("List your node") laeuft das Listen KOMPLETT on-chain: der Betreiber schickt
+// mind. 0,1 RUNE an thor1xazgmh7sv0p393t9ntj6q9p52ahycc8jjlaap9 mit dem Memo
+//   TB:V2:LIST:<node>:<min>:<total-bond-target>:<fee>      (min/target in 1e8, fee: 100 = 1 %)
+//   TB:LIST:<node>:<operator>:<min>:<max>:<fee>            (altes Format, weiter gueltig)
+//   TB:DELIST:<node>
+// Wir lesen diese Sendungen ueber Midgard (/actions?address=...&type=send), werten sie in
+// zeitlicher Reihenfolge aus (die letzte Meldung je Node gilt) und nehmen nur Meldungen, die
+// vom BETREIBER der Node kamen (Abgleich mit /thorchain/nodes) -- sonst koennte jeder fremde
+// Nodes listen. Die Provider-Zahl kommt ebenfalls von der Chain.
+const RUNEBOND_LIST_ADDR = 'thor1xazgmh7sv0p393t9ntj6q9p52ahycc8jjlaap9';
+async function runebondVonDerChain() {
+  const aktionen = [];
+  for (let seite = 0; seite < 80; seite++) {
+    const j = await fetchFromBases(getMidgardBases(), `/actions?address=${RUNEBOND_LIST_ADDR}&type=send&limit=50&offset=${seite * 50}`);
+    const a = Array.isArray(j && j.actions) ? j.actions : [];
+    aktionen.push(...a);
+    if (a.length < 50) break;
+  }
+  const nodes = await fetchNodes();
+  const nachAddr = new Map((Array.isArray(nodes) ? nodes : []).map(n => [String(n.node_address).toLowerCase(), n]));
+  const zahl = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
+  const rune = v => { const x = zahl(v); return x == null ? null : x >= 1e6 ? x / 1e8 : x; }; // Basis-Einheiten erkennen
+  const stand = new Map();
+  aktionen.sort((x, y) => Number(x.height) - Number(y.height) || String(x.date).localeCompare(String(y.date)));
+  for (const a of aktionen) {
+    const memo = String((a.metadata && a.metadata.send && a.metadata.send.memo) || a.memo || '').trim();
+    if (!/^TB:/i.test(memo)) continue;
+    const von = String(((a.in || [])[0] || {}).address || '').toLowerCase();
+    const t = memo.split(':');
+    let node = null, eintrag = null, weg = false;
+    if (/^TB:V2:LIST:/i.test(memo) && t.length >= 7) {
+      node = t[3].toLowerCase();
+      eintrag = { minRune: rune(t[4]), target: rune(t[5]), maxRune: null, fee: zahl(t[6]) != null ? zahl(t[6]) / 100 : null };
+    } else if (/^TB:LIST:/i.test(memo) && t.length >= 7) {
+      node = t[2].toLowerCase();
+      const f = zahl(t[6]);
+      eintrag = { minRune: rune(t[4]), target: rune(t[5]), maxRune: null, fee: f == null ? null : f > 100 ? f / 100 : f };
+    } else if (/^TB:DELIST:/i.test(memo) && t.length >= 3) {
+      node = t[2].toLowerCase(); weg = true;
+    } else continue;
+    const n = nachAddr.get(node);
+    if (!n || String(n.node_operator_address || '').toLowerCase() !== von) continue; // nur der Betreiber
+    if (weg) { stand.delete(node); continue; }
+    stand.set(node, { ...eintrag, seit: a.date ? Math.round(Number(a.date) / 1e6) : null, txId: ((a.in || [])[0] || {}).txID || null });
+  }
+  const listings = [];
+  for (const [addr, e] of stand) {
+    const n = nachAddr.get(addr);
+    const prov = (n && n.bond_providers && n.bond_providers.providers) || [];
+    listings.push({ addr, name: null, minRune: e.minRune, maxRune: e.maxRune, fee: e.fee, providers: prov.length || null,
+      target: e.target, status: n ? String(n.status || '') : null, yieldGuard: false, maxTimeToLeave: null, listedAt: e.seit, source: 'chain' });
+  }
+  return { listings, gelesen: aktionen.length };
+}
+
 async function handleRunebondNodes(request, env, ctx) {
   const jetzt = Date.now();
   if (runebondCache.data && jetzt - runebondCache.at < RUNEBOND_CACHE_MS) {
@@ -1561,7 +1618,14 @@ async function handleRunebondNodes(request, env, ctx) {
         roh = j; basisGenutzt = basis; break;
       } catch (e) { letzterFehler = e; }
     }
-    if (!roh) throw letzterFehler || new Error('KEINE_QUELLE');
+    if (!roh) {
+      // Ohne erreichbare API: dieselben Eintraege direkt aus den Listing-Memos auf der Chain.
+      const c = await runebondVonDerChain();
+      if (!c.listings.length) throw letzterFehler || new Error('KEINE_QUELLE');
+      const daten = { listings: c.listings, fetchedAt: jetzt, base: 'chain (' + c.gelesen + ' Memos)', error: null, apiFehler: letzterFehler ? String(letzterFehler.message || letzterFehler) : null };
+      runebondCache = { at: jetzt, data: daten };
+      return json(daten, env);
+    }
     // Antwort ist {data: [...]} oder direkt ein Array -- beides zulassen.
     const liste = Array.isArray(roh) ? roh : (Array.isArray(roh?.data) ? roh.data : []);
     // Felder laut @hippocampus-web3/runebond-client (NodeListingDto). Ausgeblendete Eintraege
