@@ -1683,7 +1683,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-09-28-1440';
+const WORKER_VERSION = '2026-09-28-1450';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2057,22 +2057,6 @@ async function handleStats(request, env) {
         <div class="tile"><div class="tile-label">Worker version</div><div class="tile-hint">${WORKER_VERSION}</div></div>
         ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
           stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
-      </div>
-      <div class="note">
-        What is counted are <b>devices</b>, not people: phone and desktop of the same person are
-        two. Anyone who clears browser data or browses privately counts again on the next visit —
-        so the number is more of an upper bound. It is based on a random id the browser itself
-        generates and stores in localStorage; no IP, no fingerprint, no cookie, no link to a
-        wallet.
-        <br><br>
-        The difference to page 1: there only users <b>with a wallet entered</b> are counted — only
-        those sync at all. Here every visit counts, including people who only look at the chart.
-        The two numbers will never match.
-        <br><br>
-        "With wallet": the browser additionally reports only a yes/no, whether a wallet is entered
-        on that device — never which one. The share shows how many visitors take the step from
-        looking to entering. It is only recorded from the update onwards; earlier days count as
-        "without wallet", so the 30-day value is too low at first.
       </div>
     </section>
   </div>
