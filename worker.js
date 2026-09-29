@@ -1683,7 +1683,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-09-28-1450';
+const WORKER_VERSION = '2026-09-29-0010';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2191,6 +2191,10 @@ async function handleStats(request, env) {
 const DEX_PROTOCOLS = [
   { key: 'chainflip', name: 'Chainflip', slug: 'chainflip', feeFormel: 'fees-minus-userfees' },
   { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents', feeFormel: 'nicht-vergleichbar' },
+  // MAYA PROTOCOL (auf Wunsch, "wenn sie wieder live sind"): seit dem Exploit vom 18.08.2026 ist
+  // MAYAChain angehalten. Die Daten laufen trotzdem mit; die Karte zeigt Maya erst, wenn wieder
+  // Volumen da ist (Feld "live" unten).
+  { key: 'maya', name: 'Maya Protocol', slug: 'maya-protocol', feeFormel: 'fees-minus-userfees' },
 ];
 const LLAMA_BASES = ['https://api.llama.fi'];
 
@@ -2539,6 +2543,8 @@ async function baueDexVergleich() {
       tageOhneWert: luecken ? { d1: d1.ohneWert, d7: d7.ohneWert, d30: d30.ohneWert } : null,
       
       series: reihe.filter((e) => e.day <= stichtag).slice(-30),
+      // LIVE = in den letzten 2 Tagen echtes Volumen (fuer Maya: wieder am Netz?)
+      live: reihe.filter((e) => e.day <= stichtag).slice(-2).some((e) => Number(e.volume) > 0),
       error: null,
     };
   });
