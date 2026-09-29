@@ -1279,13 +1279,21 @@ async function handleWallets(request, env, ctx) {
       return json({ error: 'INVALID_WALLETS' }, env, 400);
     }
     const newlyDeleted = Array.isArray(body.deletedAddrs) ? body.deletedAddrs.filter((w) => typeof w === 'string' && w.trim()) : [];
+    // WIEDER HINZUGEFUEGT (restoredAddrs): aus der Loeschliste nehmen -- sonst verschwand eine frueher
+    // entfernte Wallet beim erneuten Eintragen sofort wieder.
+    const restored = Array.isArray(body.restoredAddrs) ? body.restoredAddrs.filter((w) => typeof w === 'string' && w.trim()) : [];
+    if (restored.length) {
+      const del = env.DB.prepare('DELETE FROM user_wallet_lists_deleted WHERE address = ? AND deleted_wallet = ?');
+      await env.DB.batch(restored.map((w) => del.bind(address, w)));
+    }
+    const newlyDeletedOhne = newlyDeleted.filter((w) => !restored.includes(w));
 
-    if (newlyDeleted.length) {
+    if (newlyDeletedOhne.length) {
       const now0 = Date.now();
       const stmt = env.DB.prepare(
         'INSERT OR IGNORE INTO user_wallet_lists_deleted (address, deleted_wallet, deleted_at) VALUES (?, ?, ?)'
       );
-      await env.DB.batch(newlyDeleted.map((w) => stmt.bind(address, w, now0)));
+      await env.DB.batch(newlyDeletedOhne.map((w) => stmt.bind(address, w, now0)));
     }
 
     const deletedRows = await env.DB
@@ -1683,7 +1691,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-09-29-0010';
+const WORKER_VERSION = '2026-09-30-2100';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
