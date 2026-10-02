@@ -2202,8 +2202,59 @@ const DEX_PROTOCOLS = [
   // MAYA PROTOCOL (auf Wunsch, "wenn sie wieder live sind"): seit dem Exploit vom 18.08.2026 ist
   // MAYAChain angehalten. Die Daten laufen trotzdem mit; die Karte zeigt Maya erst, wenn wieder
   // Volumen da ist (Feld "live" unten).
-  { key: 'maya', name: 'Maya Protocol', slug: 'maya-protocol', feeFormel: 'fees-minus-userfees' },
+  //
+  // QUELLE JETZT MAYAS EIGENES MIDGARD (gewuenscht: "die offiziellen Volumen-Daten von Maya").
+  // DefiLlama bleibt nur als Lueckenfueller fuer einzelne Tage.
+  //
+  // Und der Grund, warum "Fees earned" fuer Maya nie stimmen konnte: Der DefiLlama-Adapter
+  // (dexs/mayachain.ts) meldet dailyUserFees = dailyFees = Swap-Gebuehren. Die Chainflip-Formel
+  // "dailyFees - dailyUserFees" ergab bei Maya deshalb an JEDEM Tag exakt 0.
+  { key: 'maya', name: 'Maya Protocol', slug: 'maya-protocol', feeFormel: 'maya-midgard' },
 ];
+
+// MAYA MIDGARD. Gleiches Schema wie THORChains Midgard, mit zwei Unterschieden:
+//   - Kurs heisst cacaoPriceUSD statt runePriceUSD
+//   - CACAO hat 10 Nachkommastellen (1e10), RUNE nur 8
+// Ersatzadressen per Worker-Variable MAYA_MIDGARD_EXTRA_BASES (kommagetrennt).
+function getMayaMidgardBases() {
+  const env = currentEnv || {};
+  const bases = ['https://midgard.mayachain.info/v2'];
+  if (env.MAYA_MIDGARD_EXTRA_BASES) {
+    for (const b of String(env.MAYA_MIDGARD_EXTRA_BASES).split(',')) {
+      const t2 = b.trim().replace(/\/+$/, '');
+      if (t2) bases.push(t2);
+    }
+  }
+  return bases;
+}
+const CACAO_BASIS = 1e10;
+
+// Volumen UND Gebuehren aus EINER Reihe (/history/swaps): totalVolume und totalFees, beide in
+// CACAO-Basiseinheiten, mal Tageskurs. totalFees ist dieselbe Groesse, die bei THORChain ueber
+// vanaheimex in "Fees earned" steht -- die Zeilen bleiben also vergleichbar.
+//
+// NULL SWAPS SIND BEI MAYA ECHT: Seit dem Exploit steht die Chain, ein Tag ohne Swaps ist dort
+// eine wahre 0, kein Loch wie bei Liquify. Unterschieden wird ueber den Kurs: Ein Loch in der
+// Datenbank kommt ohne Kurs (alles 0), eine angehaltene Chain hat weiterhin einen.
+async function fetchMayaMidgardDaily(tage) {
+  const json = await fetchFromBases(getMayaMidgardBases(), `/history/swaps?interval=day&count=${Math.min(100, tage + 2)}`, { timeoutMs: 12000 });
+  const intervalle = (json && json.intervals) || [];
+  const proTag = new Map();
+  for (const iv of intervalle) {
+    const start = parseInt(iv.startTime, 10);
+    if (!Number.isFinite(start)) continue;
+    const preis = parseFloat(iv.cacaoPriceUSD);
+    const vol = Number(iv.totalVolume) / CACAO_BASIS;
+    const fees = Number(iv.totalFees) / CACAO_BASIS;
+    const tag = tagesSchluessel(start);
+    if (!(preis > 0) || !Number.isFinite(vol) || !Number.isFinite(fees)) {
+      proTag.set(tag, { volumen: null, gebuehren: null });
+      continue;
+    }
+    proTag.set(tag, { volumen: vol * preis, gebuehren: fees * preis, swaps: Number(iv.totalCount) || 0 });
+  }
+  return proTag;
+}
 const LLAMA_BASES = ['https://api.llama.fi'];
 
 function tagesSchluessel(sekunden) {
@@ -2410,10 +2461,15 @@ async function baueDexVergleich() {
     ...DEX_PROTOCOLS.map((p) => fetchLlamaSupplySide(p.slug)),
     // Ganz hinten angehaengt, damit sich die Indizes davor nicht verschieben.
     ...DEX_PROTOCOLS.map((p) => p.feeFormel === 'fees-minus-userfees' ? fetchLlamaUserFees(p.slug) : Promise.resolve(null)),
+    // Maya Midgard -- wieder ganz hinten, aus demselben Grund.
+    fetchMayaMidgardDaily(30),
   ]);
+  const mayaRoh = roh[DEX_PROTOCOLS.length + 5 + 3 * DEX_PROTOCOLS.length];
+  const mayaTage = mayaRoh && mayaRoh.status === 'fulfilled' ? mayaRoh.value : new Map();
 
   const reihen = {};
   const fehler = {};
+  const mayaFehler = mayaRoh && mayaRoh.status !== 'fulfilled' ? (mayaRoh.reason?.message || String(mayaRoh.reason || 'NO_DATA')) : null;
   DEX_PROTOCOLS.forEach((p, i) => {
     const r = roh[i];
     if (r.status !== 'fulfilled' || !r.value) {
@@ -2474,6 +2530,24 @@ async function baueDexVergleich() {
     else fehler['thorchain'] = 'VANAHEIMEX_UND_MIDGARD_OHNE_DATEN';
   }
 
+  // MAYA: Mayas Midgard zuerst, DefiLlama nur fuer Tage, die dort fehlen (Ausfall der Instanz).
+  // DefiLlama liest selbst aus demselben Midgard -- die Zahlen sind gleich definiert, nur spaeter.
+  const mayaMidgardTage = [], mayaLlamaTage = [];
+  {
+    const llamaNach = new Map((reihen['maya'] || []).map((e) => [e.day, e]));
+    const alleTage = [...new Set([...mayaTage.keys(), ...llamaNach.keys()])]
+      .filter((d) => d <= heuteTag).sort();
+    const reihe = alleTage.map((day) => {
+      const m = mayaTage.get(day);
+      if (m && m.volumen != null) { mayaMidgardTage.push(day); return { day, volume: m.volumen, quelle: 'maya-midgard' }; }
+      const l = llamaNach.get(day);
+      if (l && l.volume != null) { mayaLlamaTage.push(day); return { day, volume: l.volume, quelle: 'defillama' }; }
+      return { day, volume: null };
+    }).slice(-40);
+    if (reihe.length) { reihen['maya'] = reihe; delete fehler['maya']; }
+    else if (mayaFehler) fehler['maya'] = 'MAYA_MIDGARD: ' + mayaFehler;
+  }
+
   // Danach die Reste aus Midgards Stundenwerten (siehe
   // fetchMidgardHourlyPerDay). Nur vollstaendige Tage, und nur, wenn tatsaechlich Swaps
   // gezaehlt wurden -- sonst bliebe es bei "kein Wert".
@@ -2529,7 +2603,8 @@ async function baueDexVergleich() {
     : [];
 
   const ALLE = [{ key: 'thorchain', name: 'THORChain', source: thorMidgardTage.length && !thorVanaTage.length ? 'midgard' : 'vanaheimex' },
-    ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name, source: 'defillama' }))];
+    ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name,
+      source: p.key === 'maya' && mayaMidgardTage.length ? 'maya-midgard' : 'defillama' }))];
   const protokolle = ALLE.map((p) => {
     const reihe = reihen[p.key] || [];
     if (!reihe.length || !stichtag) {
@@ -2612,6 +2687,20 @@ async function baueDexVergleich() {
         });
         feeBasisJe[p.key] = 'defillama-fees-minus-userFees';
       }
+    } else if (p.feeFormel === 'maya-midgard') {
+      // Mayas Midgard (totalFees * Tageskurs) zuerst. Lueckenfueller ist DefiLlamas dailyFees
+      // -- NICHT minus dailyUserFees (das waere bei Maya immer 0, siehe DEX_PROTOCOLS).
+      const llamaNach = new Map((alles || []).map((e) => [e.day, e.volume]));
+      const alleTage = [...new Set([...mayaTage.keys(), ...llamaNach.keys()])]
+        .filter((d) => d <= heuteTag).sort();
+      const reihe = alleTage.map((day) => {
+        const m = mayaTage.get(day);
+        if (m && m.gebuehren != null) return { day, volume: m.gebuehren, quelle: 'maya-midgard' };
+        const l = llamaNach.get(day);
+        if (Number.isFinite(l)) return { day, volume: l, quelle: 'defillama' };
+        return { day, volume: null };
+      }).slice(-40);
+      if (reihe.length) { feeReihen[p.key] = reihe; feeBasisJe[p.key] = 'maya-midgard-totalFees'; }
     } else if (p.feeFormel === 'supplyside') {
       const supply = alsReihe(llamaSupply[p.key]);
       if (supply) { feeReihen[p.key] = supply; feeBasisJe[p.key] = 'defillama-supplySide'; }
@@ -2666,7 +2755,11 @@ async function baueDexVergleich() {
     // und welche Quellen ihn noch nicht haben.
     naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
     wartetAuf: nachzuegler,
-    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama' },
+    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama',
+               maya: 'maya-midgard', mayaFallback: 'defillama' },
+    // Maya-Tage, fuer die Mayas Midgard nichts hatte und DefiLlama einspringen musste.
+    mayaLlamaTage,
+    mayaMidgardFehler: mayaFehler,
     // Tage, deren Wert aus den Stundenwerten stammt, weil die Tagesreihe leer war.
     thorchainStundenTage: thorStundenTage,
     // Tage, die aus der Tagesreihe von vanaheimex stammen (Normalfall).
@@ -2723,6 +2816,9 @@ function haltAlteTageFest(neu, alt) {
       // 'midgard') wird durch einen vanaheimex-Wert ersetzt -- aber nie umgekehrt. Faellt
       // vanaheimex kurz aus, bleibt der Tag also bei seinem vanaheimex-Wert stehen.
       if (e.quelle === 'vanaheimex-tag' && a.quelle !== 'vanaheimex-tag' && e.volume != null) return e;
+      // Dasselbe fuer Maya: Ein Wert aus Mayas Midgard ersetzt einen frueher von DefiLlama
+      // festgehaltenen Tag, nie umgekehrt.
+      if (e.quelle === 'maya-midgard' && a.quelle !== 'maya-midgard' && e.volume != null) return e;
       return a;                                       // sonst: beim ersten Wert bleiben
     });
   };
