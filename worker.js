@@ -1545,6 +1545,9 @@ const RUNEBOND_API_BASES = [
 ];
 const RUNEBOND_CACHE_MS = 10 * 60 * 1000;
 let runebondCache = { at: 0, data: null };
+// Letzte Liste MIT Eintraegen. Faellt ein spaeterer Abruf aus, wird sie weiter ausgeliefert
+// (mit "stale": true) statt einer leeren Liste -- sonst verschwand die Karte in der App.
+let runebondLetzteGute = null;
 
 
 // RUNEBOND-EINTRAEGE DIREKT VON DER CHAIN (ohne API-Schluessel).
@@ -1558,14 +1561,35 @@ let runebondCache = { at: 0, data: null };
 // vom BETREIBER der Node kamen (Abgleich mit /thorchain/nodes) -- sonst koennte jeder fremde
 // Nodes listen. Die Provider-Zahl kommt ebenfalls von der Chain.
 const RUNEBOND_LIST_ADDR = 'thor1xazgmh7sv0p393t9ntj6q9p52ahycc8jjlaap9';
-async function runebondVonDerChain() {
-  const aktionen = [];
-  for (let seite = 0; seite < 80; seite++) {
-    const j = await fetchFromBases(getMidgardBases(), `/actions?address=${RUNEBOND_LIST_ADDR}&type=send&limit=50&offset=${seite * 50}`);
-    const a = Array.isArray(j && j.actions) ? j.actions : [];
-    aktionen.push(...a);
-    if (a.length < 50) break;
+// MEMOS ZWISCHENSPEICHERN (gemeldet: Liste leer mit "HTTP_429" von Liquify-Midgard). Bisher
+// wurden ALLE Listing-Memos bei jedem Abruf neu gelesen -- 1200 Memos = 24 Midgard-Anfragen
+// hintereinander, alle 10 Minuten und in jeder Worker-Instanz. Das loeste die Ratenbremse aus.
+// Jetzt: einmal komplett lesen, danach nur noch die neuesten Seiten, bis ein schon bekanntes
+// Memo auftaucht (meist 1 Anfrage). Bei 429 einmal kurz warten und wiederholen.
+let runebondMemos = { liste: [], ids: new Set() };
+async function runebondSeite(seite) {
+  const pfad = `/actions?address=${RUNEBOND_LIST_ADDR}&type=send&limit=50&offset=${seite * 50}`;
+  try { return await fetchFromBases(getMidgardBases(), pfad); }
+  catch (e) {
+    if (!/429/.test(String(e && e.message || e))) throw e;
+    await new Promise(r => setTimeout(r, 1500));
+    return fetchFromBases(getMidgardBases(), pfad);
   }
+}
+async function runebondVonDerChain() {
+  const schluessel = a => String(((a.in || [])[0] || {}).txID || '') + '|' + String(a.height || '') + '|' + String(a.date || '');
+  const neu = [];
+  const vollLesen = !runebondMemos.liste.length;
+  for (let seite = 0; seite < 80; seite++) {
+    const j = await runebondSeite(seite);
+    const a = Array.isArray(j && j.actions) ? j.actions : [];
+    let bekannt = false;
+    for (const x of a) { if (runebondMemos.ids.has(schluessel(x))) { bekannt = true; } else neu.push(x); }
+    if (a.length < 50) break;
+    if (!vollLesen && bekannt) break; // Anschluss an den Bestand gefunden
+  }
+  for (const x of neu) { runebondMemos.ids.add(schluessel(x)); runebondMemos.liste.push(x); }
+  const aktionen = runebondMemos.liste.slice();
   const nodes = await fetchNodes();
   const nachAddr = new Map((Array.isArray(nodes) ? nodes : []).map(n => [String(n.node_address).toLowerCase(), n]));
   const zahl = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
@@ -1632,6 +1656,7 @@ async function handleRunebondNodes(request, env, ctx) {
       if (!c.listings.length) throw letzterFehler || new Error('KEINE_QUELLE');
       const daten = { listings: c.listings, fetchedAt: jetzt, base: 'chain (' + c.gelesen + ' Memos)', error: null, apiFehler: letzterFehler ? String(letzterFehler.message || letzterFehler) : null };
       runebondCache = { at: jetzt, data: daten };
+      runebondLetzteGute = daten;
       return json(daten, env);
     }
     // Antwort ist {data: [...]} oder direkt ein Array -- beides zulassen.
@@ -1657,11 +1682,17 @@ async function handleRunebondNodes(request, env, ctx) {
     // tatsaechlich geantwortet hat.
     const daten = { listings: eintraege, fetchedAt: jetzt, base: basisGenutzt, error: null };
     runebondCache = { at: jetzt, data: daten };
+    if (eintraege.length) runebondLetzteGute = daten;
     return json(daten, env);
   } catch (e) {
     // Faellt weich aus: die Node-Karte zeigt dann einfach keine Markierungen.
-    const daten = { listings: [], fetchedAt: jetzt, error: String(e?.message || e) };
-    runebondCache = { at: jetzt - (RUNEBOND_CACHE_MS - 60000), data: daten };
+    const fehler = String(e?.message || e);
+    // Gibt es eine fruehere gute Liste, die ausliefern (hoechstens 6 h alt) -- nur als veraltet
+    // markiert. In 2 Minuten wird es erneut versucht.
+    const daten = runebondLetzteGute && jetzt - runebondLetzteGute.fetchedAt < 6 * 3600 * 1000
+      ? { ...runebondLetzteGute, stale: true, error: fehler }
+      : { listings: [], fetchedAt: jetzt, error: fehler };
+    runebondCache = { at: jetzt - (RUNEBOND_CACHE_MS - 120000), data: daten };
     return json(daten, env);
   }
 }
