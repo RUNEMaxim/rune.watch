@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-09-30-2100';
+const WORKER_VERSION = '2026-10-06-1400';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -3945,6 +3945,12 @@ export default {
       if (url.pathname === '/swap-history') {
         return await handleSwapHistory(request, env, ctx);
       }
+      if (url.pathname === '/node-epochs') {
+        return await handleNodeEpochs(request, env);
+      }
+      if (url.pathname === '/node-scores') {
+        return await handleNodeScores(request, env);
+      }
       if (url.pathname === '/runebond-nodes') {
         return await handleRunebondNodes(request, env, ctx);
       }
@@ -4194,10 +4200,208 @@ async function waermeTimeline(env) {
   }
 }
 
+
+// =====================================================================================
+// NODE-EPOCHEN: DAUERHAFTE HISTORIE JE NODE UND CHURN
+//
+// Grundlage fuer eine Node-Bewertung ("mit welchem Node haetten Bonder am meisten verdient,
+// welcher ist am zuverlaessigsten?"). THORNode zeigt nur den Ist-Zustand; was in frueheren
+// Epochen war (Fee, Slash-Punkte, Ertrag, warum eine Node rausflog), geht verloren. Deshalb
+// wird fuer JEDEN Churn eine Zeile je Node gespeichert -- ohne Ablaufdatum.
+//
+// Eine Zeile (node, churn_height) beschreibt die Epoche, die mit diesem Churn ENDETE:
+//   - Kennzahlen am letzten Block davor (H-1): Bond, Operator-Fee, Slash-Punkte, Ertrag der
+//     Epoche (current_award, wird beim Churn ausgezahlt), Zahl der Bond-Provider, Version.
+//   - Status davor (H-1) und danach (H+1) -> Ein- und Austritte.
+//   - Bei Austritt der wahrscheinliche Grund: Austrittswunsch, erzwungen, Sperre, schlechteste
+//     (meiste Slash-Punkte), niedrigster Bond, aelteste -- so waehlt THORChain beim Churn aus.
+// Gespeichert werden nur Nodes, die vor ODER nach dem Churn aktiv waren.
+//
+// Befuellung: je Cron-Lauf EIN Churn (2 Archiv-Abfragen), neueste zuerst, danach rueckwaerts
+// bis zum Anfang der Midgard-Churnliste. Fehlt ein Block im Archiv, wird er nach 3 Versuchen
+// uebersprungen (Tabelle node_epochs_meta).
+//
+// Die Tabellen legt der Worker selbst an. Wer es lieber von Hand macht (D1-Console):
+//   CREATE TABLE IF NOT EXISTS node_epochs (
+//     node TEXT NOT NULL, churn_height INTEGER NOT NULL, churn_time INTEGER, epoch_secs INTEGER,
+//     status_before TEXT, status_after TEXT, bond REAL, fee_bps INTEGER, slash_points INTEGER,
+//     reward REAL, providers INTEGER, jailed INTEGER, version TEXT, out_reason TEXT,
+//     active_since INTEGER, PRIMARY KEY (node, churn_height));
+//   CREATE INDEX IF NOT EXISTS idx_node_epochs_height ON node_epochs(churn_height);
+//   CREATE TABLE IF NOT EXISTS node_epochs_meta (
+//     churn_height INTEGER PRIMARY KEY, status TEXT NOT NULL, tries INTEGER NOT NULL, at INTEGER);
+// =====================================================================================
+const NODE_EPOCHS_MAX_TRIES = 3;
+let nodeEpochTabellenOk = false;
+
+async function sichereNodeEpochTabellen(env) {
+  if (nodeEpochTabellenOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS node_epochs (
+      node TEXT NOT NULL, churn_height INTEGER NOT NULL, churn_time INTEGER, epoch_secs INTEGER,
+      status_before TEXT, status_after TEXT, bond REAL, fee_bps INTEGER, slash_points INTEGER,
+      reward REAL, providers INTEGER, jailed INTEGER, version TEXT, out_reason TEXT,
+      active_since INTEGER, PRIMARY KEY (node, churn_height))`),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_node_epochs_height ON node_epochs(churn_height)'),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS node_epochs_meta (
+      churn_height INTEGER PRIMARY KEY, status TEXT NOT NULL, tries INTEGER NOT NULL, at INTEGER)`),
+  ]);
+  nodeEpochTabellenOk = true;
+}
+
+const nodeListe = x => (Array.isArray(x) ? x : (x && x.nodes) || []);
+const nodeStatus = n => String(n?.status || '').toLowerCase();
+const runeAus = v => { const z = Number(v); return Number.isFinite(z) ? z / 1e8 : null; };
+
+// Austrittsgrund einer Node, die vor dem Churn aktiv war und danach nicht mehr.
+function austrittsGrund(n, aktivVorher, hoehe) {
+  if (n?.forced_to_leave) return 'forced';
+  if (n?.requested_to_leave) return 'leave';
+  if ((Number(n?.jail?.release_height) || 0) > hoehe) return 'jail';
+  if (!aktivVorher.length) return 'other';
+  const slash = x => Number(x?.slash_points) || 0;
+  const bond = x => Number(x?.total_bond ?? x?.bond) || 0;
+  const seit = x => Number(x?.active_block_height) || 0;
+  if (slash(n) > 0 && slash(n) >= Math.max(...aktivVorher.map(slash))) return 'worst';
+  if (bond(n) <= Math.min(...aktivVorher.map(bond))) return 'lowbond';
+  if (seit(n) > 0 && seit(n) <= Math.min(...aktivVorher.map(seit).filter(v => v > 0))) return 'oldest';
+  return 'other';
+}
+
+async function syncNodeEpochs(env) {
+  await sichereNodeEpochTabellen(env);
+  const churns = nodeListe(await fetchChurns())
+    .map(c => ({ h: Number(c?.height), t: Math.round(Number(c?.date) / 1e6) }))
+    .filter(c => Number.isFinite(c.h) && c.h > 1 && Number.isFinite(c.t))
+    .sort((a, b) => a.h - b.h);
+  if (churns.length < 2) return;
+  const meta = await env.DB.prepare('SELECT churn_height, status, tries FROM node_epochs_meta').all();
+  const bekannt = new Map((meta.results || []).map(r => [Number(r.churn_height), r]));
+  // Neueste zuerst; die allererste Churn-Hoehe hat keine Vorgaenger-Epoche.
+  const offen = [];
+  for (let i = churns.length - 1; i >= 1; i--) {
+    const m = bekannt.get(churns[i].h);
+    if (m && (m.status === 'done' || Number(m.tries) >= NODE_EPOCHS_MAX_TRIES)) continue;
+    offen.push({ ...churns[i], vorher: churns[i - 1], tries: m ? Number(m.tries) : 0 });
+    if (offen.length >= 1) break;
+  }
+  for (const c of offen) {
+    const merke = status => env.DB.prepare(
+      `INSERT INTO node_epochs_meta (churn_height, status, tries, at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(churn_height) DO UPDATE SET status = excluded.status, tries = excluded.tries, at = excluded.at`
+    ).bind(c.h, status, c.tries + 1, Date.now()).run();
+    let vor, nach;
+    try {
+      vor = nodeListe(await fetchNodesAtHeight(c.h - 1));
+      nach = nodeListe(await fetchNodesAtHeight(c.h + 1));
+    } catch (e) {
+      await merke('failed');
+      console.warn('[rune-rewards-backend] Node-Epochen: Hoehe', c.h, 'nicht abrufbar:', e?.message || String(e));
+      continue;
+    }
+    if (!vor.length || !nach.length) { await merke('failed'); continue; }
+    const statusNach = new Map(nach.map(n => [String(n?.node_address || '').toLowerCase(), nodeStatus(n)]));
+    const aktivVorher = vor.filter(n => nodeStatus(n) === 'active');
+    const epochSecs = Math.max(0, Math.round((c.t - c.vorher.t) / 1000));
+    const zeilen = [];
+    for (const n of vor) {
+      const adr = String(n?.node_address || '').toLowerCase();
+      if (!adr) continue;
+      const sv = nodeStatus(n), sn = statusNach.get(adr) || 'gone';
+      if (sv !== 'active' && sn !== 'active') continue;
+      const bp = n?.bond_providers || {};
+      zeilen.push(env.DB.prepare(
+        `INSERT OR REPLACE INTO node_epochs (node, churn_height, churn_time, epoch_secs, status_before, status_after,
+           bond, fee_bps, slash_points, reward, providers, jailed, version, out_reason, active_since)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        adr, c.h, c.t, epochSecs, sv, sn,
+        runeAus(n?.total_bond ?? n?.bond), Number(bp.node_operator_fee) || 0, Number(n?.slash_points) || 0,
+        sv === 'active' ? runeAus(n?.current_award) : 0,
+        Array.isArray(bp.providers) ? bp.providers.length : 0,
+        (Number(n?.jail?.release_height) || 0) > c.h - 1 ? 1 : 0,
+        String(n?.version || '').slice(0, 20),
+        sv === 'active' && sn !== 'active' ? austrittsGrund(n, aktivVorher, c.h - 1) : null,
+        Number(n?.active_block_height) || null
+      ));
+    }
+    // D1 begrenzt die Groesse eines Batches -- in Paketen schreiben.
+    for (let i = 0; i < zeilen.length; i += 50) await env.DB.batch(zeilen.slice(i, i + 50));
+    await merke('done');
+    nodeScoresCache = null;
+  }
+}
+
+// GET /node-epochs?node=thor1...&limit=200 -- alle Epochen einer Node, neueste zuerst.
+async function handleNodeEpochs(request, env) {
+  await sichereNodeEpochTabellen(env);
+  const url = new URL(request.url);
+  const node = String(url.searchParams.get('node') || '').toLowerCase().trim();
+  if (!/^thor1[0-9a-z]{20,90}$/.test(node)) return json({ error: 'BAD_NODE' }, env, 400);
+  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 200));
+  const r = await env.DB.prepare(
+    'SELECT * FROM node_epochs WHERE node = ? ORDER BY churn_height DESC LIMIT ?'
+  ).bind(node, limit).all();
+  return json({ node, epochs: r.results || [] }, env);
+}
+
+// GET /node-scores?epochs=30 -- Kennzahlen je Node ueber die letzten N Churns:
+//   activeEpochs, apyBonder (Ertrag nach Operator-Fee je Bond, aufs Jahr gerechnet, Mittel
+//   ueber die aktiven Epochen), avgSlash, avgFeeBps, churnOuts je Grund, jailedEpochs.
+// Dazu die Abdeckung (wie viele Churns schon eingelesen sind).
+let nodeScoresCache = null;
+const NODE_SCORES_CACHE_MS = 10 * 60 * 1000;
+async function handleNodeScores(request, env) {
+  await sichereNodeEpochTabellen(env);
+  const url = new URL(request.url);
+  const n = Math.min(500, Math.max(1, Number(url.searchParams.get('epochs')) || 30));
+  if (nodeScoresCache && nodeScoresCache.n === n && Date.now() - nodeScoresCache.at < NODE_SCORES_CACHE_MS) {
+    return json(nodeScoresCache.data, env);
+  }
+  const hoehen = await env.DB.prepare(
+    'SELECT DISTINCT churn_height FROM node_epochs ORDER BY churn_height DESC LIMIT ?'
+  ).bind(n).all();
+  const hs = (hoehen.results || []).map(r => Number(r.churn_height));
+  const gesamt = await env.DB.prepare(
+    "SELECT COUNT(*) AS c, MIN(churn_height) AS von FROM node_epochs_meta WHERE status = 'done'"
+  ).first();
+  const daten = { epochs: hs.length, fromHeight: hs.length ? Math.min(...hs) : null, toHeight: hs.length ? Math.max(...hs) : null,
+    coverage: { churnsDone: Number(gesamt?.c) || 0, oldestHeight: Number(gesamt?.von) || null }, nodes: [] };
+  if (hs.length) {
+    const r = await env.DB.prepare(
+      `SELECT node,
+         SUM(status_before = 'active') AS activeEpochs,
+         AVG(CASE WHEN status_before = 'active' AND bond > 0 AND epoch_secs > 0
+                  THEN reward * (1 - fee_bps / 10000.0) / bond * 31536000.0 / epoch_secs END) AS apyBonder,
+         AVG(CASE WHEN status_before = 'active' THEN slash_points END) AS avgSlash,
+         AVG(CASE WHEN status_before = 'active' THEN fee_bps END) AS avgFeeBps,
+         SUM(CASE WHEN status_before = 'active' THEN reward ELSE 0 END) AS rewardTotal,
+         SUM(jailed) AS jailedEpochs,
+         SUM(COALESCE(out_reason, '') = 'leave') AS outLeave, SUM(COALESCE(out_reason, '') = 'forced') AS outForced,
+         SUM(COALESCE(out_reason, '') = 'jail') AS outJail, SUM(COALESCE(out_reason, '') = 'worst') AS outWorst,
+         SUM(COALESCE(out_reason, '') = 'lowbond') AS outLowBond, SUM(COALESCE(out_reason, '') = 'oldest') AS outOldest,
+         SUM(COALESCE(out_reason, '') = 'other') AS outOther,
+         SUM(status_before != 'active' AND status_after = 'active') AS churnIns,
+         MAX(churn_height) AS lastSeen
+       FROM node_epochs WHERE churn_height >= ? GROUP BY node ORDER BY apyBonder DESC`
+    ).bind(Math.min(...hs)).all();
+    daten.nodes = (r.results || []).map(z => ({
+      ...z,
+      apyBonder: z.apyBonder != null ? Math.round(z.apyBonder * 10000) / 100 : null, // in %
+      avgSlash: z.avgSlash != null ? Math.round(z.avgSlash) : null,
+      avgFeeBps: z.avgFeeBps != null ? Math.round(z.avgFeeBps) : null,
+      rewardTotal: z.rewardTotal != null ? Math.round(z.rewardTotal) : 0,
+    }));
+  }
+  nodeScoresCache = { n, at: Date.now(), data: daten };
+  return json(daten, env);
+}
+
 async function runRefreshCycle(env) {
   await refreshChurnsCache(env);
   await collectSwapPairStats(env);
   await syncNodeHistory(env);
+  try { await syncNodeEpochs(env); } catch (e) { console.warn('[rune-rewards-backend] Node-Epochen:', e?.message || String(e)); }
   await waermeTimeline(env);
 
   const now = Date.now();
