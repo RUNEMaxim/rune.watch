@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-13-1400';
+const WORKER_VERSION = '2026-10-13-1430';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2862,7 +2862,13 @@ async function baueDexVergleich() {
 // =====================================================================================
 const DUNE_API = 'https://api.dune.com/api/v1';
 const NEAR_DUNE_INTERVALL_MS = 20 * 60 * 60 * 1000;
-const NEAR_DUNE_TAGE_ERSTLAUF = 400, NEAR_DUNE_TAGE_FOLGE = 45;
+// SPARSAM (gemeldet: DUNE_HTTP_402 "would exceed your configured datapoint limit per billing
+// cycle"): Dune rechnet Ergebnis-Datenpunkte ab (Zeilen x Spalten). Erstlauf nur 35 Tage, danach
+// je Lauf die letzten 4 Tage -- die Karte braucht hoechstens 30 Tage, aeltere bleiben in D1.
+// Drei Spalten statt vier (Frontend-Gebuehren werden nicht mehr gebraucht).
+const NEAR_DUNE_TAGE_ERSTLAUF = 35, NEAR_DUNE_TAGE_FOLGE = 4;
+// Nach einem Fehler nicht bei jedem Cron-Lauf erneut versuchen (sonst Dauerfeuer bei 402).
+const NEAR_DUNE_FEHLER_PAUSE_MS = 6 * 60 * 60 * 1000;
 let nearDuneTabelleOk = false;
 let nearDune = { tage: new Map(), at: 0 };
 
@@ -2881,15 +2887,12 @@ const nearDuneSql = (tage) => `
 WITH p AS (
   SELECT CAST(substr(CAST(date_at AS varchar), 1, 10) AS date) AS d, SUM(CAST(amount_fee AS double)) AS v
   FROM dune.near.dataset_near_intents_protocol_fees GROUP BY 1
-), a AS (
-  SELECT CAST(substr(CAST(date_at AS varchar), 1, 10) AS date) AS d, SUM(CAST(fee AS double)) AS v
-  FROM dune.near.dataset_near_intents_fees GROUP BY 1
 ), m AS (
   SELECT CAST(substr(CAST(date_at AS varchar), 1, 10) AS date) AS d, SUM(CAST(volume_amount_usd AS double)) AS v
   FROM dune.near.dataset_near_intents_metrics GROUP BY 1
 )
-SELECT CAST(m.d AS varchar) AS day, m.v AS volume_usd, p.v AS protocol_fees_usd, a.v AS affiliate_fees_usd
-FROM m LEFT JOIN p ON p.d = m.d LEFT JOIN a ON a.d = m.d
+SELECT CAST(m.d AS varchar) AS day, m.v AS volume_usd, p.v AS protocol_fees_usd
+FROM m LEFT JOIN p ON p.d = m.d
 WHERE m.d >= current_date - INTERVAL '${Math.max(2, Math.floor(tage))}' DAY
 ORDER BY 1`;
 
@@ -2916,13 +2919,20 @@ async function syncNearDune(env) {
        pending_since = excluded.pending_since, last_error = excluded.last_error`
   ).bind(felder.last_ok ?? meta.last_ok ?? null, felder.pending_exec ?? null, felder.pending_since ?? null, felder.last_error ?? null).run();
 
+  // Fehler-Pause: last_error gesetzt und letzter Versuch juenger als die Pause -> nichts tun.
+  const versuch = await env.DB.prepare("SELECT last_ok AS t FROM near_dune_meta WHERE id = 2").first().catch(() => null);
+  if (!meta.pending_exec && meta.last_error && versuch && jetzt - Number(versuch.t || 0) < NEAR_DUNE_FEHLER_PAUSE_MS) return;
+  const merkeVersuch = () => env.DB.prepare(
+    `INSERT INTO near_dune_meta (id, last_ok) VALUES (2, ?) ON CONFLICT(id) DO UPDATE SET last_ok = excluded.last_ok`
+  ).bind(jetzt).run().catch(() => {});
   let execId = meta.pending_exec || null;
   // Haengt eine Ausfuehrung laenger als 2 Stunden, neu starten.
   if (execId && jetzt - (Number(meta.pending_since) || 0) > 2 * 60 * 60 * 1000) execId = null;
   if (!execId) {
     if (meta.last_ok && jetzt - Number(meta.last_ok) < NEAR_DUNE_INTERVALL_MS) return;
     const vorhanden = await env.DB.prepare('SELECT COUNT(*) AS c FROM near_dune_daily').first();
-    const tage = (Number(vorhanden && vorhanden.c) || 0) > 30 ? NEAR_DUNE_TAGE_FOLGE : NEAR_DUNE_TAGE_ERSTLAUF;
+    const tage = (Number(vorhanden && vorhanden.c) || 0) >= 28 ? NEAR_DUNE_TAGE_FOLGE : NEAR_DUNE_TAGE_ERSTLAUF;
+    await merkeVersuch();
     try {
       const r = await duneJson(env, '/sql/execute', { method: 'POST', body: { sql: nearDuneSql(tage) } }); // ohne "performance": Dune lehnte 'medium' ab ("Invalid performance tier")
       execId = r && r.execution_id;
@@ -2958,7 +2968,7 @@ async function syncNearDune(env) {
   const zahl = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
   const stmts = rows.filter((r) => /^\d{4}-\d{2}-\d{2}/.test(String(r.day || ''))).map((r) => env.DB.prepare(
     `INSERT OR REPLACE INTO near_dune_daily (day, volume_usd, protocol_fees_usd, affiliate_fees_usd, updated_at) VALUES (?, ?, ?, ?, ?)`
-  ).bind(String(r.day).slice(0, 10), zahl(r.volume_usd), zahl(r.protocol_fees_usd), zahl(r.affiliate_fees_usd), jetzt));
+  ).bind(String(r.day).slice(0, 10), zahl(r.volume_usd), zahl(r.protocol_fees_usd), null, jetzt));
   for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
   await merke({ last_ok: jetzt, pending_exec: null, pending_since: null, last_error: null });
   nearDune.at = 0; // beim naechsten Abruf neu aus D1 laden
