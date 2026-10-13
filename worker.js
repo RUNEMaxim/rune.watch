@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-13-1330';
+const WORKER_VERSION = '2026-10-13-1400';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2924,7 +2924,7 @@ async function syncNearDune(env) {
     const vorhanden = await env.DB.prepare('SELECT COUNT(*) AS c FROM near_dune_daily').first();
     const tage = (Number(vorhanden && vorhanden.c) || 0) > 30 ? NEAR_DUNE_TAGE_FOLGE : NEAR_DUNE_TAGE_ERSTLAUF;
     try {
-      const r = await duneJson(env, '/sql/execute', { method: 'POST', body: { sql: nearDuneSql(tage), performance: 'medium' } });
+      const r = await duneJson(env, '/sql/execute', { method: 'POST', body: { sql: nearDuneSql(tage) } }); // ohne "performance": Dune lehnte 'medium' ab ("Invalid performance tier")
       execId = r && r.execution_id;
       if (!execId) throw new Error('DUNE_KEINE_EXECUTION_ID');
       await merke({ pending_exec: execId, pending_since: jetzt });
