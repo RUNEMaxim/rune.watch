@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-13-1300';
+const WORKER_VERSION = '2026-10-13-1330';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -3019,6 +3019,8 @@ function haltAlteTageFest(neu, alt) {
       // Dasselbe fuer Maya: Ein Wert aus Mayas Midgard ersetzt einen frueher von DefiLlama
       // festgehaltenen Tag, nie umgekehrt.
       if (e.quelle === 'maya-midgard' && a.quelle !== 'maya-midgard' && e.volume != null) return e;
+      // Und fuer NEAR: Dune (NEARs eigener Datensatz) ersetzt frueher festgehaltene DefiLlama-Tage.
+      if (e.quelle === 'dune-near' && a.quelle !== 'dune-near' && e.volume != null) return e;
       return a;                                       // sonst: beim ersten Wert bleiben
     });
   };
@@ -3077,7 +3079,14 @@ async function handleDexVolume(request, env, ctx) {
         console.warn('[rune-rewards-backend] dex_volume_cache-Schreiben fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
       });
       if (ctx && ctx.waitUntil) ctx.waitUntil(schreiben); else await schreiben;
-      return json({ ...daten, stale: false }, env);
+      // Kurzer Dune-Zustand fuer die Karte (warum NEAR noch "DefiLlama" zeigt).
+      let nearDuneInfo = { keySet: !!env.DUNE_API_KEY, days: nearDune.tage.size };
+      try {
+        await sichereNearDuneTabelle(env);
+        const meta = await env.DB.prepare('SELECT last_ok, pending_exec, last_error FROM near_dune_meta WHERE id = 1').first();
+        if (meta) nearDuneInfo = { ...nearDuneInfo, lastOk: meta.last_ok || null, pending: !!meta.pending_exec, lastError: meta.last_error ? String(meta.last_error).slice(0, 200) : null };
+      } catch (e) {}
+      return json({ ...daten, stale: false, nearDune: nearDuneInfo, workerVersion: WORKER_VERSION }, env);
     }
     throw new Error('ALL_PROTOCOLS_FAILED');
   } catch (e) {
