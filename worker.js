@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-06-1400';
+const WORKER_VERSION = '2026-10-13-1200';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2561,6 +2561,21 @@ async function baueDexVergleich() {
     else fehler['thorchain'] = 'VANAHEIMEX_UND_MIDGARD_OHNE_DATEN';
   }
 
+  // NEAR INTENTS: Volumen aus Dune (NEARs eigener Datensatz) zuerst -- es ist dieselbe Quelle
+  // wie bei DefiLlama, nur direkt. DefiLlama fuellt Tage, die in Dune (noch) fehlen.
+  const nearDuneTageVol = [];
+  if (nearDune.tage.size) {
+    const llamaNach = new Map((reihen['near-intents'] || []).map((e) => [e.day, e]));
+    const alleTage = [...new Set([...nearDune.tage.keys(), ...llamaNach.keys()])].filter((d) => d <= heuteTag).sort();
+    const reihe = alleTage.map((day) => {
+      const d = nearDune.tage.get(day);
+      if (d && Number.isFinite(d.vol)) { nearDuneTageVol.push(day); return { day, volume: d.vol, quelle: 'dune-near' }; }
+      const l = llamaNach.get(day);
+      return l ? { ...l, quelle: 'defillama' } : { day, volume: null };
+    }).slice(-40);
+    if (reihe.length) { reihen['near-intents'] = reihe; delete fehler['near-intents']; }
+  }
+
   // MAYA: Mayas Midgard zuerst, DefiLlama nur fuer Tage, die dort fehlen (Ausfall der Instanz).
   // DefiLlama liest selbst aus demselben Midgard -- die Zahlen sind gleich definiert, nur spaeter.
   const mayaMidgardTage = [], mayaLlamaTage = [];
@@ -2635,7 +2650,7 @@ async function baueDexVergleich() {
 
   const ALLE = [{ key: 'thorchain', name: 'THORChain', source: thorMidgardTage.length && !thorVanaTage.length ? 'midgard' : 'vanaheimex' },
     ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name,
-      source: p.key === 'maya' && mayaMidgardTage.length ? 'maya-midgard' : 'defillama' }))];
+      source: p.key === 'maya' && mayaMidgardTage.length ? 'maya-midgard' : (p.key === 'near-intents' && nearDuneTageVol.length ? 'dune-near' : 'defillama') }))];
   const protokolle = ALLE.map((p) => {
     const reihe = reihen[p.key] || [];
     if (!reihe.length || !stichtag) {
@@ -2736,15 +2751,27 @@ async function baueDexVergleich() {
       const supply = alsReihe(llamaSupply[p.key]);
       if (supply) { feeReihen[p.key] = supply; feeBasisJe[p.key] = 'defillama-supplySide'; }
     }
+    // NEAR mit Dune-Daten: die PROTOKOLLGEBUEHR allein (ohne Affiliate-Gebuehren der Frontends)
+    // ist vergleichbar mit THORChains liquidityFees -> regulaere Reihe statt "nicht vergleichbar".
+    if (p.key === 'near-intents' && nearDune.tage.size) {
+      const reihe = [...nearDune.tage.entries()].filter(([day, d]) => day <= heuteTag && d && Number.isFinite(d.prot))
+        .map(([day, d]) => ({ day, volume: d.prot, quelle: 'dune-near-protocol-fees' })).sort((a, b) => a.day < b.day ? -1 : 1).slice(-40);
+      if (reihe.length >= 3) {
+        feeReihen[p.key] = reihe; feeBasisJe[p.key] = 'dune-near-protocol-fees';
+        const aff = [...nearDune.tage.entries()].filter(([day, d]) => day <= heuteTag && d && Number.isFinite(d.aff))
+          .map(([day, d]) => ({ day, volume: d.aff })).sort((a, b) => a.day < b.day ? -1 : 1).slice(-40);
+        if (aff.length) rohReihen['near-intents-affiliate'] = aff;
+      }
+    }
     // 'nicht-vergleichbar': bewusst keine Reihe fuer den Vergleich (siehe DEX_PROTOCOLS).
     // Auf Wunsch wird DefiLlamas Supply-Side-Wert trotzdem als Rohzahl mitgeliefert -- er
     // erscheint in der Karte, zaehlt aber weder in die Anteile noch in den Chart.
-    if (p.feeFormel === 'nicht-vergleichbar') {
+    if (p.feeFormel === 'nicht-vergleichbar' && !feeReihen[p.key]) {
       const supply = alsReihe(llamaSupply[p.key]);
       if (supply) rohReihen[p.key] = supply;
     }
   }
-  const nichtVergleichbar = new Set(DEX_PROTOCOLS.filter((p) => p.feeFormel === 'nicht-vergleichbar').map((p) => p.key));
+  const nichtVergleichbar = new Set(DEX_PROTOCOLS.filter((p) => p.feeFormel === 'nicht-vergleichbar' && !feeReihen[p.key]).map((p) => p.key));
   for (const p of protokolle) {
     
     const j = llamaFees[p.key];
@@ -2777,6 +2804,12 @@ async function baueDexVergleich() {
       const a1 = summiereTage(alles, 1, stichtag), a7 = summiereTage(alles, 7, stichtag), a30 = summiereTage(alles, 30, stichtag);
       p.feesAll = { d1: a1.summe, d7: a7.summe, d30: a30.summe };
     } else p.feesAll = null;
+    // NEAR: Affiliate-Gebuehren der Frontends getrennt mitliefern (Anzeige als Zusatzzeile).
+    const affR = p.key === 'near-intents' ? rohReihen['near-intents-affiliate'] : null;
+    if (affR && affR.length && stichtag) {
+      const x1 = summiereTage(affR, 1, stichtag), x7 = summiereTage(affR, 7, stichtag), x30 = summiereTage(affR, 30, stichtag);
+      p.feesAffiliate = { d1: x1.tage ? x1.summe : null, d7: x7.tage ? x7.summe : null, d30: x30.tage ? x30.summe : null, basis: 'dune-near-affiliate-fees' };
+    } else if (p.key === 'near-intents') p.feesAffiliate = null;
     if (!p.fees) continue;
   }
 
@@ -2786,7 +2819,7 @@ async function baueDexVergleich() {
     // und welche Quellen ihn noch nicht haben.
     naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
     wartetAuf: nachzuegler,
-    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': 'defillama',
+    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': nearDune.tage.size ? 'dune-near' : 'defillama',
                maya: 'maya-midgard', mayaFallback: 'defillama' },
     // Maya-Tage, fuer die Mayas Midgard nichts hatte und DefiLlama einspringen musste.
     mayaLlamaTage,
@@ -2807,6 +2840,142 @@ async function baueDexVergleich() {
     protocols: protokolle,
     fetchedAt: Date.now(),
   };
+}
+
+
+// =====================================================================================
+// NEAR INTENTS AUS DUNE (NEARs eigene Datensaetze) -- genauere Gebuehren
+//
+// DefiLlama meldet fuer NEAR Intents nur Brutto-Gebuehren (Protokollgebuehr + Affiliate-
+// Gebuehren der Frontends unter EINEM Label). Auf Dune liegen beide getrennt:
+//   dune.near.dataset_near_intents_protocol_fees  (amount_fee, USD)  -> Protokollgebuehr
+//   dune.near.dataset_near_intents_fees           (fee, USD)         -> Affiliate-Gebuehren
+//   dune.near.dataset_near_intents_metrics        (volume_amount_usd) -> Volumen (dieselbe
+//                                                    Quelle, die DefiLlamas Volumen nutzt)
+// Die Protokollgebuehr ist das sauberste Gegenstueck zu THORChains liquidityFees (beide ohne
+// Frontend-Gebuehren). Der Spread der Solver steckt -- wie ueberall -- nicht darin.
+//
+// Abruf ueber die Dune-API ("Execute SQL", keine gespeicherte Abfrage noetig), Schluessel im
+// Secret DUNE_API_KEY. Hoechstens ein Lauf pro ~20 Stunden (die Datensaetze kommen ohnehin
+// taeglich); ist eine Ausfuehrung nach ~60 s nicht fertig, wird sie im naechsten Cron-Lauf
+// abgeholt statt neu gestartet. Ergebnisse dauerhaft in D1 (near_dune_daily).
+// =====================================================================================
+const DUNE_API = 'https://api.dune.com/api/v1';
+const NEAR_DUNE_INTERVALL_MS = 20 * 60 * 60 * 1000;
+const NEAR_DUNE_TAGE_ERSTLAUF = 400, NEAR_DUNE_TAGE_FOLGE = 45;
+let nearDuneTabelleOk = false;
+let nearDune = { tage: new Map(), at: 0 };
+
+async function sichereNearDuneTabelle(env) {
+  if (nearDuneTabelleOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS near_dune_daily (
+      day TEXT PRIMARY KEY, volume_usd REAL, protocol_fees_usd REAL, affiliate_fees_usd REAL, updated_at INTEGER)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS near_dune_meta (
+      id INTEGER PRIMARY KEY, last_ok INTEGER, pending_exec TEXT, pending_since INTEGER, last_error TEXT)`),
+  ]);
+  nearDuneTabelleOk = true;
+}
+
+const nearDuneSql = (tage) => `
+WITH p AS (
+  SELECT CAST(substr(CAST(date_at AS varchar), 1, 10) AS date) AS d, SUM(CAST(amount_fee AS double)) AS v
+  FROM dune.near.dataset_near_intents_protocol_fees GROUP BY 1
+), a AS (
+  SELECT CAST(substr(CAST(date_at AS varchar), 1, 10) AS date) AS d, SUM(CAST(fee AS double)) AS v
+  FROM dune.near.dataset_near_intents_fees GROUP BY 1
+), m AS (
+  SELECT CAST(substr(CAST(date_at AS varchar), 1, 10) AS date) AS d, SUM(CAST(volume_amount_usd AS double)) AS v
+  FROM dune.near.dataset_near_intents_metrics GROUP BY 1
+)
+SELECT CAST(m.d AS varchar) AS day, m.v AS volume_usd, p.v AS protocol_fees_usd, a.v AS affiliate_fees_usd
+FROM m LEFT JOIN p ON p.d = m.d LEFT JOIN a ON a.d = m.d
+WHERE m.d >= current_date - INTERVAL '${Math.max(2, Math.floor(tage))}' DAY
+ORDER BY 1`;
+
+async function duneJson(env, pfad, opts = {}) {
+  const res = await fetchWithTimeout(`${DUNE_API}${pfad}`, {
+    method: opts.method || 'GET',
+    headers: { 'X-DUNE-API-KEY': env.DUNE_API_KEY, 'Content-Type': 'application/json' },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    timeoutMs: opts.timeoutMs || 15000,
+  });
+  let j = null; try { j = await res.json(); } catch (e) { j = null; }
+  if (!res.ok) throw new Error(`DUNE_HTTP_${res.status}${j && j.error ? ': ' + String(j.error).slice(0, 160) : ''}`);
+  return j;
+}
+
+async function syncNearDune(env) {
+  if (!env || !env.DUNE_API_KEY || !env.DB) return;
+  await sichereNearDuneTabelle(env);
+  const meta = (await env.DB.prepare('SELECT * FROM near_dune_meta WHERE id = 1').first()) || {};
+  const jetzt = Date.now();
+  const merke = (felder) => env.DB.prepare(
+    `INSERT INTO near_dune_meta (id, last_ok, pending_exec, pending_since, last_error) VALUES (1, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET last_ok = excluded.last_ok, pending_exec = excluded.pending_exec,
+       pending_since = excluded.pending_since, last_error = excluded.last_error`
+  ).bind(felder.last_ok ?? meta.last_ok ?? null, felder.pending_exec ?? null, felder.pending_since ?? null, felder.last_error ?? null).run();
+
+  let execId = meta.pending_exec || null;
+  // Haengt eine Ausfuehrung laenger als 2 Stunden, neu starten.
+  if (execId && jetzt - (Number(meta.pending_since) || 0) > 2 * 60 * 60 * 1000) execId = null;
+  if (!execId) {
+    if (meta.last_ok && jetzt - Number(meta.last_ok) < NEAR_DUNE_INTERVALL_MS) return;
+    const vorhanden = await env.DB.prepare('SELECT COUNT(*) AS c FROM near_dune_daily').first();
+    const tage = (Number(vorhanden && vorhanden.c) || 0) > 30 ? NEAR_DUNE_TAGE_FOLGE : NEAR_DUNE_TAGE_ERSTLAUF;
+    try {
+      const r = await duneJson(env, '/sql/execute', { method: 'POST', body: { sql: nearDuneSql(tage), performance: 'medium' } });
+      execId = r && r.execution_id;
+      if (!execId) throw new Error('DUNE_KEINE_EXECUTION_ID');
+      await merke({ pending_exec: execId, pending_since: jetzt });
+    } catch (e) {
+      await merke({ last_error: e?.message || String(e) });
+      console.warn('[rune-rewards-backend] Dune NEAR: Start fehlgeschlagen:', e?.message || String(e));
+      return;
+    }
+  }
+  // Bis ~60 s auf das Ergebnis warten (Warten auf fetch zaehlt nicht als CPU-Zeit).
+  let zustand = null;
+  for (let i = 0; i < 12; i++) {
+    try { zustand = await duneJson(env, `/execution/${execId}/status`); } catch (e) { zustand = null; }
+    const st = zustand && zustand.state;
+    if (st === 'QUERY_STATE_COMPLETED') break;
+    if (st === 'QUERY_STATE_FAILED' || st === 'QUERY_STATE_CANCELLED' || st === 'QUERY_STATE_EXPIRED') {
+      await merke({ last_error: 'DUNE_' + st });
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  if (!zustand || zustand.state !== 'QUERY_STATE_COMPLETED') return; // naechster Lauf holt ab
+  let rows = [];
+  try {
+    const erg = await duneJson(env, `/execution/${execId}/results?limit=1000`, { timeoutMs: 20000 });
+    rows = (erg && erg.result && Array.isArray(erg.result.rows)) ? erg.result.rows : [];
+  } catch (e) {
+    await merke({ pending_exec: execId, pending_since: Number(meta.pending_since) || jetzt, last_error: e?.message || String(e) });
+    return;
+  }
+  const zahl = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const stmts = rows.filter((r) => /^\d{4}-\d{2}-\d{2}/.test(String(r.day || ''))).map((r) => env.DB.prepare(
+    `INSERT OR REPLACE INTO near_dune_daily (day, volume_usd, protocol_fees_usd, affiliate_fees_usd, updated_at) VALUES (?, ?, ?, ?, ?)`
+  ).bind(String(r.day).slice(0, 10), zahl(r.volume_usd), zahl(r.protocol_fees_usd), zahl(r.affiliate_fees_usd), jetzt));
+  for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+  await merke({ last_ok: jetzt, pending_exec: null, pending_since: null, last_error: null });
+  nearDune.at = 0; // beim naechsten Abruf neu aus D1 laden
+  dexVolumeCache = null;
+}
+
+// Laedt die gespeicherten Tage in den Speicher (fuer baueDexVergleich, das keinen env hat).
+async function ladeNearDune(env) {
+  if (!env || !env.DB) return;
+  if (nearDune.at && Date.now() - nearDune.at < 10 * 60 * 1000) return;
+  try {
+    await sichereNearDuneTabelle(env);
+    const r = await env.DB.prepare('SELECT * FROM near_dune_daily ORDER BY day DESC LIMIT 60').all();
+    const m = new Map();
+    for (const z of (r.results || [])) m.set(String(z.day), { vol: z.volume_usd, prot: z.protocol_fees_usd, aff: z.affiliate_fees_usd });
+    nearDune = { tage: m, at: Date.now() };
+  } catch (e) { /* ohne Dune-Daten geht es mit DefiLlama weiter */ }
 }
 
 let dexVolumeCache = null; 
@@ -2889,6 +3058,7 @@ function haltAlteTageFest(neu, alt) {
 
 async function handleDexVolume(request, env, ctx) {
   try {
+    await ladeNearDune(env);
     const daten = await baueDexVergleichCached();
     // Zuletzt ausgelieferten Stand lesen, um vergangene Tage daraus zu uebernehmen.
     try {
@@ -4402,6 +4572,7 @@ async function runRefreshCycle(env) {
   await collectSwapPairStats(env);
   await syncNodeHistory(env);
   try { await syncNodeEpochs(env); } catch (e) { console.warn('[rune-rewards-backend] Node-Epochen:', e?.message || String(e)); }
+  try { await syncNearDune(env); } catch (e) { console.warn('[rune-rewards-backend] Dune NEAR:', e?.message || String(e)); }
   await waermeTimeline(env);
 
   const now = Date.now();
