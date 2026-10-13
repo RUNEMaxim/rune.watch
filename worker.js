@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-13-1200';
+const WORKER_VERSION = '2026-10-13-1300';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -3059,6 +3059,9 @@ function haltAlteTageFest(neu, alt) {
 async function handleDexVolume(request, env, ctx) {
   try {
     await ladeNearDune(env);
+    // Noch keine Dune-Daten, aber ein Schluessel da: den Abruf im Hintergrund anstossen, statt
+    // auf den naechsten Cron-Lauf zu warten (syncNearDune drosselt sich selbst).
+    if (env.DUNE_API_KEY && !nearDune.tage.size && ctx && ctx.waitUntil) ctx.waitUntil(syncNearDune(env).catch(() => {}));
     const daten = await baueDexVergleichCached();
     // Zuletzt ausgelieferten Stand lesen, um vergangene Tage daraus zu uebernehmen.
     try {
@@ -4094,6 +4097,18 @@ export default {
       if (url.pathname === '/recent-swaps') {
         return await handleRecentSwaps(request, env, ctx);
       }
+      if (url.pathname === '/near-dune-status') {
+        // Diagnose fuer den Dune-Abruf: Schluessel gesetzt? Letzter Erfolg, laufende Ausfuehrung,
+        // letzter Fehler, Zahl der gespeicherten Tage. Kein Schluessel/keine Daten werden gezeigt.
+        try {
+          await sichereNearDuneTabelle(env);
+          const meta = await env.DB.prepare('SELECT * FROM near_dune_meta WHERE id = 1').first();
+          const n = await env.DB.prepare('SELECT COUNT(*) AS c, MIN(day) AS von, MAX(day) AS bis FROM near_dune_daily').first();
+          return json({ keySet: !!env.DUNE_API_KEY, lastOk: meta && meta.last_ok ? new Date(Number(meta.last_ok)).toISOString() : null,
+            pendingExec: !!(meta && meta.pending_exec), lastError: (meta && meta.last_error) || null,
+            days: Number(n && n.c) || 0, from: (n && n.von) || null, to: (n && n.bis) || null, workerVersion: WORKER_VERSION }, env);
+        } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/dex-volume') {
         return await handleDexVolume(request, env, ctx);
       }
@@ -4568,12 +4583,16 @@ async function handleNodeScores(request, env) {
 }
 
 async function runRefreshCycle(env) {
-  await refreshChurnsCache(env);
-  await collectSwapPairStats(env);
-  await syncNodeHistory(env);
-  try { await syncNodeEpochs(env); } catch (e) { console.warn('[rune-rewards-backend] Node-Epochen:', e?.message || String(e)); }
-  try { await syncNearDune(env); } catch (e) { console.warn('[rune-rewards-backend] Dune NEAR:', e?.message || String(e)); }
-  await waermeTimeline(env);
+  // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
+  // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
+  // nicht -- auch der Dune-Abruf. Dune steht jetzt vorn; gedrosselt kostet er nur eine D1-Abfrage.
+  const schritt = async (name, fn) => { try { await fn(); } catch (e) { console.warn(`[rune-rewards-backend] ${name}:`, e?.message || String(e)); } };
+  await schritt('Dune NEAR', () => syncNearDune(env));
+  await schritt('Churns', () => refreshChurnsCache(env));
+  await schritt('Swap-Paare', () => collectSwapPairStats(env));
+  await schritt('Node-Historie', () => syncNodeHistory(env));
+  await schritt('Node-Epochen', () => syncNodeEpochs(env));
+  await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
 
