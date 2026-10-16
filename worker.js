@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-13-1430';
+const WORKER_VERSION = '2026-10-16-1930';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4115,6 +4115,45 @@ export default {
       }
       if (url.pathname === '/recent-swaps') {
         return await handleRecentSwaps(request, env, ctx);
+      }
+      if (url.pathname === '/ops-quelle') {
+        // QUELLEN VON devops.thorchain.org FINDEN (gefragt: "die nehmen sich die Infos irgendwo
+        // her -- finde es"): Laedt die Seite, alle eingebundenen Skripte und sucht darin nach
+        // Datenadressen (fetch-Aufrufe, .json-Dateien, /api/-Pfade, GitLab-, THORNode- und
+        // RPC-Adressen). Gibt eine Liste zurueck; probiert gefundene Adressen auf derselben Seite
+        // kurz an (Status + Anfang der Antwort), damit man sieht, was davon Daten liefert.
+        try {
+          const basis = 'https://devops.thorchain.org';
+          const r = await fetchWithTimeout(basis + '/', { timeoutMs: 12000, headers: { 'User-Agent': 'rune.watch-ops-finder' } });
+          const html = await r.text();
+          const skripte = [...html.matchAll(/<script[^>]*src=["']([^"']+)["']/gi)].map(m => new URL(m[1], basis).toString());
+          const texte = [{ quelle: '/', inhalt: html }];
+          for (const sUrl of skripte.slice(0, 12)) {
+            try { const rs = await fetchWithTimeout(sUrl, { timeoutMs: 12000 }); texte.push({ quelle: sUrl, inhalt: await rs.text() }); } catch (e) {}
+          }
+          const muster = [
+            /fetch\(\s*[`"']([^`"']+)[`"']/g,
+            /["'`](\/[A-Za-z0-9_\-\/.]*\.json[^"'`]*)["'`]/g,
+            /["'`](\/api\/[^"'`\s]*)["'`]/g,
+            /["'`](https?:\/\/[^"'`\s]*(?:gitlab|thornode|ninerealms|liquify|rpc|midgard|\.json|\/api\/)[^"'`\s]*)["'`]/g,
+          ];
+          const funde = new Map();
+          for (const tx of texte) for (const mu of muster) for (const m of tx.inhalt.matchAll(mu)) {
+            const roh = m[1]; if (!roh || roh.length > 300) continue;
+            let abs; try { abs = new URL(roh, basis).toString(); } catch (e) { continue; }
+            if (!funde.has(abs)) funde.set(abs, { url: abs, gefundenIn: tx.quelle });
+          }
+          const liste = [...funde.values()];
+          // gleiche Seite kurz anprobieren
+          for (const f of liste.filter(x => x.url.startsWith(basis)).slice(0, 15)) {
+            try {
+              const rp = await fetchWithTimeout(f.url, { timeoutMs: 8000 });
+              const tx = await rp.text();
+              f.status = rp.status; f.typ = rp.headers.get('content-type'); f.anfang = tx.slice(0, 300);
+            } catch (e) { f.fehler = e?.message || String(e); }
+          }
+          return json({ seite: basis, htmlLaenge: html.length, skripte, funde: liste }, env);
+        } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/near-dune-status') {
         // Diagnose fuer den Dune-Abruf: Schluessel gesetzt? Letzter Erfolg, laufende Ausfuehrung,
