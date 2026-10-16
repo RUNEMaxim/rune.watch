@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-2045';
+const WORKER_VERSION = '2026-10-16-2100';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2272,15 +2272,36 @@ function parseOpsHtml(html) {
   const standM = html.match(/task progress as of\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
   return { aufgaben: eindeutig, upgrade: { version: verM ? verM[1] : null, stufen: stufen.filter(x => x.name) }, aufgabenStand: standM ? standM[1] : null };
 }
+// BLOCKZEIT (gefragt: "was ist mit der Blockzeit?"): Durchschnitt ueber die letzten 50 Bloecke aus
+// dem Tendermint-RPC (Zeitstempel des neuesten und des 50 Bloecke aelteren Blocks), wie auf der
+// Ops-Seite ("avg block, last 50, nominal 6s").
+const OPS_RPC_BASES = ['https://rpc.ninerealms.com', 'https://rpc.thorchain.liquify.com', 'https://rpc.thorswap.net'];
+async function opsBlockzeit() {
+  for (const b of OPS_RPC_BASES) {
+    try {
+      const st = await (await fetchWithTimeout(b + '/status', { timeoutMs: 6000 })).json();
+      const si = st && (st.result || st).sync_info;
+      const h = Number(si && si.latest_block_height), t1 = Date.parse(si && si.latest_block_time);
+      if (!(h > 60) || !Number.isFinite(t1)) continue;
+      const bl = await (await fetchWithTimeout(b + '/block?height=' + (h - 50), { timeoutMs: 6000 })).json();
+      const t0 = Date.parse(((bl && (bl.result || bl).block) || {}).header?.time);
+      if (!Number.isFinite(t0)) continue;
+      return { hoehe: h, blockzeit: Math.round((t1 - t0) / 50) / 1000 };
+    } catch (e) { /* naechste Quelle */ }
+  }
+  return null;
+}
 async function handleOps(request, env) {
   if (opsCache && Date.now() - opsCache.at < OPS_CACHE_MS) return json(opsCache.daten, env);
   const basis = 'https://devops.thorchain.org';
-  const [seite, feed, mimir, queue] = await Promise.allSettled([
+  const [seite, feed, mimir, queue, block] = await Promise.allSettled([
     fetchWithTimeout(basis + '/', { timeoutMs: 12000 }).then(r => r.text()),
     fetchWithTimeout(basis + '/api/feed.json', { timeoutMs: 8000 }).then(r => r.json()),
     fetchFromBases(getThornodeBases(), '/thorchain/mimir', { timeoutMs: 8000 }),
     fetchFromBases(getThornodeBases(), '/thorchain/queue', { timeoutMs: 8000 }),
+    opsBlockzeit(),
   ]);
+  const bz = block.status === 'fulfilled' ? block.value : null;
   const teil = seite.status === 'fulfilled' ? parseOpsHtml(seite.value) : { aufgaben: [], upgrade: null, aufgabenStand: null };
   const m = mimir.status === 'fulfilled' ? mimir.value : null;
   const halts = m ? Object.entries(m).filter(([k, v]) => /^(HALT|PAUSE)/.test(k) && Number(v) > 0 && !/^PAUSELP/.test(k)).map(([k]) => k).sort() : [];
@@ -2291,7 +2312,7 @@ async function handleOps(request, env) {
     stand: new Date().toISOString(),
     feed: feed.status === 'fulfilled' && feed.value && Array.isArray(feed.value.items) ? feed.value.items.slice(0, 20) : [],
     ...teil,
-    chain: { halts, lpPausiert, swapQueue: q ? Number(q.swap) || 0 : null, outboundQueue: q ? Number(q.outbound) || 0 : null, internalQueue: q ? Number(q.internal) || 0 : null },
+    chain: { hoehe: bz ? bz.hoehe : null, blockzeit: bz ? bz.blockzeit : null, halts, lpPausiert, swapQueue: q ? Number(q.swap) || 0 : null, outboundQueue: q ? Number(q.outbound) || 0 : null, internalQueue: q ? Number(q.internal) || 0 : null },
     fehler: [seite, feed, mimir, queue].map((x, i) => x.status === 'rejected' ? ['seite', 'feed', 'mimir', 'queue'][i] + ': ' + (x.reason?.message || x.reason) : null).filter(Boolean),
   };
   opsCache = { at: Date.now(), daten };
