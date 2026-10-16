@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-2130';
+const WORKER_VERSION = '2026-10-16-2145';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2318,13 +2318,13 @@ async function opsBlockzeit() {
 async function handleOps(request, env) {
   if (opsCache && Date.now() - opsCache.at < OPS_CACHE_MS) return json(opsCache.daten, env);
   const basis = 'https://devops.thorchain.org';
-  const [seite, feed, mimir, queue, block] = await Promise.allSettled([
+  // Chain-Daten (Blockzeit, Queues, Halts, LP-Pausen) werden in der App nicht mehr gezeigt (auf
+  // Wunsch) -- deshalb hier auch nicht mehr abgefragt.
+  const [seite, feed] = await Promise.allSettled([
     fetchWithTimeout(basis + '/', { timeoutMs: 12000 }).then(r => r.text()),
     fetchWithTimeout(basis + '/api/feed.json', { timeoutMs: 8000 }).then(r => r.json()),
-    fetchFromBases(getThornodeBases(), '/thorchain/mimir', { timeoutMs: 8000 }),
-    fetchFromBases(getThornodeBases(), '/thorchain/queue', { timeoutMs: 8000 }),
-    opsBlockzeit(),
   ]);
+  const mimir = { status: 'rejected' }, queue = { status: 'rejected' }, block = { status: 'rejected' };
   const bz = block.status === 'fulfilled' ? block.value : null;
   const teil = seite.status === 'fulfilled' ? parseOpsHtml(seite.value) : { aufgaben: [], upgrade: null, aufgabenStand: null };
   const m = mimir.status === 'fulfilled' ? mimir.value : null;
@@ -2337,7 +2337,7 @@ async function handleOps(request, env) {
     feed: feed.status === 'fulfilled' && feed.value && Array.isArray(feed.value.items) ? feed.value.items.slice(0, 20) : [],
     ...teil,
     chain: { hoehe: bz ? bz.hoehe : null, blockzeit: bz ? bz.blockzeit : null, halts, lpPausiert, swapQueue: q ? Number(q.swap) || 0 : null, outboundQueue: q ? Number(q.outbound) || 0 : null, internalQueue: q ? Number(q.internal) || 0 : null },
-    fehler: [seite, feed, mimir, queue].map((x, i) => x.status === 'rejected' ? ['seite', 'feed', 'mimir', 'queue'][i] + ': ' + (x.reason?.message || x.reason) : null).filter(Boolean),
+    fehler: [seite, feed].map((x, i) => x.status === 'rejected' ? ['seite', 'feed'][i] + ': ' + (x.reason?.message || x.reason) : null).filter(Boolean),
   };
   opsCache = { at: Date.now(), daten };
   return json(daten, env);
