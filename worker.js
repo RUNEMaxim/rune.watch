@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-1945';
+const WORKER_VERSION = '2026-10-16-2000';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4165,7 +4165,18 @@ export default {
             try { const rp = await fetchWithTimeout(basis + pfad, { timeoutMs: 6000 }); const tx = await rp.text(); proben[pfad] = { status: rp.status, typ: rp.headers.get('content-type'), anfang: tx.slice(0, 220) }; }
             catch (e) { proben[pfad] = { fehler: e?.message || String(e) }; }
           }
-          return json({ seite: basis, htmlLaenge: html.length, skripte, inline, apiTeile, stellen, proben, funde: liste.filter(f => !/merge_requests\/\d+$/.test(f.url)), mrAnzahl: liste.filter(f => /merge_requests\/\d+$/.test(f.url)).length }, env);
+          // Dritte Stufe: Aufgaben und Upgrade stehen als fertiges HTML in der Seite (die Skripte
+          // sind nur Bedienung). Fuer den Nachbau eines Lesers: je ein Ausschnitt der Bausteine.
+          const ausschnitt = (marke, len) => { const i = html.indexOf(marke); return i < 0 ? null : html.slice(i, i + len); };
+          const html_bausteine = {
+            upgrade: ausschnitt('upg-seg', 2500),
+            allview: ausschnitt('id="allview"', 300),
+            task: ausschnitt('class="task', 3500),
+            focus: ausschnitt('id="stage"', 2500),
+            chain: ausschnitt('CHAIN', 1500),
+          };
+          if (url.searchParams.get('teil')) return json({ teil: html_bausteine[url.searchParams.get('teil')] || null }, env);
+          return json({ seite: basis, htmlLaenge: html.length, html_bausteine, skripte, inline, apiTeile, stellen, proben, funde: liste.filter(f => !/merge_requests\/\d+$/.test(f.url)), mrAnzahl: liste.filter(f => /merge_requests\/\d+$/.test(f.url)).length }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/near-dune-status') {
