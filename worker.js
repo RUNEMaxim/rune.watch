@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-2030';
+const WORKER_VERSION = '2026-10-16-2045';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4250,6 +4250,15 @@ export default {
             chain: ausschnitt('CHAIN', 1500),
           };
           if (url.searchParams.get('teil')) return json({ teil: html_bausteine[url.searchParams.get('teil')] || null }, env);
+          // Freie Suche: ?suche=TEXT&n=1&len=3000 -> Ausschnitt ab dem n-ten Vorkommen (0 = erstes)
+          // und die Zahl aller Vorkommen. Als reiner Text, damit er gut lesbar ist.
+          if (url.searchParams.get('suche')) {
+            const q = url.searchParams.get('suche'), n = Number(url.searchParams.get('n') || 0), len = Math.min(8000, Number(url.searchParams.get('len') || 3000));
+            const pos = []; let i = -1; while ((i = html.indexOf(q, i + 1)) >= 0 && pos.length < 500) pos.push(i);
+            const ab = pos[Math.min(n, pos.length - 1)];
+            const text = ab == null ? '(nicht gefunden)' : html.slice(ab, ab + len);
+            return new Response(`Vorkommen: ${pos.length}\n\n` + text, { headers: { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders(env) } });
+          }
           return json({ seite: basis, htmlLaenge: html.length, html_bausteine, skripte, inline, apiTeile, stellen, proben, funde: liste.filter(f => !/merge_requests\/\d+$/.test(f.url)), mrAnzahl: liste.filter(f => /merge_requests\/\d+$/.test(f.url)).length }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
