@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-2100';
+const WORKER_VERSION = '2026-10-16-2130';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2252,6 +2252,13 @@ function parseOpsHtml(html) {
       fortschritt: prog ? opsText(prog[1]) : null, updates: upd ? Number(upd[1]) : 0, schritte,
     });
   }
+  // UPDATE-VERLAUF je Aufgabe: <template id="cl-KEY"><ol class="cl-list"><li><time datetime=..>..</time><span>06:20 UTC · Text</span></li>
+  const verlaeufe = {};
+  for (const tm of html.matchAll(/<template id="cl-([^"]+)">([\s\S]*?)<\/template>/g)) {
+    verlaeufe[tm[1]] = [...tm[2].matchAll(/<li>\s*<time[^>]*datetime="([^"]*)"[^>]*>[\s\S]*?<\/time>\s*<span>([\s\S]*?)<\/span>\s*<\/li>/g)]
+      .map(lm => ({ datum: lm[1], text: opsText(lm[2]) })).slice(0, 30);
+  }
+  for (const a of aufgaben) a.verlauf = (a.key && verlaeufe[a.key]) || [];
   // eindeutig machen (Fokus- und Gesamtansicht koennen dieselbe Aufgabe enthalten)
   const gesehen = new Set();
   const eindeutig = aufgaben.filter(a => { const k = a.key || a.titel; if (gesehen.has(k)) return false; gesehen.add(k); return true; });
@@ -2267,10 +2274,27 @@ function parseOpsHtml(html) {
     const name = block.match(/<b>([\s\S]*?)<\/b>/);
     const klein = block.match(/class="upg-small">([\s\S]*?)<\//);
     const st = block.match(/class="upg-st">([\s\S]*?)<\/(?:div|span|p)>/);
-    stufen.push({ name: name ? opsText(name[1]) : null, unter: klein ? opsText(klein[1]) : null, status: st ? opsText(st[1]).replace(/\s*·\s*details\s*$/i, '') : null, state: opsAttr(tag, 'data-state') });
+    // Details (Popover): Ueberschrift, Kurzinfo und Tabelle der Merge Requests
+    const popRoh = block.match(/class="upg-pop"[\s\S]*$/);
+    // Popover begrenzen: bis zum Ende seiner Tabelle, sonst hoechstens 2500 Zeichen
+    const pop = popRoh ? [(() => { const t = popRoh[0]; const e = t.indexOf('</table>'); return t.slice(0, e >= 0 ? e + 8 : Math.min(t.length, 2500)); })()] : null;
+    let details = null;
+    if (pop) {
+      const h3 = pop[0].match(/<h3>([\s\S]*?)<\/h3>/), info = pop[0].match(/<p class="muted"[^>]*>([\s\S]*?)<\/p>/);
+      const zeilen = [...pop[0].matchAll(/<tr>\s*<td>\s*<a href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/td>\s*<td>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>\s*<td[^>]*>([\s\S]*?)<\/td>/g)]
+        .map(z => ({ url: z[1], mr: opsText(z[2]), titel: opsText(z[3]), zustand: opsText(z[4]), freigaben: opsText(z[5]), ci: opsText(z[6]) })).slice(0, 120);
+      const absatz = [...pop[0].matchAll(/<p(?: [^>]*)?>([\s\S]*?)<\/p>/g)].map(x => opsText(x[1].replace(/<br\s*\/?>/g, ' \u00b7 '))).filter(Boolean).slice(0, 6);
+      details = { titel: h3 ? opsText(h3[1]) : null, info: info ? opsText(info[1].replace(/<br\s*\/?>/g, ' \u00b7 ')) : null, mrs: zeilen, absaetze: absatz };
+    }
+    stufen.push({ name: name ? opsText(name[1]) : null, unter: klein ? opsText(klein[1]) : null, status: st ? opsText(st[1]).replace(/\s*·\s*details\s*$/i, '') : null, state: opsAttr(tag, 'data-state'), details });
   });
   const standM = html.match(/task progress as of\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
-  return { aufgaben: eindeutig, upgrade: { version: verM ? verM[1] : null, stufen: stufen.filter(x => x.name) }, aufgabenStand: standM ? standM[1] : null };
+  const obM = html.match(/Outbound by chain:\s*([^<]*)/);
+  const outboundJeChain = obM ? obM[1].split(/\s*[·•]\s*/).map(x => { const m2 = x.trim().match(/^([A-Z0-9.]+)\s+(\d+)$/); return m2 ? { chain: m2[1], anzahl: Number(m2[2]) } : null; }).filter(Boolean) : [];
+  const refundsM = html.match(/<h2>Refunds<\/h2>[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/);
+  const refunds = refundsM ? [...refundsM[1].matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map(r => [...r[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(c => opsText(c[1])))
+    .filter(c => c.length >= 5).map(c => ({ chain: c[0], betrag: c[1], asset: c[2], an: c[3], hoehe: c[4] })) : [];
+  return { aufgaben: eindeutig, upgrade: { version: verM ? verM[1] : null, stufen: stufen.filter(x => x.name) }, aufgabenStand: standM ? standM[1] : null, outboundJeChain, refunds };
 }
 // BLOCKZEIT (gefragt: "was ist mit der Blockzeit?"): Durchschnitt ueber die letzten 50 Bloecke aus
 // dem Tendermint-RPC (Zeitstempel des neuesten und des 50 Bloecke aelteren Blocks), wie auf der
