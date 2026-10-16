@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-1930';
+const WORKER_VERSION = '2026-10-16-1945';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4152,7 +4152,20 @@ export default {
               f.status = rp.status; f.typ = rp.headers.get('content-type'); f.anfang = tx.slice(0, 300);
             } catch (e) { f.fehler = e?.message || String(e); }
           }
-          return json({ seite: basis, htmlLaenge: html.length, skripte, funde: liste }, env);
+          // Zweite Stufe: Die Seite hat KEINE externen Skripte (alles inline, 200+ KB) --
+          // also die eingebetteten Skripte/Daten untersuchen und gaengige /api/-Pfade anprobieren.
+          const inline = [...html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)].map((m, i) => ({
+            nr: i, attr: m[1].trim().slice(0, 120), laenge: m[2].length, anfang: m[2].trim().slice(0, 160) }));
+          const apiTeile = [...new Set([...html.matchAll(/["'`](\/api\/[^"'`\s)]*)/g)].map(m => m[1]))];
+          const schluessel = ['tasks', 'TASKS', 'steps', 'stagenet', 'upgrade', 'milestone', 'labels', 'progress', 'updates'];
+          const stellen = {};
+          for (const k of schluessel) { const i = html.indexOf(k); if (i >= 0) stellen[k] = html.slice(Math.max(0, i - 120), i + 200).replace(/\s+/g, ' '); }
+          const proben = {};
+          for (const pfad of ['/api/feed.json', '/api/tasks.json', '/api/status.json', '/api/state.json', '/api/chain.json', '/api/upgrade.json', '/api/data.json', '/api/mrs.json', '/api/gitlab.json', '/api/tasks', '/api/status', '/api/state', '/data.json', '/tasks.json', '/status.json']) {
+            try { const rp = await fetchWithTimeout(basis + pfad, { timeoutMs: 6000 }); const tx = await rp.text(); proben[pfad] = { status: rp.status, typ: rp.headers.get('content-type'), anfang: tx.slice(0, 220) }; }
+            catch (e) { proben[pfad] = { fehler: e?.message || String(e) }; }
+          }
+          return json({ seite: basis, htmlLaenge: html.length, skripte, inline, apiTeile, stellen, proben, funde: liste.filter(f => !/merge_requests\/\d+$/.test(f.url)), mrAnzahl: liste.filter(f => /merge_requests\/\d+$/.test(f.url)).length }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/near-dune-status') {
