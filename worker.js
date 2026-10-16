@@ -1722,7 +1722,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-2000';
+const WORKER_VERSION = '2026-10-16-2030';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2227,6 +2227,77 @@ async function handleStats(request, env) {
 // Das eigentliche Gegenstueck zu THORChains liquidityFees waere der SPREAD der Solver -- der wird
 // nirgends veroeffentlicht und steckt in keiner dieser Zahlen. Deshalb zeigt "Fees earned" fuer
 // NEAR Intents bewusst keinen Wert, statt eine Zahl, die etwas anderes misst.
+
+// OPS-STATUS AUS devops.thorchain.org (Quelle wird in der App genannt). Die Seite hat genau eine
+// Datenschnittstelle (/api/feed.json = Live Updates); Aufgaben und Upgrade-Stufen stehen als fertiges
+// HTML in der Seite und werden hier ausgelesen. Dazu kommen Chain-Daten direkt von THORNode.
+// Zwischengespeichert 90 s (die Seite selbst cached ~60-90 s).
+let opsCache = null;
+const OPS_CACHE_MS = 90 * 1000;
+const opsText = (h) => String(h || '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+const opsAttr = (tag, name) => { const m = tag.match(new RegExp(name + '="([^"]*)"')); return m ? opsText(m[1]) : null; };
+function parseOpsHtml(html) {
+  // Aufgaben: <article class="task" data-...> ... </article>
+  const aufgaben = [];
+  for (const m of html.matchAll(/<article class="task"([^>]*)>([\s\S]*?)<\/article>/g)) {
+    const kopf = m[1], inhalt = m[2];
+    const schritte = [...inhalt.matchAll(/<li class="step([^"]*)"[\s\S]*?<span class="step-name">([\s\S]*?)<\/span>/g)].map(sm => ({
+      name: opsText(sm[2]), status: /is-done/.test(sm[1]) ? 'done' : /is-next/.test(sm[1]) ? 'next' : /is-now|is-current|is-active/.test(sm[1]) ? 'now' : 'todo' }));
+    const upd = inhalt.match(/class="cl-n">(\d+)</);
+    const prog = inhalt.match(/class="prog">([^<]*)</);
+    aufgaben.push({
+      key: opsAttr(kopf, 'data-key'), titel: opsAttr(kopf, 'data-title'), status: opsAttr(kopf, 'data-id'),
+      prozent: Number(opsAttr(kopf, 'data-pct')) || 0, prio: opsAttr(kopf, 'data-prio'), version: opsAttr(kopf, 'data-ver') || null,
+      kategorien: (opsAttr(kopf, 'data-cats') || '').split(/\s*,\s*|\s*\|\s*/).filter(Boolean), jetzt: opsAttr(kopf, 'data-now'),
+      fortschritt: prog ? opsText(prog[1]) : null, updates: upd ? Number(upd[1]) : 0, schritte,
+    });
+  }
+  // eindeutig machen (Fokus- und Gesamtansicht koennen dieselbe Aufgabe enthalten)
+  const gesehen = new Set();
+  const eindeutig = aufgaben.filter(a => { const k = a.key || a.titel; if (gesehen.has(k)) return false; gesehen.add(k); return true; });
+  // Upgrade: Version + Stufen (im HTML, nicht im CSS: Tag mit data-state)
+  const verM = html.match(/Upgrade to[\s\S]{0,200}?(v\d+\.\d+\.\d+[\w.-]*)/);
+  const stufen = [];
+  const segRe = /<(?:div|button|a|section)[^>]*class="upg-seg[^"]*"[^>]*>/g;
+  const segs = [...html.matchAll(segRe)];
+  segs.forEach((sm, i) => {
+    const tag = sm[0];
+    const ende = i + 1 < segs.length ? segs[i + 1].index : Math.min(html.length, sm.index + 3000);
+    const block = html.slice(sm.index, ende);
+    const name = block.match(/<b>([\s\S]*?)<\/b>/);
+    const klein = block.match(/class="upg-small">([\s\S]*?)<\//);
+    const st = block.match(/class="upg-st">([\s\S]*?)<\/(?:div|span|p)>/);
+    stufen.push({ name: name ? opsText(name[1]) : null, unter: klein ? opsText(klein[1]) : null, status: st ? opsText(st[1]).replace(/\s*·\s*details\s*$/i, '') : null, state: opsAttr(tag, 'data-state') });
+  });
+  const standM = html.match(/task progress as of\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/i);
+  return { aufgaben: eindeutig, upgrade: { version: verM ? verM[1] : null, stufen: stufen.filter(x => x.name) }, aufgabenStand: standM ? standM[1] : null };
+}
+async function handleOps(request, env) {
+  if (opsCache && Date.now() - opsCache.at < OPS_CACHE_MS) return json(opsCache.daten, env);
+  const basis = 'https://devops.thorchain.org';
+  const [seite, feed, mimir, queue] = await Promise.allSettled([
+    fetchWithTimeout(basis + '/', { timeoutMs: 12000 }).then(r => r.text()),
+    fetchWithTimeout(basis + '/api/feed.json', { timeoutMs: 8000 }).then(r => r.json()),
+    fetchFromBases(getThornodeBases(), '/thorchain/mimir', { timeoutMs: 8000 }),
+    fetchFromBases(getThornodeBases(), '/thorchain/queue', { timeoutMs: 8000 }),
+  ]);
+  const teil = seite.status === 'fulfilled' ? parseOpsHtml(seite.value) : { aufgaben: [], upgrade: null, aufgabenStand: null };
+  const m = mimir.status === 'fulfilled' ? mimir.value : null;
+  const halts = m ? Object.entries(m).filter(([k, v]) => /^(HALT|PAUSE)/.test(k) && Number(v) > 0 && !/^PAUSELP/.test(k)).map(([k]) => k).sort() : [];
+  const lpPausiert = m ? Object.entries(m).filter(([k, v]) => /^PAUSELP/.test(k) && Number(v) > 0).length : null;
+  const q = queue.status === 'fulfilled' ? queue.value : null;
+  const daten = {
+    quelle: basis,
+    stand: new Date().toISOString(),
+    feed: feed.status === 'fulfilled' && feed.value && Array.isArray(feed.value.items) ? feed.value.items.slice(0, 20) : [],
+    ...teil,
+    chain: { halts, lpPausiert, swapQueue: q ? Number(q.swap) || 0 : null, outboundQueue: q ? Number(q.outbound) || 0 : null, internalQueue: q ? Number(q.internal) || 0 : null },
+    fehler: [seite, feed, mimir, queue].map((x, i) => x.status === 'rejected' ? ['seite', 'feed', 'mimir', 'queue'][i] + ': ' + (x.reason?.message || x.reason) : null).filter(Boolean),
+  };
+  opsCache = { at: Date.now(), daten };
+  return json(daten, env);
+}
+
 const DEX_PROTOCOLS = [
   { key: 'chainflip', name: 'Chainflip', slug: 'chainflip', feeFormel: 'fees-minus-userfees' },
   { key: 'near-intents', name: 'NEAR Intents', slug: 'near-intents', feeFormel: 'nicht-vergleichbar' },
@@ -4115,6 +4186,9 @@ export default {
       }
       if (url.pathname === '/recent-swaps') {
         return await handleRecentSwaps(request, env, ctx);
+      }
+      if (url.pathname === '/ops') {
+        try { return await handleOps(request, env); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/ops-quelle') {
         // QUELLEN VON devops.thorchain.org FINDEN (gefragt: "die nehmen sich die Infos irgendwo
