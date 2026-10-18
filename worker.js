@@ -786,12 +786,24 @@ async function handleBalance(request, env, ctx) {
       const providers = node?.bond_providers?.providers || [];
       let nodeTotalBondBase = 0;
       let myBondInNodeBase = 0;
+      let myYield = null;
       for (const p of providers) {
         const pBond = Number(p?.bond) || 0;
         nodeTotalBondBase += pBond;
         if (p?.bond_address === address) {
           totalBondBase += pBond;
           myBondInNodeBase = pBond;
+          // Bond Yield (ADR 029): gespeicherte Einstellung des Providers mitliefern. Feldnamen sind
+          // in der THORNode-API noch nicht dokumentiert -- deshalb tolerant nach Schluesseln suchen.
+          myYield = null;
+          for (const [k, v] of Object.entries(p || {})) {
+            if (/yield/i.test(k) && /bps|basis/i.test(k) && v != null && v !== '') { myYield = myYield || {}; myYield.bps = Number(v); }
+            else if (/payout|yield.*(target|addr)|target/i.test(k) && v) { myYield = myYield || {}; myYield.target = String(v); }
+            else if (/yield/i.test(k) && v && typeof v === 'object') {
+              const b = v.bps ?? v.basis_points ?? v.yield_bps; const t = v.target ?? v.payout_target ?? v.address;
+              myYield = myYield || {}; if (b != null) myYield.bps = Number(b); if (t) myYield.target = String(t);
+            }
+          }
         }
       }
       if (myBondInNodeBase > 0 && nodeTotalBondBase > 0) {
@@ -801,7 +813,7 @@ async function handleBalance(request, env, ctx) {
         accruedAwardBase += (myBondInNodeBase / nodeTotalBondBase) * currentAwardBase * (1 - fee);
         if (node?.node_address) {
           matchedNodeAddresses.push(node.node_address);
-          nodeBreakdown.push({ nodeAddress: node.node_address, status: node.status || null, bonded: myBondInNodeBase / 1e8 });
+          nodeBreakdown.push({ nodeAddress: node.node_address, status: node.status || null, bonded: myBondInNodeBase / 1e8, ...(myYield ? { bondYield: myYield } : {}) });
         }
       }
       if (node?.status === 'Active') {
@@ -1722,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-16-2145';
+const WORKER_VERSION = '2026-10-18-1200';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
