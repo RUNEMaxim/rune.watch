@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-19-1730';
+const WORKER_VERSION = '2026-10-19-1745';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5042,26 +5042,38 @@ async function syncTcyNativeReferenz(env, erzwingen = false) {
   // 2) Auszahlungen der gueltigen Referenz-Staker zusammenrechnen
   const refs = ((await env.DB.prepare('SELECT addr, stake FROM tcy_ref_kandidat WHERE ok = 1 ORDER BY stake DESC LIMIT ?').bind(TCY_REF_ZIEL).all()).results || []);
   if (!refs.length) return;
-  const proTag = new Map(); let stakeSumme = 0;
+  // Erst je Adresse laden, dann GEGENPRUEFEN: Die Auszahlung je TCY seit Start muss bei allen
+  // Referenz-Stakern gleich sein. Weicht eine Adresse mehr als 2 % vom Median ab (z. B. weil
+  // sich ihr Bestand doch auf einem nicht erfassten Weg geaendert hat), faellt sie raus.
+  const daten = [];
   for (const r of refs) {
     let j = null;
     try { j = await fetchFromBases(getMidgardBases(), `/tcy/distribution/${r.addr}`); } catch (e) { continue; }
-    stakeSumme += r.stake;
-    for (const x of (j && j.distributions) || []) {
-      const ms = Number(x.date) * 1000, rune = Number(x.amount) / 1e8;
-      if (!(ms > 0) || !(rune >= 0)) continue;
-      const tag = new Date(ms).toISOString().slice(0, 10);
-      const e = proTag.get(tag) || { ms, rune: 0 };
-      e.rune += rune; proTag.set(tag, e);
+    const ds = ((j && j.distributions) || []).map(x => ({ ms: Number(x.date) * 1000, rune: Number(x.amount) / 1e8 })).filter(x => x.ms > 0 && x.rune >= 0);
+    const summe = ds.filter(x => x.ms >= TCY_REF_START_MS).reduce((q, x) => q + x.rune, 0);
+    if (ds.length && r.stake > 0) daten.push({ addr: r.addr, stake: r.stake, ds, proTcy: summe / r.stake });
+  }
+  const sortiert = daten.map(x => x.proTcy).sort((a, b) => a - b);
+  const median = sortiert.length ? sortiert[Math.floor(sortiert.length / 2)] : 0;
+  const gueltig = daten.filter(x => median > 0 && Math.abs(x.proTcy / median - 1) <= 0.02);
+  for (const x of daten) if (!gueltig.includes(x)) await env.DB.prepare('UPDATE tcy_ref_kandidat SET ok = 2 WHERE addr = ?').bind(x.addr).run();
+  const proTag = new Map(); let stakeSumme = 0;
+  for (const x of gueltig) {
+    stakeSumme += x.stake;
+    for (const d of x.ds) {
+      const tag = new Date(d.ms).toISOString().slice(0, 10);
+      const e = proTag.get(tag) || { ms: d.ms, rune: 0 };
+      e.rune += d.rune; proTag.set(tag, e);
     }
   }
+  const streuung = gueltig.length > 1 ? Math.max(...gueltig.map(x => Math.abs(x.proTcy / median - 1))) : null;
   if (!(stakeSumme > 0)) return;
   const st = [];
   for (const [tag, e] of proTag) st.push(env.DB.prepare('INSERT OR REPLACE INTO tcy_native_ref (tag, ms, rune_pro_tcy) VALUES (?, ?, ?)').bind(tag, e.ms, e.rune / stakeSumme));
   for (let i = 0; i < st.length; i += 50) await env.DB.batch(st.slice(i, i + 50));
   await env.DB.batch([
     env.DB.prepare("INSERT OR REPLACE INTO tcy_ref_state (k, v) VALUES ('at', ?)").bind(String(Date.now())),
-    env.DB.prepare("INSERT OR REPLACE INTO tcy_ref_state (k, v) VALUES ('ref', ?)").bind(JSON.stringify({ adressen: refs.length, stake: stakeSumme })),
+    env.DB.prepare("INSERT OR REPLACE INTO tcy_ref_state (k, v) VALUES ('ref', ?)").bind(JSON.stringify({ adressen: gueltig.length, verworfen: daten.length - gueltig.length, stake: stakeSumme, maxAbweichung: streuung })),
   ]);
 }
 async function handleTcyNativeRef(request, env) {
