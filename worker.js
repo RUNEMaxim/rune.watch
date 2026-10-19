@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-18-1200';
+const WORKER_VERSION = '2026-10-19-1330';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4355,6 +4355,9 @@ export default {
       if (url.pathname === '/node-epochs') {
         return await handleNodeEpochs(request, env);
       }
+      if (url.pathname === '/rujira-tcy-history') {
+        try { return await handleRujiraTcyHistory(request, env); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/node-scores') {
         return await handleNodeScores(request, env);
       }
@@ -4804,6 +4807,112 @@ async function handleNodeScores(request, env) {
   return json(daten, env);
 }
 
+// =====================================================================================
+// RUJIRA TCY TAGESWERTE (fuer genaue Vergleiche nativ vs. Rujira in der TCY-Karte)
+//
+// Je Tag (UTC) ein Datensatz des Rujira-TCY-Staking-Vertrags:
+//   stake  = sein nativer TCY-Stake (/thorchain/tcy_staker/{vertrag})
+//   shares/size = status.liquid_bond_shares / liquid_bond_size -> Kurs 1 sTCY = size/shares TCY
+// Aktueller Tag bei jedem Cron-Lauf; dazu rueckwaerts bis Anfang Aug. 2025 nachgeholt, je
+// Lauf bis zu RUJIRA_TAGE_JE_LAUF Tage (Archivabfragen ueber ?height bzw. Hoehen-Header).
+// Vertrag: gleiche code_id wie der RUJI-Staking-Vertrag, config.bond_denom == "tcy".
+// GET /rujira-tcy-history -> { vertrag, tage: [{ tag, ms, height, stake, kurs }] }
+// =====================================================================================
+const RUJI_STAKING_VERTRAG = 'thor13g83nn5ef4qzqeafp0508dnvkvm0zqr3sj7eefcn5umu65gqluusrml5cr';
+const RUJIRA_TCY_START_MS = Date.UTC(2025, 7, 5);
+const RUJIRA_TAGE_JE_LAUF = 3;
+let rujiraTcyVertragCache = null;
+let rujiraTabellenOk = false;
+
+async function sichereRujiraTabellen(env) {
+  if (rujiraTabellenOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_tcy_daily (
+      tag TEXT PRIMARY KEY, ms INTEGER, height INTEGER, stake REAL, shares REAL, size REAL)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_tcy_meta (
+      tag TEXT PRIMARY KEY, tries INTEGER NOT NULL, at INTEGER)`),
+  ]);
+  rujiraTabellenOk = true;
+}
+const b64Json = o => btoa(JSON.stringify(o));
+async function wasmSmart(vertrag, anfrage, hoehe) {
+  const opts = hoehe ? { headers: { 'x-cosmos-block-height': String(hoehe), 'x-client-id': 'rune-rewards-backend' } } : {};
+  const j = await fetchFromBases(getThornodeBases({ needsHeight: !!hoehe }), `/cosmwasm/wasm/v1/contract/${vertrag}/smart/${b64Json(anfrage)}`, opts);
+  return j && j.data != null ? j.data : null;
+}
+async function findeRujiraTcyVertrag(env) {
+  if (rujiraTcyVertragCache) return rujiraTcyVertragCache;
+  try {
+    const m = await env.DB.prepare("SELECT tag FROM rujira_tcy_meta WHERE tag LIKE 'vertrag:%'").first();
+    if (m && m.tag) { rujiraTcyVertragCache = m.tag.slice(8); return rujiraTcyVertragCache; }
+  } catch (e) {}
+  const info = await fetchFromBases(getThornodeBases(), `/cosmwasm/wasm/v1/contract/${RUJI_STAKING_VERTRAG}`);
+  const codeId = Number(info && info.contract_info && info.contract_info.code_id);
+  if (!codeId) return null;
+  for (const id of [codeId, codeId + 1, codeId - 1, codeId + 2, codeId - 2]) {
+    let liste = null;
+    try { liste = await fetchFromBases(getThornodeBases(), `/cosmwasm/wasm/v1/code/${id}/contracts?pagination.limit=200`); } catch (e) { continue; }
+    for (const a of (liste && liste.contracts) || []) {
+      try {
+        const cfg = await wasmSmart(a, { config: {} });
+        if (cfg && String(cfg.bond_denom).toLowerCase() === 'tcy' && cfg.revenue_denom != null) {
+          rujiraTcyVertragCache = a;
+          await env.DB.prepare('INSERT OR REPLACE INTO rujira_tcy_meta (tag, tries, at) VALUES (?, 0, ?)').bind('vertrag:' + a, Date.now()).run();
+          return a;
+        }
+      } catch (e) {}
+    }
+  }
+  return null;
+}
+async function rujiraTagesWert(vertrag, hoehe) {
+  const pfadStake = `/thorchain/tcy_staker/${vertrag}` + (hoehe ? `?height=${hoehe}` : '');
+  const [st, stake] = await Promise.all([
+    wasmSmart(vertrag, { status: {} }, hoehe),
+    fetchFromBases(getThornodeBases({ needsHeight: !!hoehe }), pfadStake).catch(() => null),
+  ]);
+  const shares = Number(st && st.liquid_bond_shares) / 1e8, size = Number(st && st.liquid_bond_size) / 1e8;
+  if (!(shares > 0 && size > 0)) throw new Error('RUJIRA_STATUS_LEER');
+  return { shares, size, stake: (Number(stake && stake.amount) || 0) / 1e8 };
+}
+async function syncRujiraTcyDaily(env) {
+  await sichereRujiraTabellen(env);
+  const vertrag = await findeRujiraTcyVertrag(env);
+  if (!vertrag) return;
+  const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+  const h = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : Number(lb && lb.thorchain) || 0;
+  if (!h) return;
+  const jetzt = Date.now();
+  const tagVon = ms => new Date(ms).toISOString().slice(0, 10);
+  const vorhanden = new Set(((await env.DB.prepare('SELECT tag FROM rujira_tcy_daily').all()).results || []).map(r => r.tag));
+  const versuche = new Map(((await env.DB.prepare("SELECT tag, tries FROM rujira_tcy_meta WHERE tag NOT LIKE 'vertrag:%'").all()).results || []).map(r => [r.tag, Number(r.tries)]));
+  const speichere = async (tag, ms, hoehe, w) => env.DB.prepare(
+    'INSERT OR REPLACE INTO rujira_tcy_daily (tag, ms, height, stake, shares, size) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(tag, ms, hoehe, w.stake, w.shares, w.size).run();
+  // Heute (aktueller Stand, ueberschreibt den Tageswert)
+  try { await speichere(tagVon(jetzt), jetzt, h, await rujiraTagesWert(vertrag, null)); } catch (e) {}
+  // Rueckwaerts nachholen: Tage ohne Eintrag, hoechstens 3 Versuche je Tag.
+  let erledigt = 0;
+  for (let k = 1; erledigt < RUJIRA_TAGE_JE_LAUF; k++) {
+    const ms = jetzt - k * 86400000;
+    if (ms < RUJIRA_TCY_START_MS) break;
+    const tag = tagVon(ms);
+    if (vorhanden.has(tag) || (versuche.get(tag) || 0) >= 3) continue;
+    const hoehe = h - k * 14400;
+    erledigt++;
+    try { await speichere(tag, ms, hoehe, await rujiraTagesWert(vertrag, hoehe)); }
+    catch (e) {
+      await env.DB.prepare('INSERT OR REPLACE INTO rujira_tcy_meta (tag, tries, at) VALUES (?, ?, ?)').bind(tag, (versuche.get(tag) || 0) + 1, jetzt).run();
+    }
+  }
+}
+async function handleRujiraTcyHistory(request, env) {
+  await sichereRujiraTabellen(env);
+  const r = await env.DB.prepare('SELECT tag, ms, height, stake, shares, size FROM rujira_tcy_daily ORDER BY tag ASC').all();
+  const tage = (r.results || []).map(z => ({ tag: z.tag, ms: z.ms, height: z.height, stake: z.stake, kurs: z.shares > 0 ? z.size / z.shares : null }));
+  return json({ vertrag: rujiraTcyVertragCache, tage }, env);
+}
+
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -4814,6 +4923,7 @@ async function runRefreshCycle(env) {
   await schritt('Swap-Paare', () => collectSwapPairStats(env));
   await schritt('Node-Historie', () => syncNodeHistory(env));
   await schritt('Node-Epochen', () => syncNodeEpochs(env));
+  await schritt('Rujira TCY', () => syncRujiraTcyDaily(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
