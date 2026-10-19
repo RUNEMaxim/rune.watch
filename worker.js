@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-19-1330';
+const WORKER_VERSION = '2026-10-19-1530';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4355,6 +4355,16 @@ export default {
       if (url.pathname === '/node-epochs') {
         return await handleNodeEpochs(request, env);
       }
+      // Nachholen von Hand beschleunigen (Cron laeuft hoechstens jede Minute): jeder Aufruf holt
+      // bis zu 15 weitere Tage. Antwort nennt den Stand.
+      if (url.pathname === '/rujira-tcy-nachholen') {
+        try {
+          const n = Math.min(15, Math.max(1, Number(url.searchParams.get('tage')) || 10));
+          await syncRujiraTcyDaily(env, n);
+          const c = await env.DB.prepare('SELECT COUNT(*) AS n, MIN(tag) AS von FROM rujira_tcy_daily').first();
+          return json({ ok: true, tage: Number(c?.n) || 0, aeltester: c?.von || null }, env);
+        } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/rujira-tcy-history') {
         try { return await handleRujiraTcyHistory(request, env); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -4820,7 +4830,7 @@ async function handleNodeScores(request, env) {
 // =====================================================================================
 const RUJI_STAKING_VERTRAG = 'thor13g83nn5ef4qzqeafp0508dnvkvm0zqr3sj7eefcn5umu65gqluusrml5cr';
 const RUJIRA_TCY_START_MS = Date.UTC(2025, 7, 5);
-const RUJIRA_TAGE_JE_LAUF = 3;
+const RUJIRA_TAGE_JE_LAUF = 10; // je Cron-Lauf; zusaetzlich /rujira-tcy-nachholen
 let rujiraTcyVertragCache = null;
 let rujiraTabellenOk = false;
 
@@ -4875,7 +4885,7 @@ async function rujiraTagesWert(vertrag, hoehe) {
   if (!(shares > 0 && size > 0)) throw new Error('RUJIRA_STATUS_LEER');
   return { shares, size, stake: (Number(stake && stake.amount) || 0) / 1e8 };
 }
-async function syncRujiraTcyDaily(env) {
+async function syncRujiraTcyDaily(env, tageJeLauf = RUJIRA_TAGE_JE_LAUF) {
   await sichereRujiraTabellen(env);
   const vertrag = await findeRujiraTcyVertrag(env);
   if (!vertrag) return;
@@ -4893,7 +4903,7 @@ async function syncRujiraTcyDaily(env) {
   try { await speichere(tagVon(jetzt), jetzt, h, await rujiraTagesWert(vertrag, null)); } catch (e) {}
   // Rueckwaerts nachholen: Tage ohne Eintrag, hoechstens 3 Versuche je Tag.
   let erledigt = 0;
-  for (let k = 1; erledigt < RUJIRA_TAGE_JE_LAUF; k++) {
+  for (let k = 1; erledigt < tageJeLauf; k++) {
     const ms = jetzt - k * 86400000;
     if (ms < RUJIRA_TCY_START_MS) break;
     const tag = tagVon(ms);
