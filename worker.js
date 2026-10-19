@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-19-1530';
+const WORKER_VERSION = '2026-10-19-1645';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4360,9 +4360,13 @@ export default {
       if (url.pathname === '/rujira-tcy-nachholen') {
         try {
           const n = Math.min(15, Math.max(1, Number(url.searchParams.get('tage')) || 10));
-          await syncRujiraTcyDaily(env, n);
+          await syncRujiraTcyDaily(env, n).catch(() => {});
+          await syncRujiraKursEreignisse(env, 8).catch(() => {});
           const c = await env.DB.prepare('SELECT COUNT(*) AS n, MIN(tag) AS von FROM rujira_tcy_daily').first();
-          return json({ ok: true, tage: Number(c?.n) || 0, aeltester: c?.von || null }, env);
+          const k = await env.DB.prepare('SELECT COUNT(*) AS n, MIN(tag) AS von FROM rujira_tcy_kurs').first();
+          const f = await env.DB.prepare("SELECT v FROM rujira_tcy_state WHERE k = 'kurs_fertig'").first();
+          return json({ ok: true, tage: Number(c?.n) || 0, aeltester: c?.von || null,
+            kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/rujira-tcy-history') {
@@ -4841,7 +4845,17 @@ async function sichereRujiraTabellen(env) {
       tag TEXT PRIMARY KEY, ms INTEGER, height INTEGER, stake REAL, shares REAL, size REAL)`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_tcy_meta (
       tag TEXT PRIMARY KEY, tries INTEGER NOT NULL, at INTEGER)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_tcy_kurs (
+      tag TEXT PRIMARY KEY, ms INTEGER, kurs REAL)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_tcy_state (k TEXT PRIMARY KEY, v TEXT)`),
   ]);
+  // Einmalig nach diesem Update: gesperrte Tage (3 Fehlversuche) wieder freigeben -- vorher
+  // scheiterte der ganze Tag, wenn nur die Vertragsabfrage auf alter Hoehe fehlschlug.
+  const fl = await env.DB.prepare("SELECT v FROM rujira_tcy_state WHERE k = 'reset1'").first();
+  if (!fl) {
+    await env.DB.prepare("DELETE FROM rujira_tcy_meta WHERE tag NOT LIKE 'vertrag:%'").run();
+    await env.DB.prepare("INSERT OR REPLACE INTO rujira_tcy_state (k, v) VALUES ('reset1', '1')").run();
+  }
   rujiraTabellenOk = true;
 }
 const b64Json = o => btoa(JSON.stringify(o));
@@ -4877,13 +4891,16 @@ async function findeRujiraTcyVertrag(env) {
 }
 async function rujiraTagesWert(vertrag, hoehe) {
   const pfadStake = `/thorchain/tcy_staker/${vertrag}` + (hoehe ? `?height=${hoehe}` : '');
+  // Beide Abfragen unabhaengig: Vertragsabfragen auf alter Hoehe liefert das Archiv nicht
+  // immer (der Kurs kommt dann aus den Einzahlungs-Ereignissen, siehe syncRujiraKursEreignisse).
   const [st, stake] = await Promise.all([
-    wasmSmart(vertrag, { status: {} }, hoehe),
+    wasmSmart(vertrag, { status: {} }, hoehe).catch(() => null),
     fetchFromBases(getThornodeBases({ needsHeight: !!hoehe }), pfadStake).catch(() => null),
   ]);
   const shares = Number(st && st.liquid_bond_shares) / 1e8, size = Number(st && st.liquid_bond_size) / 1e8;
-  if (!(shares > 0 && size > 0)) throw new Error('RUJIRA_STATUS_LEER');
-  return { shares, size, stake: (Number(stake && stake.amount) || 0) / 1e8 };
+  const stakeTcy = (Number(stake && stake.amount) || 0) / 1e8;
+  if (!(shares > 0 && size > 0) && !(stakeTcy > 0)) throw new Error('RUJIRA_TAG_LEER');
+  return { shares: shares > 0 ? shares : null, size: size > 0 ? size : null, stake: stakeTcy > 0 ? stakeTcy : null };
 }
 async function syncRujiraTcyDaily(env, tageJeLauf = RUJIRA_TAGE_JE_LAUF) {
   await sichereRujiraTabellen(env);
@@ -4916,10 +4933,58 @@ async function syncRujiraTcyDaily(env, tageJeLauf = RUJIRA_TAGE_JE_LAUF) {
     }
   }
 }
+// KURS AUS EINZAHLUNGEN: Jede liquid.bond-Einzahlung gibt Anteile zum aktuellen Kurs aus, also
+// gilt Kurs = amount / shares (Midgard: type contract, metadata.contract.attributes). Rueckwaerts
+// seitenweise ueber alle Aufrufe des Vertrags, Fortschritt in rujira_tcy_state. Je Tag zaehlt die
+// spaeteste Einzahlung. Unabhaengig vom Archiv.
+async function syncRujiraKursEreignisse(env, seiten = 6) {
+  await sichereRujiraTabellen(env);
+  const vertrag = await findeRujiraTcyVertrag(env);
+  if (!vertrag) return;
+  const st = await env.DB.prepare("SELECT v FROM rujira_tcy_state WHERE k = 'kurs_token'").first();
+  const fertig = await env.DB.prepare("SELECT v FROM rujira_tcy_state WHERE k = 'kurs_fertig'").first();
+  const speichere = (ms, kurs) => env.DB.prepare(
+    `INSERT INTO rujira_tcy_kurs (tag, ms, kurs) VALUES (?, ?, ?)
+     ON CONFLICT(tag) DO UPDATE SET ms = excluded.ms, kurs = excluded.kurs WHERE excluded.ms > rujira_tcy_kurs.ms`
+  ).bind(new Date(ms).toISOString().slice(0, 10), ms, kurs).run();
+  const seite = async token => {
+    const j = await fetchFromBases(getMidgardBases(), `/actions?address=${vertrag}&type=contract&limit=50${token ? `&nextPageToken=${token}` : ''}`);
+    for (const act of (j && j.actions) || []) {
+      const c = act && act.metadata && act.metadata.contract;
+      // Einzahlung: Kurs = amount/shares; Auszahlung: Kurs = returned/shares (beides laut
+      // SharePool-Code des Vertrags, Rundung nur in der letzten 1e8-Stelle).
+      const typ = String(c && c.contractType || '');
+      const bond = /rujira-staking\/liquid\.bond$/.test(typ), unbond = /rujira-staking\/liquid\.unbond$/.test(typ);
+      if (!bond && !unbond) continue;
+      const a = Number(c.attributes && (bond ? c.attributes.amount : c.attributes.returned)), sh = Number(c.attributes && c.attributes.shares);
+      const ms = Math.round(Number(act.date) / 1e6);
+      if (a > 0 && sh > 0 && ms > 0) await speichere(ms, a / sh);
+    }
+    return (j && j.meta && j.meta.nextPageToken) || null;
+  };
+  // Neueste Seite immer (neue Einzahlungen), danach rueckwaerts weiter.
+  await seite(null);
+  if (fertig) return;
+  let token = st && st.v || null;
+  if (!token) token = await seite(null);
+  for (let i = 0; i < seiten && token; i++) token = await seite(token);
+  await env.DB.prepare("INSERT OR REPLACE INTO rujira_tcy_state (k, v) VALUES ('kurs_token', ?)").bind(token || '').run();
+  if (!token) await env.DB.prepare("INSERT OR REPLACE INTO rujira_tcy_state (k, v) VALUES ('kurs_fertig', '1')").run();
+}
 async function handleRujiraTcyHistory(request, env) {
   await sichereRujiraTabellen(env);
-  const r = await env.DB.prepare('SELECT tag, ms, height, stake, shares, size FROM rujira_tcy_daily ORDER BY tag ASC').all();
-  const tage = (r.results || []).map(z => ({ tag: z.tag, ms: z.ms, height: z.height, stake: z.stake, kurs: z.shares > 0 ? z.size / z.shares : null }));
+  const [r, k] = await Promise.all([
+    env.DB.prepare('SELECT tag, ms, height, stake, shares, size FROM rujira_tcy_daily ORDER BY tag ASC').all(),
+    env.DB.prepare('SELECT tag, ms, kurs FROM rujira_tcy_kurs ORDER BY tag ASC').all(),
+  ]);
+  const map = new Map();
+  for (const z of (r.results || [])) map.set(z.tag, { tag: z.tag, ms: z.ms, height: z.height, stake: z.stake || null, kurs: z.shares > 0 ? z.size / z.shares : null });
+  for (const z of (k.results || [])) {
+    const e = map.get(z.tag) || { tag: z.tag, ms: z.ms, height: null, stake: null, kurs: null };
+    if (!(e.kurs > 0)) e.kurs = z.kurs;
+    map.set(z.tag, e);
+  }
+  const tage = [...map.values()].sort((a, b) => a.tag < b.tag ? -1 : 1);
   return json({ vertrag: rujiraTcyVertragCache, tage }, env);
 }
 
@@ -4934,6 +4999,7 @@ async function runRefreshCycle(env) {
   await schritt('Node-Historie', () => syncNodeHistory(env));
   await schritt('Node-Epochen', () => syncNodeEpochs(env));
   await schritt('Rujira TCY', () => syncRujiraTcyDaily(env));
+  await schritt('Rujira TCY Kurs', () => syncRujiraKursEreignisse(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
