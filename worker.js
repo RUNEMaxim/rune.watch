@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-19-1645';
+const WORKER_VERSION = '2026-10-19-1730';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4369,6 +4369,9 @@ export default {
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
+      if (url.pathname === '/tcy-native-ref') {
+        try { return await handleTcyNativeRef(request, env); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/rujira-tcy-history') {
         try { return await handleRujiraTcyHistory(request, env); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -4988,6 +4991,90 @@ async function handleRujiraTcyHistory(request, env) {
   return json({ vertrag: rujiraTcyVertragCache, tage }, env);
 }
 
+// =====================================================================================
+// NATIVE TCY-RENDITE JE TCY (Referenz aus echten nativen Stakern, kein Rujira-Umweg)
+//
+// Gesucht: wie viel RUNE ein nativ gestakter TCY an jedem Tag bekam. Dafuer werden grosse
+// native Staker mit UNVERAENDERTEM Bestand gesucht (keine tcy_stake/tcy_unstake/tcy_claim-Aktion
+// seit TCY_REF_START, Vertraege ausgenommen). Deren Auszahlungen (Midgard /tcy/distribution)
+// geteilt durch ihren Bestand ergeben exakt die Auszahlung je TCY.
+// Neu berechnet hoechstens alle 6 Stunden. GET /tcy-native-ref -> { referenz, tage: [{tag, ms, runeProTcy}] }
+// =====================================================================================
+const TCY_REF_START_MS = Date.UTC(2025, 6, 20);
+const TCY_REF_ZIEL = 8, TCY_REF_PRUEF_JE_LAUF = 10;
+let tcyRefTabellenOk = false;
+async function sichereTcyRefTabellen(env) {
+  if (tcyRefTabellenOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS tcy_ref_kandidat (addr TEXT PRIMARY KEY, ok INTEGER, stake REAL, at INTEGER)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS tcy_native_ref (tag TEXT PRIMARY KEY, ms INTEGER, rune_pro_tcy REAL)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS tcy_ref_state (k TEXT PRIMARY KEY, v TEXT)`),
+  ]);
+  tcyRefTabellenOk = true;
+}
+async function syncTcyNativeReferenz(env, erzwingen = false) {
+  await sichereTcyRefTabellen(env);
+  const zuletzt = await env.DB.prepare("SELECT v FROM tcy_ref_state WHERE k = 'at'").first();
+  const okZahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM tcy_ref_kandidat WHERE ok = 1').first();
+  if (!erzwingen && zuletzt && Date.now() - Number(zuletzt.v) < 6 * 3600e3 && Number(okZahl?.n) >= TCY_REF_ZIEL) return;
+  // 1) Kandidaten pruefen (groesste native Staker zuerst)
+  if (Number(okZahl?.n) < TCY_REF_ZIEL) {
+    const roh = await fetchFromBases(getThornodeBases(), '/thorchain/tcy_stakers');
+    const liste = (Array.isArray(roh) ? roh : (roh && (roh.tcy_stakers || roh.stakers)) || [])
+      .map(x => ({ addr: String(x.address || ''), stake: Number(x.amount) / 1e8 }))
+      .filter(x => /^thor1[0-9a-z]{38}$/.test(x.addr) && x.stake > 0)   // nur normale Adressen, keine Vertraege
+      .sort((a, b) => b.stake - a.stake).slice(0, 150);
+    const geprueft = new Set(((await env.DB.prepare('SELECT addr FROM tcy_ref_kandidat').all()).results || []).map(r => r.addr));
+    let n = 0;
+    for (const k of liste) {
+      if (geprueft.has(k.addr)) continue;
+      if (n++ >= TCY_REF_PRUEF_JE_LAUF) break;
+      let ok = 0;
+      try {
+        const j = await fetchFromBases(getMidgardBases(), `/actions?address=${k.addr}&type=tcy_stake,tcy_unstake,tcy_claim&limit=50`);
+        const akt = (j && j.actions) || [];
+        const spaet = akt.some(a => Math.round(Number(a.date) / 1e6) >= TCY_REF_START_MS);
+        ok = akt.length > 0 && !spaet ? 1 : 0;
+      } catch (e) { continue; }
+      await env.DB.prepare('INSERT OR REPLACE INTO tcy_ref_kandidat (addr, ok, stake, at) VALUES (?, ?, ?, ?)').bind(k.addr, ok, k.stake, Date.now()).run();
+    }
+  }
+  // 2) Auszahlungen der gueltigen Referenz-Staker zusammenrechnen
+  const refs = ((await env.DB.prepare('SELECT addr, stake FROM tcy_ref_kandidat WHERE ok = 1 ORDER BY stake DESC LIMIT ?').bind(TCY_REF_ZIEL).all()).results || []);
+  if (!refs.length) return;
+  const proTag = new Map(); let stakeSumme = 0;
+  for (const r of refs) {
+    let j = null;
+    try { j = await fetchFromBases(getMidgardBases(), `/tcy/distribution/${r.addr}`); } catch (e) { continue; }
+    stakeSumme += r.stake;
+    for (const x of (j && j.distributions) || []) {
+      const ms = Number(x.date) * 1000, rune = Number(x.amount) / 1e8;
+      if (!(ms > 0) || !(rune >= 0)) continue;
+      const tag = new Date(ms).toISOString().slice(0, 10);
+      const e = proTag.get(tag) || { ms, rune: 0 };
+      e.rune += rune; proTag.set(tag, e);
+    }
+  }
+  if (!(stakeSumme > 0)) return;
+  const st = [];
+  for (const [tag, e] of proTag) st.push(env.DB.prepare('INSERT OR REPLACE INTO tcy_native_ref (tag, ms, rune_pro_tcy) VALUES (?, ?, ?)').bind(tag, e.ms, e.rune / stakeSumme));
+  for (let i = 0; i < st.length; i += 50) await env.DB.batch(st.slice(i, i + 50));
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR REPLACE INTO tcy_ref_state (k, v) VALUES ('at', ?)").bind(String(Date.now())),
+    env.DB.prepare("INSERT OR REPLACE INTO tcy_ref_state (k, v) VALUES ('ref', ?)").bind(JSON.stringify({ adressen: refs.length, stake: stakeSumme })),
+  ]);
+}
+async function handleTcyNativeRef(request, env) {
+  await sichereTcyRefTabellen(env);
+  const url = new URL(request.url);
+  if (url.searchParams.get('neu') === '1') { try { await syncTcyNativeReferenz(env, true); } catch (e) {} }
+  const [r, ref] = await Promise.all([
+    env.DB.prepare('SELECT tag, ms, rune_pro_tcy FROM tcy_native_ref ORDER BY tag ASC').all(),
+    env.DB.prepare("SELECT v FROM tcy_ref_state WHERE k = 'ref'").first(),
+  ]);
+  return json({ referenz: ref ? JSON.parse(ref.v) : null, tage: (r.results || []).map(z => ({ tag: z.tag, ms: z.ms, runeProTcy: z.rune_pro_tcy })) }, env);
+}
+
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -5000,6 +5087,7 @@ async function runRefreshCycle(env) {
   await schritt('Node-Epochen', () => syncNodeEpochs(env));
   await schritt('Rujira TCY', () => syncRujiraTcyDaily(env));
   await schritt('Rujira TCY Kurs', () => syncRujiraKursEreignisse(env));
+  await schritt('TCY native Referenz', () => syncTcyNativeReferenz(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
