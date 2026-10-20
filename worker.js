@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1400';
+const WORKER_VERSION = '2026-10-20-1415';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5181,7 +5181,33 @@ async function syncDonationHistory(env) {
       await donStateSet(env, 'thor_bis', Math.max(...funde.map(f => f.ms)));
     } else if (!bekannt) await donStateSet(env, 'thor_bis', 0);
   } catch (e) { diag.thor.fehler = e?.message || String(e); console.warn('[spenden] THOR', e?.message || e); }
-  // --- USDC (ERC-20 Transfers an die ETH-Adresse), blockweise rueckwaerts bis DON_START ---
+  // --- TOKEN (USDC, USDT, DAI und andere ERC-20) ueber Blockscout tokentx: komplette Historie auf
+  //     einen Schlag. Stablecoins zaehlen 1:1 in USD. Rueckfall bei Blockscout-Fehler: eth_getLogs (nur USDC).
+  let tokenOk = false;
+  try {
+    const adr = DONATION_ETH_ADDRESS.toLowerCase();
+    const r = await fetchWithTimeout(`https://eth.blockscout.com/api?module=account&action=tokentx&address=${adr}&sort=desc&page=1&offset=200`, { timeoutMs: 12000 });
+    if (!r.ok) throw new Error('BLOCKSCOUT_HTTP_' + r.status);
+    const j = await r.json();
+    if (!Array.isArray(j.result)) throw new Error('BLOCKSCOUT_' + (j.message || 'leer'));
+    const STABIL = /^(USDC|USDT|DAI|USDS|PYUSD|FDUSD|USDE)$/i;
+    let n = 0;
+    for (const x of j.result) {
+      if (String(x.to || '').toLowerCase() !== adr) continue;
+      const ms = Number(x.timeStamp) * 1000;
+      if (!(ms >= DON_START_MS)) continue;
+      const dez = Number(x.tokenDecimal) || 18;
+      const betrag = Number(BigInt(x.value || '0')) / Math.pow(10, dez);
+      if (!(betrag > 0)) continue;
+      const sym = String(x.tokenSymbol || 'TOKEN').toUpperCase().slice(0, 12);
+      await donEintrag(env, 'tok:' + x.hash + ':' + (x.logIndex || x.transactionIndex || ''), ms, sym, betrag, STABIL.test(sym) ? betrag : null, 'ETH', x.hash);
+      n++;
+    }
+    diag.usdc.funde = n; diag.usdc.quelle = 'blockscout'; tokenOk = true;
+    // Eintraege der alten Log-Suche entfernen, damit nichts doppelt zaehlt.
+    await env.DB.prepare("DELETE FROM donation_history WHERE id LIKE 'usdc:%'").run();
+  } catch (e) { diag.usdc.blockscoutFehler = e?.message || String(e); }
+  if (!tokenOk) {
   try {
     const rpc = async (method, params) => {
       const r = await fetchWithTimeout(ETH_RPC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), timeoutMs: 10000 });
@@ -5211,6 +5237,7 @@ async function syncDonationHistory(env) {
     await donStateSet(env, 'usdc_unten', unten);
     await donStateSet(env, 'usdc_oben', kopf);
   } catch (e) { diag.usdc.fehler = e?.message || String(e); console.warn('[spenden] USDC', e?.message || e); }
+  }
   // --- ETH: komplette Historie ueber Blockscout (oeffentliche, Etherscan-kompatible Schnittstelle,
   //     ohne Schluessel). Normale Ueberweisungen (txlist) UND interne (txlistinternal) -- Letztere
   //     sind z. B. ETH, die per THORChain-Swap ueber den Router ankommen. Rueckfall, falls
