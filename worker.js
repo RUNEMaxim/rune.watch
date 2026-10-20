@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1515';
+const WORKER_VERSION = '2026-10-20-1800';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4369,6 +4369,9 @@ export default {
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
+      if (url.pathname.startsWith('/push/')) {
+        try { return await handlePush(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/donation-history') {
         try {
           let diag = null;
@@ -5377,6 +5380,213 @@ async function handleDonationHistory(request, env, diag = null) {
   return antwort;
 }
 
+// =====================================================================================
+// WEB PUSH (Etappe 1): Meldungen auch bei geschlossener App.
+// Themen: halt (Chain-Halts an/aus), ops (Bond Yield freigeschaltet, XMR handelbar), preis
+// (RUNE ueber/unter eigener Grenze), spende (nur Betreiber). Versand nach RFC 8291 (aes128gcm)
+// mit VAPID (RFC 8292) -- nur WebCrypto, kein Zusatzdienst. Das VAPID-Schluesselpaar erzeugt der
+// Worker beim ersten Bedarf selbst und legt es in D1 ab (Tabelle push_state).
+// Endpunkte: GET /push/public-key, POST /push/subscribe, POST /push/unsubscribe, POST /push/test
+// =====================================================================================
+let pushTabellenOk = false;
+async function sicherePushTabellen(env) {
+  if (pushTabellenOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT, p256dh TEXT, auth TEXT, prefs TEXT, lang TEXT, besitzer INTEGER, at INTEGER, fails INTEGER DEFAULT 0, zustand TEXT)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_state (k TEXT PRIMARY KEY, v TEXT)`),
+  ]);
+  pushTabellenOk = true;
+}
+const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64uDecode = s => { s = String(s).replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+const pushState = async (env, k) => { const r = await env.DB.prepare('SELECT v FROM push_state WHERE k = ?').bind(k).first(); return r ? r.v : null; };
+const pushStateSet = (env, k, v) => env.DB.prepare('INSERT OR REPLACE INTO push_state (k, v) VALUES (?, ?)').bind(k, String(v)).run();
+let vapidCache = null;
+async function vapidSchluessel(env) {
+  if (vapidCache) return vapidCache;
+  await sicherePushTabellen(env);
+  let roh = await pushState(env, 'vapid');
+  if (!roh) {
+    const paar = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const priv = await crypto.subtle.exportKey('jwk', paar.privateKey);
+    const pub = await crypto.subtle.exportKey('raw', paar.publicKey);
+    roh = JSON.stringify({ priv, pub: b64u(pub) });
+    await pushStateSet(env, 'vapid', roh);
+  }
+  const { priv, pub } = JSON.parse(roh);
+  const key = await crypto.subtle.importKey('jwk', priv, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  vapidCache = { key, pub };
+  return vapidCache;
+}
+async function vapidJwt(env, endpoint) {
+  const { key, pub } = await vapidSchluessel(env);
+  const aud = new URL(endpoint).origin;
+  const enc = o => b64u(new TextEncoder().encode(JSON.stringify(o)));
+  const kopf = enc({ typ: 'JWT', alg: 'ES256' });
+  const inhalt = enc({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: 'mailto:' + ((env && env.PUSH_KONTAKT) || 'maxkalinowski@gmx.de') });
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(kopf + '.' + inhalt));
+  return { jwt: kopf + '.' + inhalt + '.' + b64u(sig), pub };
+}
+async function hkdf(salt, ikm, info, laenge) {
+  const k = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, k, laenge * 8));
+}
+const verbinde = (...teile) => { const n = teile.reduce((q, t) => q + t.length, 0); const u = new Uint8Array(n); let o = 0; for (const t of teile) { u.set(t, o); o += t.length; } return u; };
+// Verschluesselung einer Nachricht fuer ein Abo (RFC 8291, ein Datensatz).
+async function pushVerschluesseln(sub, nutzlast) {
+  const uaPub = b64uDecode(sub.p256dh), auth = b64uDecode(sub.auth);
+  const eph = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const geteilt = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, eph.privateKey, 256));
+  const te = new TextEncoder();
+  const ikm = await hkdf(auth, geteilt, verbinde(te.encode('WebPush: info\0'), uaPub, asPub), 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, te.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, te.encode('Content-Encoding: nonce\0'), 12);
+  const klar = verbinde(te.encode(nutzlast), new Uint8Array([2]));
+  const aes = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const geheim = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aes, klar));
+  const rs = new Uint8Array([0, 0, 16, 0]); // 4096
+  return verbinde(salt, rs, new Uint8Array([asPub.length]), asPub, geheim);
+}
+async function pushSenden(env, sub, nachricht) {
+  const koerper = await pushVerschluesseln(sub, JSON.stringify(nachricht));
+  const { jwt, pub } = await vapidJwt(env, sub.endpoint);
+  const r = await fetch(sub.endpoint, { method: 'POST', body: koerper, headers: {
+    'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'normal',
+    Authorization: `vapid t=${jwt}, k=${pub}` } });
+  if (r.status === 404 || r.status === 410) { await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(sub.id).run(); return 'weg'; }
+  if (!r.ok) { await env.DB.prepare('UPDATE push_subs SET fails = fails + 1 WHERE id = ?').bind(sub.id).run(); return 'fehler ' + r.status; }
+  await env.DB.prepare('UPDATE push_subs SET fails = 0 WHERE id = ?').bind(sub.id).run();
+  return 'ok';
+}
+const pushId = async endpoint => b64u(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(endpoint))).slice(0, 32);
+async function handlePush(request, env, url) {
+  await sicherePushTabellen(env);
+  if (url.pathname === '/push/public-key') return json({ key: (await vapidSchluessel(env)).pub }, env);
+  if (request.method !== 'POST') return json({ error: 'POST_ONLY' }, env, 405);
+  let body = {};
+  try { body = await request.json(); } catch (e) { return json({ error: 'BAD_JSON' }, env, 400); }
+  const sub = body.subscription || {};
+  if (!sub.endpoint || !/^https:\/\//.test(sub.endpoint)) return json({ error: 'NO_ENDPOINT' }, env, 400);
+  const id = await pushId(sub.endpoint);
+  if (url.pathname === '/push/unsubscribe') {
+    await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(id).run();
+    return json({ ok: true }, env);
+  }
+  if (url.pathname === '/push/subscribe') {
+    const keys = sub.keys || {};
+    if (!keys.p256dh || !keys.auth) return json({ error: 'NO_KEYS' }, env, 400);
+    // Betreiber-Pruefung wie /is-owner: nur das Ergebnis wird gespeichert, keine Adressen.
+    const aus = getStatsExcludedAddresses(env);
+    const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
+    const p = body.prefs || {};
+    const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
+      preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
+    await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+      ON CONFLICT(id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at`)
+      .bind(id, sub.endpoint, keys.p256dh, keys.auth, prefs, body.lang === 'de' ? 'de' : 'en', besitzer, Date.now()).run();
+    return json({ ok: true, besitzer: !!besitzer }, env);
+  }
+  if (url.pathname === '/push/test') {
+    const row = await env.DB.prepare('SELECT * FROM push_subs WHERE id = ?').bind(id).first();
+    if (!row) return json({ error: 'NOT_SUBSCRIBED' }, env, 404);
+    const de = row.lang === 'de';
+    const erg = await pushSenden(env, row, { titel: 'rune.watch', text: de ? 'Push funktioniert. So sehen Meldungen bei geschlossener App aus.' : 'Push works. This is how notifications look with the app closed.', tag: 'rw-push-test' });
+    return json({ ok: erg === 'ok', ergebnis: erg }, env);
+  }
+  return json({ error: 'NOT_FOUND' }, env, 404);
+}
+// Versand an alle Abos eines Themas; text kann eine Funktion (lang, prefs, row) sein.
+async function pushAnThema(env, thema, baue) {
+  const r = await env.DB.prepare('SELECT * FROM push_subs WHERE fails < 20').all();
+  let n = 0;
+  for (const row of r.results || []) {
+    let p = {}; try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
+    if (!p[thema]) continue;
+    const nachricht = baue(row.lang === 'de', p, row);
+    if (!nachricht) continue;
+    try { if ((await pushSenden(env, row, nachricht)) === 'ok') n++; } catch (e) {}
+  }
+  return n;
+}
+// CRON: Ereignisse erkennen und verschicken.
+async function syncPush(env) {
+  await sicherePushTabellen(env);
+  const anzahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM push_subs').first();
+  if (!Number(anzahl && anzahl.n)) return;
+  // 1) HALTS: Chains mit Handel- oder Chain-Halt laut inbound_addresses + globale Mimir-Halts.
+  try {
+    const [inb, mimir] = await Promise.all([
+      fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses').catch(() => null),
+      fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null),
+    ]);
+    if (Array.isArray(inb) && mimir) {
+      const jetzt = new Set();
+      for (const c of inb) if (c && (c.halted || c.chain_trading_paused)) jetzt.add(String(c.chain));
+      for (const [k, v] of Object.entries(mimir)) if (/^(HALTTRADING|HALTCHAINGLOBAL|HALTSIGNINGGLOBAL)$/.test(k) && Number(v) > 0) jetzt.add('GLOBAL');
+      const altRoh = await pushState(env, 'halts');
+      const alt = altRoh ? new Set(JSON.parse(altRoh)) : null;
+      if (alt) {
+        const neu = [...jetzt].filter(x => !alt.has(x)), frei = [...alt].filter(x => !jetzt.has(x));
+        if (neu.length) await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: neu.includes('GLOBAL') ? (de ? 'Handel netzweit angehalten' : 'Trading halted network-wide') : (de ? `Angehalten: ${neu.join(', ')}` : `Halted: ${neu.join(', ')}`), tag: 'rw-halt-' + neu.join('-') }));
+        if (frei.length) await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: frei.includes('GLOBAL') ? (de ? 'Handel l\u00e4uft wieder' : 'Trading resumed') : (de ? `Wieder aktiv: ${frei.join(', ')}` : `Active again: ${frei.join(', ')}`), tag: 'rw-frei-' + frei.join('-') }));
+      }
+      await pushStateSet(env, 'halts', JSON.stringify([...jetzt]));
+      // 2) UPDATES: Bond Yield freigeschaltet
+      const by = Number(mimir.BONDYIELDENABLED) > 0;
+      const byAlt = await pushState(env, 'bondyield');
+      if (byAlt === '0' && by) await pushAnThema(env, 'ops', de => ({ titel: 'THORChain', text: de ? 'Bond Yield ist freigeschaltet. Du kannst jetzt einen Teil deiner Rewards auszahlen lassen.' : 'Bond Yield is enabled. You can now have part of your rewards paid out.', tag: 'rw-bondyield' }));
+      await pushStateSet(env, 'bondyield', by ? '1' : '0');
+    }
+  } catch (e) { console.warn('[push] halts', e?.message || e); }
+  // 3) UPDATES: XMR handelbar (Pool vorhanden, Status Available)
+  try {
+    const pools = await fetchFromBases(getThornodeBases(), '/thorchain/pools').catch(() => null);
+    if (Array.isArray(pools)) {
+      const xmr = pools.some(p => /^XMR\./.test(String(p.asset)) && String(p.status) === 'Available');
+      const alt = await pushState(env, 'xmr');
+      if (alt === '0' && xmr) await pushAnThema(env, 'ops', de => ({ titel: 'THORChain', text: de ? 'Monero (XMR) ist jetzt handelbar.' : 'Monero (XMR) is now tradable.', tag: 'rw-xmr' }));
+      await pushStateSet(env, 'xmr', xmr ? '1' : '0');
+    }
+  } catch (e) {}
+  // 4) PREIS-ALARM je Abo (RUNE in USD, Midgard)
+  try {
+    const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
+    const preis = Number(st && st.runePriceUSD);
+    if (preis > 0) {
+      const r = await env.DB.prepare('SELECT * FROM push_subs WHERE fails < 20').all();
+      for (const row of r.results || []) {
+        let p = {}; try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
+        if (!p.preis) continue;
+        let z = {}; try { z = JSON.parse(row.zustand || '{}'); } catch (e) {}
+        const de = row.lang === 'de';
+        const meldungen = [];
+        if (p.preisOben > 0) { const d = preis >= p.preisOben; if (d && z.oben === false) meldungen.push({ titel: de ? `RUNE \u00fcber $${p.preisOben}` : `RUNE above $${p.preisOben}`, text: '$' + preis.toFixed(3), tag: 'rw-preis-oben' }); z.oben = d; }
+        if (p.preisUnten > 0) { const d = preis <= p.preisUnten; if (d && z.unten === false) meldungen.push({ titel: de ? `RUNE unter $${p.preisUnten}` : `RUNE below $${p.preisUnten}`, text: '$' + preis.toFixed(3), tag: 'rw-preis-unten' }); z.unten = d; }
+        for (const m of meldungen) { try { await pushSenden(env, row, m); } catch (e) {} }
+        await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(JSON.stringify(z), row.id).run();
+      }
+    }
+  } catch (e) { console.warn('[push] preis', e?.message || e); }
+  // 5) SPENDEN (nur Betreiber-Abos)
+  try {
+    await sichereDonTabellen(env);
+    const bis = Number(await pushState(env, 'spende_ms')) || 0;
+    const neu = ((await env.DB.prepare('SELECT ms, asset, betrag, usd FROM donation_history WHERE ms > ? ORDER BY ms ASC').bind(bis).all()).results || []);
+    if (bis && neu.length) {
+      for (const e of neu) {
+        await pushAnThema(env, 'spende', (de, p, row) => row.besitzer ? ({ titel: de ? 'Neue Spende \u2764' : 'New donation \u2764',
+          text: '+' + Number(e.betrag).toLocaleString('en-US', { maximumFractionDigits: e.asset === 'ETH' ? 6 : 4 }) + ' ' + e.asset + (e.usd != null ? ' \u00b7 $' + Number(e.usd).toFixed(2) : ''), tag: 'rw-spende-' + e.ms }) : null);
+      }
+    }
+    const max = neu.length ? Math.max(...neu.map(e => e.ms)) : bis;
+    if (!bis) { const m = await env.DB.prepare('SELECT MAX(ms) AS m FROM donation_history').first(); await pushStateSet(env, 'spende_ms', Number(m && m.m) || 1); }
+    else if (max > bis) await pushStateSet(env, 'spende_ms', max);
+  } catch (e) { console.warn('[push] spende', e?.message || e); }
+}
+
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -5391,6 +5601,7 @@ async function runRefreshCycle(env) {
   await schritt('Rujira TCY Kurs', () => syncRujiraKursEreignisse(env));
   await schritt('TCY native Referenz', () => syncTcyNativeReferenz(env));
   await schritt('Spenden-Verlauf', () => syncDonationHistory(env));
+  await schritt('Push', () => syncPush(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
