@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1415';
+const WORKER_VERSION = '2026-10-20-1430';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4372,7 +4372,7 @@ export default {
       if (url.pathname === '/donation-history') {
         try {
           let diag = null;
-          if (url.searchParams.get('neu') === '1') { try { diag = await syncDonationHistory(env); } catch (e) { diag = { fehler: e?.message || String(e) }; } }
+          if (url.searchParams.get('neu') === '1') { try { diag = await syncDonationHistory(env, true); } catch (e) { diag = { fehler: e?.message || String(e) }; } }
           return await handleDonationHistory(request, env, diag);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -5145,7 +5145,34 @@ async function donEintrag(env, id, ms, asset, betrag, usd, chain, tx) {
   await env.DB.prepare('INSERT OR IGNORE INTO donation_history (id, ms, asset, betrag, usd, chain, tx) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(id, Math.round(ms), asset, betrag, usd, chain, tx || null).run();
 }
-async function syncDonationHistory(env) {
+// EXPLORER-ABFRAGE (Etherscan-kompatibel): mit ETHERSCAN_API_KEY zuerst Etherscan V2 (eigenes,
+// verlaessliches Kontingent), sonst/zusaetzlich Blockscout. Blockscout und oeffentliche RPCs
+// drosseln Cloudflare-Worker oft (429, gemeldet), deshalb wird nur alle 3 Stunden abgefragt.
+async function donExplorer(env, action, adr) {
+  const fehler = [];
+  if (env.ETHERSCAN_API_KEY) {
+    try {
+      const r = await fetchWithTimeout(`https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}&address=${adr}&sort=desc&page=1&offset=200&apikey=${env.ETHERSCAN_API_KEY}`, { timeoutMs: 12000 });
+      const j = await r.json();
+      if (Array.isArray(j.result)) return { liste: j.result, quelle: 'etherscan' };
+      if (String(j.message || '').toLowerCase().includes('no transactions')) return { liste: [], quelle: 'etherscan' };
+      fehler.push('ETHERSCAN_' + (j.result || j.message || r.status));
+    } catch (e) { fehler.push('ETHERSCAN_' + (e?.message || e)); }
+  }
+  for (let versuch = 0; versuch < 2; versuch++) {
+    try {
+      const r = await fetchWithTimeout(`https://eth.blockscout.com/api?module=account&action=${action}&address=${adr}&sort=desc&page=1&offset=200`, { timeoutMs: 12000 });
+      if (r.status === 429) { fehler.push('BLOCKSCOUT_HTTP_429'); await new Promise(x => setTimeout(x, 1500)); continue; }
+      if (!r.ok) { fehler.push('BLOCKSCOUT_HTTP_' + r.status); break; }
+      const j = await r.json();
+      if (Array.isArray(j.result)) return { liste: j.result, quelle: 'blockscout' };
+      if (String(j.message || '').toLowerCase().includes('no transactions')) return { liste: [], quelle: 'blockscout' };
+      fehler.push('BLOCKSCOUT_' + (j.message || 'leer')); break;
+    } catch (e) { fehler.push('BLOCKSCOUT_' + (e?.message || e)); break; }
+  }
+  throw new Error(fehler.join(' / '));
+}
+async function syncDonationHistory(env, erzwingen = false) {
   await sichereDonTabellen(env);
   const jetzt = Date.now();
   const diag = { thor: { aktionen: 0, funde: 0, fehler: null }, usdc: { bereiche: 0, funde: 0, fehler: null }, eth: { fehler: null } };
@@ -5181,15 +5208,18 @@ async function syncDonationHistory(env) {
       await donStateSet(env, 'thor_bis', Math.max(...funde.map(f => f.ms)));
     } else if (!bekannt) await donStateSet(env, 'thor_bis', 0);
   } catch (e) { diag.thor.fehler = e?.message || String(e); console.warn('[spenden] THOR', e?.message || e); }
+  const ethZuletzt = Number(await donState(env, 'eth_at')) || 0;
+  const ethDran = erzwingen || Date.now() - ethZuletzt > 3 * 3600e3;
+  if (!ethDran) { diag.usdc.uebersprungen = true; diag.eth.uebersprungen = true; }
+  if (ethDran) {
+  await donStateSet(env, 'eth_at', Date.now());
   // --- TOKEN (USDC, USDT, DAI und andere ERC-20) ueber Blockscout tokentx: komplette Historie auf
   //     einen Schlag. Stablecoins zaehlen 1:1 in USD. Rueckfall bei Blockscout-Fehler: eth_getLogs (nur USDC).
   let tokenOk = false;
   try {
     const adr = DONATION_ETH_ADDRESS.toLowerCase();
-    const r = await fetchWithTimeout(`https://eth.blockscout.com/api?module=account&action=tokentx&address=${adr}&sort=desc&page=1&offset=200`, { timeoutMs: 12000 });
-    if (!r.ok) throw new Error('BLOCKSCOUT_HTTP_' + r.status);
-    const j = await r.json();
-    if (!Array.isArray(j.result)) throw new Error('BLOCKSCOUT_' + (j.message || 'leer'));
+    const ex = await donExplorer(env, 'tokentx', adr);
+    const j = { result: ex.liste };
     const STABIL = /^(USDC|USDT|DAI|USDS|PYUSD|FDUSD|USDE)$/i;
     let n = 0;
     for (const x of j.result) {
@@ -5203,7 +5233,7 @@ async function syncDonationHistory(env) {
       await donEintrag(env, 'tok:' + x.hash + ':' + (x.logIndex || x.transactionIndex || ''), ms, sym, betrag, STABIL.test(sym) ? betrag : null, 'ETH', x.hash);
       n++;
     }
-    diag.usdc.funde = n; diag.usdc.quelle = 'blockscout'; tokenOk = true;
+    diag.usdc.funde = n; diag.usdc.quelle = ex.quelle; tokenOk = true;
     // Eintraege der alten Log-Suche entfernen, damit nichts doppelt zaehlt.
     await env.DB.prepare("DELETE FROM donation_history WHERE id LIKE 'usdc:%'").run();
   } catch (e) { diag.usdc.blockscoutFehler = e?.message || String(e); }
@@ -5244,13 +5274,8 @@ async function syncDonationHistory(env) {
   //     Blockscout nicht antwortet: Guthaben-Erhoehungen ab jetzt (wie bisher).
   try {
     const adr = DONATION_ETH_ADDRESS.toLowerCase();
-    const holen = async action => {
-      const r = await fetchWithTimeout(`https://eth.blockscout.com/api?module=account&action=${action}&address=${adr}&sort=desc&page=1&offset=200`, { timeoutMs: 12000 });
-      if (!r.ok) throw new Error('BLOCKSCOUT_HTTP_' + r.status);
-      const j = await r.json();
-      if (!Array.isArray(j.result)) throw new Error('BLOCKSCOUT_' + (j.message || 'leer'));
-      return j.result;
-    };
+    let quelleEth = null;
+    const holen = async action => { const ex = await donExplorer(env, action, adr); quelleEth = ex.quelle; return ex.liste; };
     const [normal, intern] = await Promise.all([holen('txlist'), holen('txlistinternal').catch(() => [])]);
     const funde = [...normal.map(x => ({ ...x, _art: 'n' })), ...intern.map(x => ({ ...x, _art: 'i' }))]
       .filter(x => String(x.to || '').toLowerCase() === adr && String(x.isError || '0') === '0' && BigInt(x.value || '0') > 0n)
@@ -5266,7 +5291,7 @@ async function syncDonationHistory(env) {
     }
     // Alte Eintraege aus der Guthaben-Methode entfernen, sobald die echte Historie da ist.
     await env.DB.prepare("DELETE FROM donation_history WHERE id LIKE 'eth:%' AND tx IS NULL").run();
-    diag.eth.quelle = 'blockscout';
+    diag.eth.quelle = quelleEth;
   } catch (e) {
     diag.eth.blockscoutFehler = e?.message || String(e);
     try {
@@ -5280,6 +5305,7 @@ async function syncDonationHistory(env) {
       if (eth != null) await donStateSet(env, 'eth_letzt', eth);
       diag.eth.quelle = 'guthaben';
     } catch (e2) { diag.eth.fehler = e2?.message || String(e2); }
+  }
   }
   // Dollarwerte nachtragen, die beim Einsammeln fehlten (z. B. vor dieser Korrektur).
   try {
