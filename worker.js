@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1330';
+const WORKER_VERSION = '2026-10-20-1400';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5121,7 +5121,10 @@ const donStateSet = (env, k, v) => env.DB.prepare('INSERT OR REPLACE INTO donati
 // Tagespreise (RUNE und ETH in USD) fuer einen Zeitraum, je Tag (UTC).
 async function donPreise(vonMs, bisMs) {
   const von = Math.floor(vonMs / 1000) - 86400, bis = Math.ceil(bisMs / 1000) + 86400;
-  const j = await fetchFromBases(getMidgardBases(), `/history/depths/ETH.ETH?interval=day&from=${von}&to=${bis}`).catch(() => null);
+  // Zuerst mit Zeitraum; liefert Midgard dafuer nichts, die letzten 400 Tage (count) -- das deckt
+  // alle Spenden seit Start ab und wird von jeder Midgard-Version unterstuetzt.
+  let j = await fetchFromBases(getMidgardBases(), `/history/depths/ETH.ETH?interval=day&from=${von}&to=${bis}`).catch(() => null);
+  if (!j || !Array.isArray(j.intervals) || !j.intervals.length) j = await fetchFromBases(getMidgardBases(), `/history/depths/ETH.ETH?interval=day&count=400`).catch(() => null);
   const m = new Map();
   for (const iv of (j && j.intervals) || []) {
     const tag = new Date(Number(iv.startTime) * 1000).toISOString().slice(0, 10);
@@ -5131,7 +5134,13 @@ async function donPreise(vonMs, bisMs) {
   }
   return m;
 }
-const preisAm = (m, ms, art) => { const e = m.get(new Date(ms).toISOString().slice(0, 10)); return e ? e[art] : null; };
+const preisAm = (m, ms, art) => {
+  for (let d = 0; d <= 3; d++) {   // genauer Tag, sonst bis zu 3 Tage davor (laufender Tag fehlt oft noch)
+    const e = m.get(new Date(ms - d * 86400000).toISOString().slice(0, 10));
+    if (e && e[art]) return e[art];
+  }
+  return null;
+};
 async function donEintrag(env, id, ms, asset, betrag, usd, chain, tx) {
   await env.DB.prepare('INSERT OR IGNORE INTO donation_history (id, ms, asset, betrag, usd, chain, tx) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(id, Math.round(ms), asset, betrag, usd, chain, tx || null).run();
@@ -5202,17 +5211,49 @@ async function syncDonationHistory(env) {
     await donStateSet(env, 'usdc_unten', unten);
     await donStateSet(env, 'usdc_oben', kopf);
   } catch (e) { diag.usdc.fehler = e?.message || String(e); console.warn('[spenden] USDC', e?.message || e); }
-  // --- ETH (Guthaben-Erhoehungen ab Einbau) ---
+  // --- ETH: komplette Historie ueber Blockscout (oeffentliche, Etherscan-kompatible Schnittstelle,
+  //     ohne Schluessel). Normale Ueberweisungen (txlist) UND interne (txlistinternal) -- Letztere
+  //     sind z. B. ETH, die per THORChain-Swap ueber den Router ankommen. Rueckfall, falls
+  //     Blockscout nicht antwortet: Guthaben-Erhoehungen ab jetzt (wie bisher).
   try {
-    const eth = await fetchDonationEthBalance();
-    const letzt = await donState(env, 'eth_letzt');
-    if (eth != null && letzt != null && eth > Number(letzt) + 1e-9) {
-      const p = await fetchEthUsdPrice().catch(() => null);
-      const delta = eth - Number(letzt);
-      await donEintrag(env, 'eth:' + jetzt, jetzt, 'ETH', delta, p ? delta * p : null, 'ETH', null);
+    const adr = DONATION_ETH_ADDRESS.toLowerCase();
+    const holen = async action => {
+      const r = await fetchWithTimeout(`https://eth.blockscout.com/api?module=account&action=${action}&address=${adr}&sort=desc&page=1&offset=200`, { timeoutMs: 12000 });
+      if (!r.ok) throw new Error('BLOCKSCOUT_HTTP_' + r.status);
+      const j = await r.json();
+      if (!Array.isArray(j.result)) throw new Error('BLOCKSCOUT_' + (j.message || 'leer'));
+      return j.result;
+    };
+    const [normal, intern] = await Promise.all([holen('txlist'), holen('txlistinternal').catch(() => [])]);
+    const funde = [...normal.map(x => ({ ...x, _art: 'n' })), ...intern.map(x => ({ ...x, _art: 'i' }))]
+      .filter(x => String(x.to || '').toLowerCase() === adr && String(x.isError || '0') === '0' && BigInt(x.value || '0') > 0n)
+      .map(x => ({ ms: Number(x.timeStamp) * 1000, betrag: Number(BigInt(x.value)) / 1e18, tx: x.hash || x.transactionHash, art: x._art, idx: x.traceId || x.index || '' }))
+      .filter(x => x.ms >= DON_START_MS);
+    diag.eth.funde = funde.length;
+    if (funde.length) {
+      const preise = await donPreise(Math.min(...funde.map(f => f.ms)), jetzt);
+      for (const f of funde) {
+        const p = preisAm(preise, f.ms, 'eth');
+        await donEintrag(env, 'eth:' + f.tx + ':' + f.art + f.idx, f.ms, 'ETH', f.betrag, p ? f.betrag * p : null, 'ETH', f.tx);
+      }
     }
-    if (eth != null) await donStateSet(env, 'eth_letzt', eth);
-  } catch (e) { diag.eth.fehler = e?.message || String(e); console.warn('[spenden] ETH', e?.message || e); }
+    // Alte Eintraege aus der Guthaben-Methode entfernen, sobald die echte Historie da ist.
+    await env.DB.prepare("DELETE FROM donation_history WHERE id LIKE 'eth:%' AND tx IS NULL").run();
+    diag.eth.quelle = 'blockscout';
+  } catch (e) {
+    diag.eth.blockscoutFehler = e?.message || String(e);
+    try {
+      const eth = await fetchDonationEthBalance();
+      const letzt = await donState(env, 'eth_letzt');
+      if (eth != null && letzt != null && eth > Number(letzt) + 1e-9) {
+        const p = await fetchEthUsdPrice().catch(() => null);
+        const delta = eth - Number(letzt);
+        await donEintrag(env, 'eth:' + jetzt, jetzt, 'ETH', delta, p ? delta * p : null, 'ETH', null);
+      }
+      if (eth != null) await donStateSet(env, 'eth_letzt', eth);
+      diag.eth.quelle = 'guthaben';
+    } catch (e2) { diag.eth.fehler = e2?.message || String(e2); }
+  }
   // Dollarwerte nachtragen, die beim Einsammeln fehlten (z. B. vor dieser Korrektur).
   try {
     const offen = ((await env.DB.prepare("SELECT id, ms, asset, betrag FROM donation_history WHERE usd IS NULL AND asset IN ('RUNE', 'ETH') LIMIT 200").all()).results || []);
