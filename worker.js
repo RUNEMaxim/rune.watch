@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1315';
+const WORKER_VERSION = '2026-10-20-1330';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5125,7 +5125,9 @@ async function donPreise(vonMs, bisMs) {
   const m = new Map();
   for (const iv of (j && j.intervals) || []) {
     const tag = new Date(Number(iv.startTime) * 1000).toISOString().slice(0, 10);
-    m.set(tag, { rune: Number(iv.runePriceUSD) || null, eth: Number(iv.assetPriceUSD) || null });
+    // Midgard liefert kein runePriceUSD in der Pool-Historie: RUNE in USD = ETH-Preis in USD / ETH-Preis in RUNE.
+    const ethUsd = Number(iv.assetPriceUSD) || null, ethInRune = Number(iv.assetPrice) || null;
+    m.set(tag, { rune: ethUsd && ethInRune ? ethUsd / ethInRune : null, eth: ethUsd });
   }
   return m;
 }
@@ -5211,6 +5213,18 @@ async function syncDonationHistory(env) {
     }
     if (eth != null) await donStateSet(env, 'eth_letzt', eth);
   } catch (e) { diag.eth.fehler = e?.message || String(e); console.warn('[spenden] ETH', e?.message || e); }
+  // Dollarwerte nachtragen, die beim Einsammeln fehlten (z. B. vor dieser Korrektur).
+  try {
+    const offen = ((await env.DB.prepare("SELECT id, ms, asset, betrag FROM donation_history WHERE usd IS NULL AND asset IN ('RUNE', 'ETH') LIMIT 200").all()).results || []);
+    if (offen.length) {
+      const preise = await donPreise(Math.min(...offen.map(o => o.ms)), jetzt);
+      for (const o of offen) {
+        const p = preisAm(preise, o.ms, o.asset === 'RUNE' ? 'rune' : 'eth');
+        if (p) await env.DB.prepare('UPDATE donation_history SET usd = ? WHERE id = ?').bind(o.betrag * p, o.id).run();
+      }
+      diag.nachgetragen = offen.length;
+    }
+  } catch (e) { diag.preisFehler = e?.message || String(e); }
   return diag;
 }
 async function handleDonationHistory(request, env, diag = null) {
