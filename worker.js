@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1800';
+const WORKER_VERSION = '2026-10-20-1830';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5395,6 +5395,8 @@ async function sicherePushTabellen(env) {
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT, p256dh TEXT, auth TEXT, prefs TEXT, lang TEXT, besitzer INTEGER, at INTEGER, fails INTEGER DEFAULT 0, zustand TEXT)`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_state (k TEXT PRIMARY KEY, v TEXT)`),
   ]);
+  // Etappe 2: Adressen je Abo (fuer persoenliche Meldungen). Spalte bei bestehender Tabelle nachruesten.
+  try { await env.DB.prepare('ALTER TABLE push_subs ADD COLUMN adressen TEXT').run(); } catch (e) { /* gibt es schon */ }
   pushTabellenOk = true;
 }
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -5483,10 +5485,14 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
+      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
-    await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-      ON CONFLICT(id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at`)
-      .bind(id, sub.endpoint, keys.p256dh, keys.auth, prefs, body.lang === 'de' ? 'de' : 'en', besitzer, Date.now()).run();
+    // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
+    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname);
+    const adr = persoenlich ? [...new Set((Array.isArray(body.adressen) ? body.adressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => isValidThorAddress(a)))].slice(0, 20) : [];
+    await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+      ON CONFLICT(id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at, adressen = excluded.adressen`)
+      .bind(id, sub.endpoint, keys.p256dh, keys.auth, prefs, body.lang === 'de' ? 'de' : 'en', besitzer, Date.now(), JSON.stringify(adr)).run();
     return json({ ok: true, besitzer: !!besitzer }, env);
   }
   if (url.pathname === '/push/test') {
@@ -5585,6 +5591,82 @@ async function syncPush(env) {
     if (!bis) { const m = await env.DB.prepare('SELECT MAX(ms) AS m FROM donation_history').first(); await pushStateSet(env, 'spende_ms', Number(m && m.m) || 1); }
     else if (max > bis) await pushStateSet(env, 'spende_ms', max);
   } catch (e) { console.warn('[push] spende', e?.message || e); }
+  // 6) PERSOENLICH (Etappe 2): Nodes, Bond, Rewards, THORName je Abo mit Adressen.
+  try { await syncPushPersoenlich(env); } catch (e) { console.warn('[push] persoenlich', e?.message || e); }
+}
+const kurzNode = a => '\u2026' + String(a || '').slice(-4);
+const runeTxt = x => Number(x).toLocaleString('en-US', { maximumFractionDigits: Math.abs(x) >= 100 ? 1 : 2 });
+async function syncPushPersoenlich(env) {
+  const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
+  const subs = r.results || [];
+  if (!subs.length) return;
+  const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
+  if (!Array.isArray(nodes)) return;
+  // Letzter Churn (Midgard): Hoehe als Kennung, um Rewards dem Churn zuzuordnen.
+  const churns = await fetchFromBases(getMidgardBases(), '/churns').catch(() => null);
+  const churnH = Array.isArray(churns) && churns[0] ? String(churns[0].height) : null;
+  const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
+  const preis = Number(st && st.runePriceUSD) || null;
+  const heute = new Date().toISOString().slice(0, 10);
+  for (const row of subs) {
+    let p = {}, z = {}, adr = [];
+    try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
+    try { z = JSON.parse(row.zustand || '{}'); } catch (e) {}
+    try { adr = JSON.parse(row.adressen || '[]'); } catch (e) {}
+    if (!adr.length) continue;
+    const de = row.lang === 'de';
+    const meldungen = [];
+    const alt = z.nodes || null;            // { node: { s: status, b: bond des Providers, l: leave } }
+    const neu = {};
+    for (const n of nodes) {
+      const prov = ((n.bond_providers && n.bond_providers.providers) || []).filter(x => adr.includes(String(x.bond_address || '').toLowerCase()));
+      if (!prov.length) continue;
+      const bond = prov.reduce((q, x) => q + Number(x.bond || 0) / 1e8, 0);
+      neu[n.node_address] = { s: n.status, b: bond, l: !!n.requested_to_leave };
+    }
+    if (alt) {
+      let rewardSumme = 0;
+      const churnNeu = churnH && z.churn && churnH !== z.churn;
+      for (const [na, v] of Object.entries(neu)) {
+        const a = alt[na];
+        if (!a) continue;
+        if (p.node && a.s !== v.s) {
+          if (v.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist wieder aktiv` : `Your node ${kurzNode(na)} is active again`, tag: 'rw-node-' + na });
+          else if (a.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist nicht mehr aktiv (${v.s})` : `Your node ${kurzNode(na)} is no longer active (${v.s})`, tag: 'rw-node-' + na });
+        }
+        if (p.node && v.l && !a.l) meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)}: Austritt angefragt` : `Your node ${kurzNode(na)}: leave requested`, tag: 'rw-leave-' + na });
+        const delta = v.b - a.b;
+        if (churnNeu && delta > 0) rewardSumme += delta;
+        // Bond sinkt waehrend die Node aktiv ist und kein Churn war -> Slash.
+        else if (p.bond && !churnNeu && a.s === 'Active' && v.s === 'Active' && delta < -0.5) meldungen.push({ titel: de ? 'Slash' : 'Slash', text: `\u2212${runeTxt(-delta)} RUNE \u00b7 Node ${kurzNode(na)}`, tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
+      }
+      // Provider nicht mehr dabei (Bond zurueckgezahlt).
+      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)`, tag: 'rw-refund-' + na });
+      if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : ''), tag: 'rw-churn-' + churnH });
+    }
+    z.nodes = neu;
+    if (churnH) z.churn = churnH;
+    // THORName: einmal pro Tag pruefen, Meldung bei < 30 Tagen (einmal pro Name und Tag).
+    if (p.thorname && z.tnTag !== heute) {
+      z.tnTag = heute;
+      try {
+        const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+        const h = Array.isArray(lb) ? Math.max(...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
+        for (const a of adr) {
+          const liste = await fetchFromBases(getMidgardBases(), `/thorname/owner/${a}`).catch(() => null);
+          for (const nm of (Array.isArray(liste) ? liste : []).slice(0, 10)) {
+            const info = await fetchFromBases(getThornodeBases(), `/thorchain/thorname/${encodeURIComponent(nm)}`).catch(() => null);
+            const ex = Number(info && info.expire_block_height);
+            if (!ex || !h) continue;
+            const tage = (ex - h) * 6 / 86400;
+            if (tage > 0 && tage < 30) meldungen.push({ titel: 'THORName', text: de ? `\u201e${nm}\u201c l\u00e4uft in etwa ${Math.ceil(tage)} Tagen ab` : `"${nm}" expires in about ${Math.ceil(tage)} days`, tag: 'rw-tn-' + nm });
+          }
+        }
+      } catch (e) {}
+    }
+    for (const m of meldungen.slice(0, 5)) { try { await pushSenden(env, row, m); } catch (e) {} }
+    await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(JSON.stringify(z), row.id).run();
+  }
 }
 
 async function runRefreshCycle(env) {
