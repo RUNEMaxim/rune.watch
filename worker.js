@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1430';
+const WORKER_VERSION = '2026-10-20-1500';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5134,6 +5134,30 @@ async function donPreise(vonMs, bisMs) {
   }
   return m;
 }
+// TAGESKURS EINES BELIEBIGEN COINS ueber seinen THORChain-Pool (assetPriceUSD je Tag).
+// Secured (BTC-BTC), Trade (BTC~BTC) und Synth (BTC/BTC) werden auf den Pool BTC.BTC abgebildet,
+// ERC-20 ueber Symbol + Vertrag (ETH.USDT-0XDAC1...).
+function donPoolVon(asset, vertrag) {
+  const a = String(asset || '').toUpperCase();
+  if (vertrag) return `ETH.${a}-${String(vertrag).toUpperCase()}`;
+  if (/^THOR\./.test(a)) return a;                              // THOR.TCY, THOR.RUJI ...
+  const m = a.match(/^([A-Z0-9]+)[-~\/](.+)$/);                  // BTC-BTC, ETH~USDC-0X.., BTC/BTC
+  if (m) return `${m[1]}.${m[2]}`;
+  return a.includes('.') ? a : null;
+}
+const donPoolCache = new Map();
+async function donPoolPreis(pool, ms) {
+  if (!pool) return null;
+  if (!donPoolCache.has(pool)) {
+    const j = await fetchFromBases(getMidgardBases(), `/history/depths/${encodeURIComponent(pool)}?interval=day&count=400`).catch(() => null);
+    const m = new Map();
+    for (const iv of (j && j.intervals) || []) m.set(new Date(Number(iv.startTime) * 1000).toISOString().slice(0, 10), Number(iv.assetPriceUSD) || null);
+    donPoolCache.set(pool, m);
+  }
+  const m = donPoolCache.get(pool);
+  for (let d = 0; d <= 3; d++) { const v = m.get(new Date(ms - d * 86400000).toISOString().slice(0, 10)); if (v) return v; }
+  return null;
+}
 const preisAm = (m, ms, art) => {
   for (let d = 0; d <= 3; d++) {   // genauer Tag, sonst bis zu 3 Tage davor (laufender Tag fehlt oft noch)
     const e = m.get(new Date(ms - d * 86400000).toISOString().slice(0, 10));
@@ -5148,16 +5172,28 @@ async function donEintrag(env, id, ms, asset, betrag, usd, chain, tx) {
 // EXPLORER-ABFRAGE (Etherscan-kompatibel): mit ETHERSCAN_API_KEY zuerst Etherscan V2 (eigenes,
 // verlaessliches Kontingent), sonst/zusaetzlich Blockscout. Blockscout und oeffentliche RPCs
 // drosseln Cloudflare-Worker oft (429, gemeldet), deshalb wird nur alle 3 Stunden abgefragt.
+// Etherscan erlaubt im kostenlosen Plan 3 Abfragen pro Sekunde (gemeldet: "Max calls per sec
+// rate limit reached (3/sec)") -> Abfragen nacheinander, mindestens 450 ms Abstand, bei Limit
+// einmal kurz warten und wiederholen.
+let donEtherscanZuletzt = 0;
 async function donExplorer(env, action, adr) {
   const fehler = [];
   if (env.ETHERSCAN_API_KEY) {
-    try {
-      const r = await fetchWithTimeout(`https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}&address=${adr}&sort=desc&page=1&offset=200&apikey=${env.ETHERSCAN_API_KEY}`, { timeoutMs: 12000 });
-      const j = await r.json();
-      if (Array.isArray(j.result)) return { liste: j.result, quelle: 'etherscan' };
-      if (String(j.message || '').toLowerCase().includes('no transactions')) return { liste: [], quelle: 'etherscan' };
-      fehler.push('ETHERSCAN_' + (j.result || j.message || r.status));
-    } catch (e) { fehler.push('ETHERSCAN_' + (e?.message || e)); }
+    for (let versuch = 0; versuch < 3; versuch++) {
+      const warte = donEtherscanZuletzt + 450 - Date.now();
+      if (warte > 0) await new Promise(x => setTimeout(x, warte));
+      donEtherscanZuletzt = Date.now();
+      try {
+        const r = await fetchWithTimeout(`https://api.etherscan.io/v2/api?chainid=1&module=account&action=${action}&address=${adr}&sort=desc&page=1&offset=200&apikey=${env.ETHERSCAN_API_KEY}`, { timeoutMs: 12000 });
+        const j = await r.json();
+        if (Array.isArray(j.result)) return { liste: j.result, quelle: 'etherscan' };
+        if (String(j.message || '').toLowerCase().includes('no transactions')) return { liste: [], quelle: 'etherscan' };
+        const msg = String(j.result || j.message || r.status);
+        if (/rate limit/i.test(msg)) { await new Promise(x => setTimeout(x, 1200)); continue; }
+        fehler.push('ETHERSCAN_' + msg); break;
+      } catch (e) { fehler.push('ETHERSCAN_' + (e?.message || e)); break; }
+    }
+    if (!fehler.length) fehler.push('ETHERSCAN_rate_limit');
   }
   for (let versuch = 0; versuch < 2; versuch++) {
     try {
@@ -5202,7 +5238,8 @@ async function syncDonationHistory(env, erzwingen = false) {
       const preise = await donPreise(Math.min(...funde.map(f => f.ms)), jetzt);
       for (const f of funde) {
         const runeUsd = preisAm(preise, f.ms, 'rune');
-        const usd = /^THOR\.RUNE$/i.test(f.asset) ? (runeUsd ? f.betrag * runeUsd : null) : /USD/i.test(f.asset) ? f.betrag : null;
+        let usd = /^THOR\.RUNE$/i.test(f.asset) ? (runeUsd ? f.betrag * runeUsd : null) : null;
+        if (usd == null) { const p = await donPoolPreis(donPoolVon(f.asset), f.ms); if (p) usd = f.betrag * p; }
         await donEintrag(env, 'thor:' + f.tx + ':' + f.asset, f.ms, f.asset.replace(/^THOR\./, ''), f.betrag, usd, 'THOR', f.tx);
       }
       await donStateSet(env, 'thor_bis', Math.max(...funde.map(f => f.ms)));
@@ -5230,7 +5267,9 @@ async function syncDonationHistory(env, erzwingen = false) {
       const betrag = Number(BigInt(x.value || '0')) / Math.pow(10, dez);
       if (!(betrag > 0)) continue;
       const sym = String(x.tokenSymbol || 'TOKEN').toUpperCase().slice(0, 12);
-      await donEintrag(env, 'tok:' + x.hash + ':' + (x.logIndex || x.transactionIndex || ''), ms, sym, betrag, STABIL.test(sym) ? betrag : null, 'ETH', x.hash);
+      let usdTok = STABIL.test(sym) ? betrag : null;
+      if (usdTok == null) { const p = await donPoolPreis(donPoolVon(sym, x.contractAddress), ms); if (p) usdTok = betrag * p; }
+      await donEintrag(env, 'tok:' + x.hash + ':' + (x.logIndex || x.transactionIndex || ''), ms, sym, betrag, usdTok, 'ETH', x.hash);
       n++;
     }
     diag.usdc.funde = n; diag.usdc.quelle = ex.quelle; tokenOk = true;
@@ -5276,7 +5315,8 @@ async function syncDonationHistory(env, erzwingen = false) {
     const adr = DONATION_ETH_ADDRESS.toLowerCase();
     let quelleEth = null;
     const holen = async action => { const ex = await donExplorer(env, action, adr); quelleEth = ex.quelle; return ex.liste; };
-    const [normal, intern] = await Promise.all([holen('txlist'), holen('txlistinternal').catch(() => [])]);
+    const normal = await holen('txlist');
+    const intern = await holen('txlistinternal').catch(() => []);
     const funde = [...normal.map(x => ({ ...x, _art: 'n' })), ...intern.map(x => ({ ...x, _art: 'i' }))]
       .filter(x => String(x.to || '').toLowerCase() === adr && String(x.isError || '0') === '0' && BigInt(x.value || '0') > 0n)
       .map(x => ({ ms: Number(x.timeStamp) * 1000, betrag: Number(BigInt(x.value)) / 1e18, tx: x.hash || x.transactionHash, art: x._art, idx: x.traceId || x.index || '' }))
