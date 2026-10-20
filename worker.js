@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1230';
+const WORKER_VERSION = '2026-10-20-1315';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4371,8 +4371,9 @@ export default {
       }
       if (url.pathname === '/donation-history') {
         try {
-          if (url.searchParams.get('neu') === '1') { try { await syncDonationHistory(env); } catch (e) {} }
-          return await handleDonationHistory(request, env);
+          let diag = null;
+          if (url.searchParams.get('neu') === '1') { try { diag = await syncDonationHistory(env); } catch (e) { diag = { fehler: e?.message || String(e) }; } }
+          return await handleDonationHistory(request, env, diag);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/tcy-native-ref') {
@@ -5136,6 +5137,7 @@ async function donEintrag(env, id, ms, asset, betrag, usd, chain, tx) {
 async function syncDonationHistory(env) {
   await sichereDonTabellen(env);
   const jetzt = Date.now();
+  const diag = { thor: { aktionen: 0, funde: 0, fehler: null }, usdc: { bereiche: 0, funde: 0, fehler: null }, eth: { fehler: null } };
   // --- THOR (RUNE und andere native Coins an die THOR-Adresse) ---
   try {
     let token = '', seiten = 0; const funde = [];
@@ -5143,6 +5145,7 @@ async function syncDonationHistory(env) {
     while (seiten++ < 6) {
       const j = await fetchFromBases(getMidgardBases(), `/actions?address=${DONATION_THOR_ADDRESS}&limit=50${token ? `&nextPageToken=${token}` : ''}`);
       let alt = false;
+      diag.thor.aktionen += ((j && j.actions) || []).length;
       for (const a of (j && j.actions) || []) {
         const ms = Number(a.date) / 1e6;
         if (bekannt && ms <= Number(bekannt)) { alt = true; continue; }
@@ -5156,6 +5159,7 @@ async function syncDonationHistory(env) {
       token = j && j.meta && j.meta.nextPageToken;
       if (!token || alt) break;
     }
+    diag.thor.funde = funde.length;
     if (funde.length) {
       const preise = await donPreise(Math.min(...funde.map(f => f.ms)), jetzt);
       for (const f of funde) {
@@ -5165,7 +5169,7 @@ async function syncDonationHistory(env) {
       }
       await donStateSet(env, 'thor_bis', Math.max(...funde.map(f => f.ms)));
     } else if (!bekannt) await donStateSet(env, 'thor_bis', 0);
-  } catch (e) { console.warn('[spenden] THOR', e?.message || e); }
+  } catch (e) { diag.thor.fehler = e?.message || String(e); console.warn('[spenden] THOR', e?.message || e); }
   // --- USDC (ERC-20 Transfers an die ETH-Adresse), blockweise rueckwaerts bis DON_START ---
   try {
     const rpc = async (method, params) => {
@@ -5181,6 +5185,7 @@ async function syncDonationHistory(env) {
     if (kopf > oben) bereiche.push([oben + 1, kopf]);
     for (let i = 0; i < 4 && unten > startBlock; i++) { const von = Math.max(startBlock, unten - 9000); bereiche.push([von, unten - 1]); unten = von; }
     const blockZeit = new Map();
+    diag.usdc.bereiche = bereiche.length;
     for (const [von, bis] of bereiche) {
       if (bis < von) continue;
       const logs = await rpc('eth_getLogs', [{ address: USDC_CONTRACT_ADDRESS, topics: [ERC20_TRANSFER, null, zielTopic], fromBlock: '0x' + von.toString(16), toBlock: '0x' + bis.toString(16) }]);
@@ -5188,12 +5193,13 @@ async function syncDonationHistory(env) {
         const bn = parseInt(l.blockNumber, 16);
         if (!blockZeit.has(bn)) { const b = await rpc('eth_getBlockByNumber', ['0x' + bn.toString(16), false]); blockZeit.set(bn, parseInt(b.timestamp, 16) * 1000); }
         const betrag = parseInt(l.data, 16) / 1e6;
+        diag.usdc.funde++;
         await donEintrag(env, 'usdc:' + l.transactionHash + ':' + parseInt(l.logIndex, 16), blockZeit.get(bn), 'USDC', betrag, betrag, 'ETH', l.transactionHash);
       }
     }
     await donStateSet(env, 'usdc_unten', unten);
     await donStateSet(env, 'usdc_oben', kopf);
-  } catch (e) { console.warn('[spenden] USDC', e?.message || e); }
+  } catch (e) { diag.usdc.fehler = e?.message || String(e); console.warn('[spenden] USDC', e?.message || e); }
   // --- ETH (Guthaben-Erhoehungen ab Einbau) ---
   try {
     const eth = await fetchDonationEthBalance();
@@ -5204,9 +5210,10 @@ async function syncDonationHistory(env) {
       await donEintrag(env, 'eth:' + jetzt, jetzt, 'ETH', delta, p ? delta * p : null, 'ETH', null);
     }
     if (eth != null) await donStateSet(env, 'eth_letzt', eth);
-  } catch (e) { console.warn('[spenden] ETH', e?.message || e); }
+  } catch (e) { diag.eth.fehler = e?.message || String(e); console.warn('[spenden] ETH', e?.message || e); }
+  return diag;
 }
-async function handleDonationHistory(request, env) {
+async function handleDonationHistory(request, env, diag = null) {
   await sichereDonTabellen(env);
   const r = await env.DB.prepare('SELECT ms, asset, betrag, usd, chain, tx FROM donation_history ORDER BY ms DESC LIMIT 500').all();
   const monate = new Map();
@@ -5217,7 +5224,7 @@ async function handleDonationHistory(request, env) {
     m.eintraege.push({ ms: z.ms, asset: z.asset, betrag: z.betrag, usd: z.usd, chain: z.chain, tx: z.tx });
     monate.set(monat, m);
   }
-  return json({ monate: [...monate.values()] }, env);
+  return json(diag ? { monate: [...monate.values()], diag } : { monate: [...monate.values()] }, env);
 }
 
 async function runRefreshCycle(env) {
