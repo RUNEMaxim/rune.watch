@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-19-1815';
+const WORKER_VERSION = '2026-10-20-1230';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4369,6 +4369,12 @@ export default {
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
+      if (url.pathname === '/donation-history') {
+        try {
+          if (url.searchParams.get('neu') === '1') { try { await syncDonationHistory(env); } catch (e) {} }
+          return await handleDonationHistory(request, env);
+        } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/tcy-native-ref') {
         try { return await handleTcyNativeRef(request, env); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -5087,6 +5093,133 @@ async function handleTcyNativeRef(request, env) {
   return json({ referenz: ref ? JSON.parse(ref.v) : null, tage: (r.results || []).map(z => ({ tag: z.tag, ms: z.ms, runeProTcy: z.rune_pro_tcy })) }, env);
 }
 
+// =====================================================================================
+// SPENDEN-VERLAUF (oeffentlich, ohne Absender): jede einzelne Spende mit Zeitpunkt, Betrag
+// und Dollarwert ZUM ZEITPUNKT der Spende.
+//   RUNE/THOR: Midgard /actions an DONATION_THOR_ADDRESS (send und Swaps mit diesem Ziel;
+//              Format send: in = Absender, out = Empfaenger, laut echten Midgard-Antworten)
+//   USDC (ETH): eth_getLogs Transfer-Ereignisse an DONATION_ETH_ADDRESS, rueckwaerts in Bloecken
+//   ETH:        kein Verzeichnis eingehender ETH-Zahlungen -> jede Erhoehung des Guthabens wird
+//               mit Zeitpunkt gespeichert (ab Einbau)
+// Preise: Midgard /history/depths/ETH.ETH (runePriceUSD, assetPriceUSD) je Tag.
+// GET /donation-history -> { monate: [{ monat, usd, eintraege: [{ ms, asset, betrag, usd, tx, chain }] }] }
+// =====================================================================================
+const DON_START_MS = Date.UTC(2026, 7, 1);
+const ERC20_TRANSFER = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+let donTabellenOk = false;
+async function sichereDonTabellen(env) {
+  if (donTabellenOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS donation_history (id TEXT PRIMARY KEY, ms INTEGER, asset TEXT, betrag REAL, usd REAL, chain TEXT, tx TEXT)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS donation_state (k TEXT PRIMARY KEY, v TEXT)`),
+  ]);
+  donTabellenOk = true;
+}
+const donState = async (env, k) => { const r = await env.DB.prepare('SELECT v FROM donation_state WHERE k = ?').bind(k).first(); return r ? r.v : null; };
+const donStateSet = (env, k, v) => env.DB.prepare('INSERT OR REPLACE INTO donation_state (k, v) VALUES (?, ?)').bind(k, String(v)).run();
+// Tagespreise (RUNE und ETH in USD) fuer einen Zeitraum, je Tag (UTC).
+async function donPreise(vonMs, bisMs) {
+  const von = Math.floor(vonMs / 1000) - 86400, bis = Math.ceil(bisMs / 1000) + 86400;
+  const j = await fetchFromBases(getMidgardBases(), `/history/depths/ETH.ETH?interval=day&from=${von}&to=${bis}`).catch(() => null);
+  const m = new Map();
+  for (const iv of (j && j.intervals) || []) {
+    const tag = new Date(Number(iv.startTime) * 1000).toISOString().slice(0, 10);
+    m.set(tag, { rune: Number(iv.runePriceUSD) || null, eth: Number(iv.assetPriceUSD) || null });
+  }
+  return m;
+}
+const preisAm = (m, ms, art) => { const e = m.get(new Date(ms).toISOString().slice(0, 10)); return e ? e[art] : null; };
+async function donEintrag(env, id, ms, asset, betrag, usd, chain, tx) {
+  await env.DB.prepare('INSERT OR IGNORE INTO donation_history (id, ms, asset, betrag, usd, chain, tx) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(id, Math.round(ms), asset, betrag, usd, chain, tx || null).run();
+}
+async function syncDonationHistory(env) {
+  await sichereDonTabellen(env);
+  const jetzt = Date.now();
+  // --- THOR (RUNE und andere native Coins an die THOR-Adresse) ---
+  try {
+    let token = '', seiten = 0; const funde = [];
+    const bekannt = await donState(env, 'thor_bis');
+    while (seiten++ < 6) {
+      const j = await fetchFromBases(getMidgardBases(), `/actions?address=${DONATION_THOR_ADDRESS}&limit=50${token ? `&nextPageToken=${token}` : ''}`);
+      let alt = false;
+      for (const a of (j && j.actions) || []) {
+        const ms = Number(a.date) / 1e6;
+        if (bekannt && ms <= Number(bekannt)) { alt = true; continue; }
+        if (a.status && a.status !== 'success') continue;
+        if ((a.in || []).some(i => i && i.address === DONATION_THOR_ADDRESS)) continue; // eigene Ausgaenge
+        for (const o of (a.out || [])) {
+          if (!o || o.address !== DONATION_THOR_ADDRESS) continue;
+          for (const c of o.coins || []) funde.push({ ms, asset: String(c.asset || ''), betrag: Number(c.amount) / 1e8, tx: o.txID || (a.in && a.in[0] && a.in[0].txID) || '' });
+        }
+      }
+      token = j && j.meta && j.meta.nextPageToken;
+      if (!token || alt) break;
+    }
+    if (funde.length) {
+      const preise = await donPreise(Math.min(...funde.map(f => f.ms)), jetzt);
+      for (const f of funde) {
+        const runeUsd = preisAm(preise, f.ms, 'rune');
+        const usd = /^THOR\.RUNE$/i.test(f.asset) ? (runeUsd ? f.betrag * runeUsd : null) : /USD/i.test(f.asset) ? f.betrag : null;
+        await donEintrag(env, 'thor:' + f.tx + ':' + f.asset, f.ms, f.asset.replace(/^THOR\./, ''), f.betrag, usd, 'THOR', f.tx);
+      }
+      await donStateSet(env, 'thor_bis', Math.max(...funde.map(f => f.ms)));
+    } else if (!bekannt) await donStateSet(env, 'thor_bis', 0);
+  } catch (e) { console.warn('[spenden] THOR', e?.message || e); }
+  // --- USDC (ERC-20 Transfers an die ETH-Adresse), blockweise rueckwaerts bis DON_START ---
+  try {
+    const rpc = async (method, params) => {
+      const r = await fetchWithTimeout(ETH_RPC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), timeoutMs: 10000 });
+      const j = await r.json(); if (j.error) throw new Error(j.error.message || 'RPC'); return j.result;
+    };
+    const kopf = parseInt(await rpc('eth_blockNumber', []), 16);
+    const zielTopic = '0x' + DONATION_ETH_ADDRESS.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+    const startBlock = kopf - Math.ceil((jetzt - DON_START_MS) / 12000);
+    let unten = Number(await donState(env, 'usdc_unten')) || kopf;   // bis hierhin rueckwaerts gescannt
+    let oben = Number(await donState(env, 'usdc_oben')) || kopf;     // ab hier vorwaerts neu
+    const bereiche = [];
+    if (kopf > oben) bereiche.push([oben + 1, kopf]);
+    for (let i = 0; i < 4 && unten > startBlock; i++) { const von = Math.max(startBlock, unten - 9000); bereiche.push([von, unten - 1]); unten = von; }
+    const blockZeit = new Map();
+    for (const [von, bis] of bereiche) {
+      if (bis < von) continue;
+      const logs = await rpc('eth_getLogs', [{ address: USDC_CONTRACT_ADDRESS, topics: [ERC20_TRANSFER, null, zielTopic], fromBlock: '0x' + von.toString(16), toBlock: '0x' + bis.toString(16) }]);
+      for (const l of logs || []) {
+        const bn = parseInt(l.blockNumber, 16);
+        if (!blockZeit.has(bn)) { const b = await rpc('eth_getBlockByNumber', ['0x' + bn.toString(16), false]); blockZeit.set(bn, parseInt(b.timestamp, 16) * 1000); }
+        const betrag = parseInt(l.data, 16) / 1e6;
+        await donEintrag(env, 'usdc:' + l.transactionHash + ':' + parseInt(l.logIndex, 16), blockZeit.get(bn), 'USDC', betrag, betrag, 'ETH', l.transactionHash);
+      }
+    }
+    await donStateSet(env, 'usdc_unten', unten);
+    await donStateSet(env, 'usdc_oben', kopf);
+  } catch (e) { console.warn('[spenden] USDC', e?.message || e); }
+  // --- ETH (Guthaben-Erhoehungen ab Einbau) ---
+  try {
+    const eth = await fetchDonationEthBalance();
+    const letzt = await donState(env, 'eth_letzt');
+    if (eth != null && letzt != null && eth > Number(letzt) + 1e-9) {
+      const p = await fetchEthUsdPrice().catch(() => null);
+      const delta = eth - Number(letzt);
+      await donEintrag(env, 'eth:' + jetzt, jetzt, 'ETH', delta, p ? delta * p : null, 'ETH', null);
+    }
+    if (eth != null) await donStateSet(env, 'eth_letzt', eth);
+  } catch (e) { console.warn('[spenden] ETH', e?.message || e); }
+}
+async function handleDonationHistory(request, env) {
+  await sichereDonTabellen(env);
+  const r = await env.DB.prepare('SELECT ms, asset, betrag, usd, chain, tx FROM donation_history ORDER BY ms DESC LIMIT 500').all();
+  const monate = new Map();
+  for (const z of r.results || []) {
+    const monat = new Date(z.ms).toISOString().slice(0, 7);
+    const m = monate.get(monat) || { monat, usd: 0, eintraege: [] };
+    m.usd += Number(z.usd) || 0;
+    m.eintraege.push({ ms: z.ms, asset: z.asset, betrag: z.betrag, usd: z.usd, chain: z.chain, tx: z.tx });
+    monate.set(monat, m);
+  }
+  return json({ monate: [...monate.values()] }, env);
+}
+
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -5100,6 +5233,7 @@ async function runRefreshCycle(env) {
   await schritt('Rujira TCY', () => syncRujiraTcyDaily(env));
   await schritt('Rujira TCY Kurs', () => syncRujiraKursEreignisse(env));
   await schritt('TCY native Referenz', () => syncTcyNativeReferenz(env));
+  await schritt('Spenden-Verlauf', () => syncDonationHistory(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
