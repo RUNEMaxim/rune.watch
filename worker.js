@@ -1734,7 +1734,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1500';
+const WORKER_VERSION = '2026-10-20-1515';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5180,7 +5180,7 @@ async function donExplorer(env, action, adr) {
   const fehler = [];
   if (env.ETHERSCAN_API_KEY) {
     for (let versuch = 0; versuch < 3; versuch++) {
-      const warte = donEtherscanZuletzt + 450 - Date.now();
+      const warte = donEtherscanZuletzt + 700 - Date.now();
       if (warte > 0) await new Promise(x => setTimeout(x, warte));
       donEtherscanZuletzt = Date.now();
       try {
@@ -5189,7 +5189,7 @@ async function donExplorer(env, action, adr) {
         if (Array.isArray(j.result)) return { liste: j.result, quelle: 'etherscan' };
         if (String(j.message || '').toLowerCase().includes('no transactions')) return { liste: [], quelle: 'etherscan' };
         const msg = String(j.result || j.message || r.status);
-        if (/rate limit/i.test(msg)) { await new Promise(x => setTimeout(x, 1200)); continue; }
+        if (/rate limit/i.test(msg)) { await new Promise(x => setTimeout(x, 1500 * (versuch + 1))); continue; }
         fehler.push('ETHERSCAN_' + msg); break;
       } catch (e) { fehler.push('ETHERSCAN_' + (e?.message || e)); break; }
     }
@@ -5211,7 +5211,7 @@ async function donExplorer(env, action, adr) {
 async function syncDonationHistory(env, erzwingen = false) {
   await sichereDonTabellen(env);
   const jetzt = Date.now();
-  const diag = { thor: { aktionen: 0, funde: 0, fehler: null }, usdc: { bereiche: 0, funde: 0, fehler: null }, eth: { fehler: null } };
+  const diag = { version: WORKER_VERSION, thor: { aktionen: 0, funde: 0, fehler: null }, usdc: { bereiche: 0, funde: 0, fehler: null }, eth: { fehler: null } };
   // --- THOR (RUNE und andere native Coins an die THOR-Adresse) ---
   try {
     let token = '', seiten = 0; const funde = [];
@@ -5372,7 +5372,9 @@ async function handleDonationHistory(request, env, diag = null) {
     m.eintraege.push({ ms: z.ms, asset: z.asset, betrag: z.betrag, usd: z.usd, chain: z.chain, tx: z.tx });
     monate.set(monat, m);
   }
-  return json(diag ? { monate: [...monate.values()], diag } : { monate: [...monate.values()] }, env);
+  const antwort = json(diag ? { monate: [...monate.values()], diag } : { monate: [...monate.values()] }, env);
+  try { antwort.headers.set('Cache-Control', 'no-store'); } catch (e) {}
+  return antwort;
 }
 
 async function runRefreshCycle(env) {
