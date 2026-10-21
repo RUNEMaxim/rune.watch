@@ -1095,11 +1095,28 @@ function recordVisitor(env, ctx, token, hasWallet) {
   );
 }
 
-function recordSyncActivity(env, ctx, address) {
+// AKTIV/PASSIV: Die App haengt ?a=1 (Nutzer hat in den letzten 5 Minuten bei sichtbarer Seite
+// etwas getan) bzw. ?a=0 (Tab offen im Hintergrund, Timer) an. Fehlt der Parameter (alte App),
+// wird nur wie bisher gezaehlt. Tabelle sync_activity_art: je Adresse und Tag aktive/passive
+// Aufrufe -- daraus "aktive Tage" fuer echte Power-User.
+let syncArtTabelleOk = false;
+function recordSyncActivity(env, ctx, address, request = null) {
   if (!env.DB || !ctx || typeof ctx.waitUntil !== 'function') return;
   if (getStatsExcludedAddresses(env).has(String(address || '').toLowerCase())) return;
   const now = Date.now();
   const day = utcDayString(now);
+  let art = null;
+  try { const a = request ? new URL(request.url).searchParams.get('a') : null; if (a === '1') art = 'aktiv'; else if (a === '0') art = 'passiv'; } catch (e) {}
+  if (art) {
+    ctx.waitUntil((async () => {
+      try {
+        if (!syncArtTabelleOk) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS sync_activity_art (address TEXT, day TEXT, aktiv INTEGER DEFAULT 0, passiv INTEGER DEFAULT 0, PRIMARY KEY (address, day))').run(); syncArtTabelleOk = true; }
+        await env.DB.prepare(`INSERT INTO sync_activity_art (address, day, aktiv, passiv) VALUES (?, ?, ?, ?)
+          ON CONFLICT(address, day) DO UPDATE SET aktiv = aktiv + excluded.aktiv, passiv = passiv + excluded.passiv`)
+          .bind(address, day, art === 'aktiv' ? 1 : 0, art === 'passiv' ? 1 : 0).run();
+      } catch (e) { console.warn('[rune-rewards-backend] sync_activity_art:', e?.message || e); }
+    })());
+  }
 
   const dedupTask = env.DB
     .prepare('INSERT OR IGNORE INTO sync_activity_days (address, day, first_seen_at) VALUES (?, ?, ?)')
@@ -1143,7 +1160,7 @@ async function handlePurchases(request, env, ctx) {
   if (!isValidThorAddress(address)) {
     return json({ error: 'INVALID_ADDRESS' }, env, 400);
   }
-  recordSyncActivity(env, ctx, address);
+  recordSyncActivity(env, ctx, address, request);
 
   if (request.method === 'GET') {
     const row = await env.DB
@@ -1254,7 +1271,7 @@ async function handleWallets(request, env, ctx) {
   if (!isValidThorAddress(address)) {
     return json({ error: 'INVALID_ADDRESS' }, env, 400);
   }
-  recordSyncActivity(env, ctx, address);
+  recordSyncActivity(env, ctx, address, request);
 
   if (request.method === 'GET') {
     const row = await env.DB
@@ -1357,7 +1374,7 @@ async function handleDrawings(request, env, ctx) {
   if (!chart || typeof chart !== 'string' || chart.length > 200) {
     return json({ error: 'INVALID_CHART' }, env, 400);
   }
-  recordSyncActivity(env, ctx, address);
+  recordSyncActivity(env, ctx, address, request);
 
   if (request.method === 'GET') {
     const row = await env.DB
@@ -1472,7 +1489,7 @@ async function handleSwapHistory(request, env, ctx) {
   if (!isValidThorAddress(address)) {
     return json({ error: 'INVALID_ADDRESS' }, env, 400);
   }
-  recordSyncActivity(env, ctx, address);
+  recordSyncActivity(env, ctx, address, request);
 
   if (request.method === 'GET') {
     const rows = await env.DB
@@ -1734,7 +1751,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-20-1830';
+const WORKER_VERSION = '2026-10-21-1915';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -1918,6 +1935,37 @@ async function handleStats(request, env) {
   stats.walletShareLast1d = walletPct(stats.visitorsWithWalletLast1d, stats.visitorsLast1d);
   stats.walletShareLast30d = walletPct(stats.visitorsWithWalletLast30d, stats.visitorsLast30d);
 
+  // KOHORTEN: Adressen nach Woche ihres ersten Syncs; je Kohorte der Anteil, der in Woche
+  // 0, 1, 2 ... danach wieder aktiv war. Zeigt, ob neue Nutzer bleiben.
+  try {
+    const rows = ((await env.DB.prepare(`SELECT address, day FROM sync_activity_days WHERE 1=1${exclSql}`).bind(...excl).all()).results) || [];
+    const startMs = stats.trackingSince ? Date.parse(stats.trackingSince + 'T00:00:00Z') : null;
+    if (startMs && rows.length) {
+      const woche = d => Math.floor((Date.parse(d + 'T00:00:00Z') - startMs) / (7 * 86400000));
+      const jeAdresse = new Map();
+      for (const r of rows) { const w = woche(r.day); const e = jeAdresse.get(r.address) || { erste: w, wochen: new Set() }; e.erste = Math.min(e.erste, w); e.wochen.add(w); jeAdresse.set(r.address, e); }
+      const aktuell = woche(utcDayString(now));
+      const kohorten = new Map();
+      for (const e of jeAdresse.values()) { const k = kohorten.get(e.erste) || []; k.push(e); kohorten.set(e.erste, k); }
+      stats.kohorten = [...kohorten.entries()].sort((a, b) => a[0] - b[0]).map(([w, liste]) => ({
+        woche: w, start: utcDayString(startMs + w * 7 * 86400000), n: liste.length,
+        anteile: Array.from({ length: Math.min(9, aktuell - w + 1) }, (_, k) => Math.round(liste.filter(e => e.wochen.has(w + k)).length / liste.length * 1000) / 10),
+      }));
+    }
+  } catch (e) { stats.kohorten = null; }
+  // AKTIV/PASSIV (ab Einbau): aktive vs. passive Aufrufe, Adressen mit aktiven Tagen.
+  try {
+    const exclArt = excl.length ? ` AND LOWER(address) NOT IN (${excl.map(() => '?').join(',')})` : '';
+    const [a1, a30, tage, seit] = await Promise.all([
+      env.DB.prepare(`SELECT COALESCE(SUM(aktiv),0) AS a, COALESCE(SUM(passiv),0) AS p, COUNT(DISTINCT CASE WHEN aktiv > 0 THEN address END) AS na FROM sync_activity_art WHERE day >= ?${exclArt}`).bind(day1, ...excl).first(),
+      env.DB.prepare(`SELECT COALESCE(SUM(aktiv),0) AS a, COALESCE(SUM(passiv),0) AS p, COUNT(DISTINCT CASE WHEN aktiv > 0 THEN address END) AS na FROM sync_activity_art WHERE day >= ?${exclArt}`).bind(day30, ...excl).first(),
+      env.DB.prepare(`SELECT SUM(CASE WHEN d >= 2 THEN 1 ELSE 0 END) AS n2, SUM(CASE WHEN d >= 5 THEN 1 ELSE 0 END) AS n5, SUM(CASE WHEN d >= 10 THEN 1 ELSE 0 END) AS n10, COUNT(*) AS n1
+        FROM (SELECT address, COUNT(*) AS d FROM sync_activity_art WHERE aktiv > 0${exclArt} GROUP BY address)`).bind(...excl).first(),
+      env.DB.prepare('SELECT MIN(day) AS d FROM sync_activity_art').first(),
+    ]);
+    stats.aktivPassiv = { seit: seit && seit.d, h24: a1, d30: a30, aktiveTage: tage };
+  } catch (e) { stats.aktivPassiv = null; }
+
   const wantsHtml = (request.headers.get('Accept') || '').includes('text/html');
   if (!wantsHtml) {
     return json(stats, env);
@@ -2078,6 +2126,37 @@ async function handleStats(request, env) {
             </div>`).join('')}
           <div class="tile-hint" style="margin-top:8px;">Share of all recorded addresses (<span id="v-depth-base">${stats.depthBase}</span>) that synced on at least X separate days since recording began. Each step is contained in the one above.</div>
         </div>
+        ${(() => {
+          const ap = stats.aktivPassiv;
+          if (!ap || !ap.seit) return `<div class="tile wide"><div class="tile-label" style="margin-top:0;">Active vs. passive syncs</div><div class="tile-hint" style="margin-top:6px;">Recording starts with the next app version (needs ?a=1/0 from the app).</div></div>`;
+          const quote = (a, p) => (a + p) > 0 ? Math.round(a / (a + p) * 1000) / 10 + '%' : '—';
+          const t = ap.aktiveTage || {};
+          return `<div class="tile wide">
+            <div class="tile-label" style="margin-top:0; margin-bottom:10px;">Active vs. passive syncs <span style="opacity:.6">(since ${deDate(ap.seit)})</span></div>
+            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:10px;">
+              <div><div class="tile-value" style="font-size:26px;">${quote(ap.h24.a, ap.h24.p)}</div><div class="tile-hint">active share, 24h<br>${ap.h24.a} active · ${ap.h24.p} passive</div></div>
+              <div><div class="tile-value" style="font-size:26px;">${ap.h24.na}</div><div class="tile-hint">addresses with an active sync, 24h</div></div>
+              <div><div class="tile-value" style="font-size:26px;">${ap.d30.na}</div><div class="tile-hint">addresses with an active sync, 30d</div></div>
+            </div>
+            <div class="tile-label" style="margin:14px 0 8px;">Active days per address</div>
+            ${[['1', t.n1], ['2', t.n2], ['5', t.n5], ['10', t.n10]].map(([d, n]) => `<div class="depth-row"><div class="depth-label">≥ ${d} days</div><div class="depth-bar-track"><div class="depth-bar-fill" style="width:${t.n1 ? Math.round((n || 0) / t.n1 * 100) : 0}%"></div></div><div class="depth-pct">${n || 0}</div><div class="depth-count"></div></div>`).join('')}
+            <div class="tile-hint" style="margin-top:8px;">Active = the user did something on a visible page within 5 minutes before the sync. Passive = tab open in the background, timers. Real power users have many active days.</div>
+          </div>`;
+        })()}
+        ${(() => {
+          const k = stats.kohorten;
+          if (!k || !k.length) return '';
+          const maxW = Math.max(...k.map(x => x.anteile.length));
+          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:5px 4px; border-radius:6px; background:rgba(45,212,191,${Math.max(0.06, v / 100 * 0.85)}); color:${v > 45 ? '#04201c' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
+          return `<div class="tile wide">
+            <div class="tile-label" style="margin-top:0; margin-bottom:10px;">Cohorts by first week</div>
+            <div style="overflow-x:auto;"><table style="border-collapse:separate; border-spacing:3px; width:100%; font-size:12px;">
+              <tr><th style="text-align:left; opacity:.6; font-weight:500;">week of</th><th style="opacity:.6; font-weight:500;">n</th>${Array.from({ length: maxW }, (_, i) => `<th style="opacity:.6; font-weight:500;">W${i}</th>`).join('')}</tr>
+              ${k.map(x => `<tr><td style="white-space:nowrap; padding-right:6px;">${deDate(x.start)}</td><td style="text-align:center; opacity:.8;">${x.n}</td>${Array.from({ length: maxW }, (_, i) => zelle(x.anteile[i])).join('')}</tr>`).join('')}
+            </table></div>
+            <div class="tile-hint" style="margin-top:8px;">Addresses grouped by the week of their first sync (n). W1, W2 … = share (%) of that group that synced again 1, 2 … weeks later. W0 is always 100.</div>
+          </div>`;
+        })()}
       </div>
       <div class="swipe-hint">← swipe for visitors →</div>
     </section>
