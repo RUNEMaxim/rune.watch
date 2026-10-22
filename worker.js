@@ -4176,7 +4176,7 @@ async function handleMemoless(request, env) {
   // Hintergrund: Der oeffentliche Dienst auf api.thorchain.org haengt beim Registrieren sein
   // eigenes Affiliate "uws" (1 bps) an jeden Swap-Memo -- das ist dort eine Betreiber-
   // Einstellung (INJECT_AFFILIATE_IN_SWAPS / AFFILIATE_THORNAME), belegt durch Midgard und den
-  // Quellcode (github.com/familiarcow/thorchain-memoless-api). Wer nur "maxim" im Memo will,
+  // Quellcode (github.com/familiarcow/thorchain-memoless-api). Wer nur "runewatch" im Memo will,
   // betreibt eine eigene Instanz mit INJECT_AFFILIATE_IN_SWAPS=false.
   //
   //   MEMOLESS_UPSTREAM   Adresse der eigenen Instanz, z.B. https://.../api/v1
