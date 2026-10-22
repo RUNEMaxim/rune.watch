@@ -1751,7 +1751,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-21-1915';
+const WORKER_VERSION = '2026-10-21-1930';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2083,11 +2083,23 @@ async function handleStats(request, env) {
     border-left: 2px solid #1f2b35; padding-left: 11px; max-width: 480px;
   }
   .swipe-hint { font-size: 10.5px; color: #3f4f59; text-align: center; margin-top: 8px; }
+  /* REITER OBEN (gemeldet: auf der ersten Seite sah man nicht, dass man wischen kann). Bleibt
+     beim Scrollen oben stehen und zeigt, welche Seite gerade offen ist. */
+  .tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 4px; padding: 4px; margin: 0 0 14px;
+    background: #0b1117; border: 1px solid #1f2b35; border-radius: 999px; }
+  .tab-nav { flex: 1; height: 34px; border: none; border-radius: 999px; background: transparent; color: #6b7c87;
+    font: 600 13px/1 Inter, system-ui, sans-serif; cursor: pointer; transition: background .15s, color .15s; }
+  .tab-nav.active { background: #2dd4bf; color: #04201c; }
 </style>
 </head>
 <body>
   <h1>rune.watch — sync activity</h1>
   <div class="subtitle">Address based, across devices (not Cloudflare "visits") · recording <span id="v-since">${trackingHint}</span></div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab-nav active" data-page="0" role="tab">Addresses</button>
+    <button class="tab-nav" data-page="1" role="tab">Visitors</button>
+  </div>
 
   <div class="pager" id="pager">
     <section class="page">
@@ -2147,12 +2159,12 @@ async function handleStats(request, env) {
           const k = stats.kohorten;
           if (!k || !k.length) return '';
           const maxW = Math.max(...k.map(x => x.anteile.length));
-          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:5px 4px; border-radius:6px; background:rgba(45,212,191,${Math.max(0.06, v / 100 * 0.85)}); color:${v > 45 ? '#04201c' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
+          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:4px 2px; border-radius:5px; background:rgba(45,212,191,${Math.max(0.06, v / 100 * 0.85)}); color:${v > 45 ? '#04201c' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
           return `<div class="tile wide">
             <div class="tile-label" style="margin-top:0; margin-bottom:10px;">Cohorts by first week</div>
-            <div style="overflow-x:auto;"><table style="border-collapse:separate; border-spacing:3px; width:100%; font-size:12px;">
+            <div style="overflow-x:auto;"><table style="border-collapse:separate; border-spacing:2px; width:100%; font-size:11px;">
               <tr><th style="text-align:left; opacity:.6; font-weight:500;">week of</th><th style="opacity:.6; font-weight:500;">n</th>${Array.from({ length: maxW }, (_, i) => `<th style="opacity:.6; font-weight:500;">W${i}</th>`).join('')}</tr>
-              ${k.map(x => `<tr><td style="white-space:nowrap; padding-right:6px;">${deDate(x.start)}</td><td style="text-align:center; opacity:.8;">${x.n}</td>${Array.from({ length: maxW }, (_, i) => zelle(x.anteile[i])).join('')}</tr>`).join('')}
+              ${k.map(x => `<tr><td style="white-space:nowrap; padding-right:4px;">${(deDate(x.start) || '').replace(/ \d{4}$/, '')}</td><td style="text-align:center; opacity:.8;">${x.n}</td>${Array.from({ length: maxW }, (_, i) => zelle(x.anteile[i])).join('')}</tr>`).join('')}
             </table></div>
             <div class="tile-hint" style="margin-top:8px;">Addresses grouped by the week of their first sync (n). W1, W2 … = share (%) of that group that synced again 1, 2 … weeks later. W0 is always 100.</div>
           </div>`;
@@ -2273,12 +2285,15 @@ async function handleStats(request, env) {
   // aktive Punkt mit.
   const pager = document.getElementById('pager');
   const dots = [...document.querySelectorAll('.dot-nav')];
-  dots.forEach(d => d.addEventListener('click', () => {
+  const tabs = [...document.querySelectorAll('.tab-nav')];
+  [...dots, ...tabs].forEach(d => d.addEventListener('click', () => {
     pager.scrollTo({ left: pager.clientWidth * Number(d.dataset.page), behavior: 'smooth' });
+    if (d.classList.contains('tab-nav')) window.scrollTo({ top: 0, behavior: 'smooth' });
   }));
   pager.addEventListener('scroll', () => {
     const i = Math.round(pager.scrollLeft / Math.max(1, pager.clientWidth));
     dots.forEach((d, j) => d.classList.toggle('active', j === i));
+    tabs.forEach((d, j) => d.classList.toggle('active', j === i));
   }, { passive: true });
 
   setInterval(refreshStats, REFRESH_MS);
