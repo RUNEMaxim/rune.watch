@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1445';
+const WORKER_VERSION = '2026-10-23-1600';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5847,6 +5847,27 @@ function anaRss(y, X) {
   for (let i = 0; i < n; i++) { const row = [1, ...X.map(c => c[i])]; const yh = row.reduce((s, x, j) => s + x * beta[j], 0); rss += (y[i] - yh) ** 2; }
   return { rss, beta };
 }
+// BINANCE-TAGESKURSE (wie die App): Schlusskurs je UTC-Tag. Erst die oeffentliche Markt-Daten-
+// Spiegelung (data-api.binance.vision, ohne Laendersperre), dann api.binance.com. Max. 1000 je Abfrage.
+async function anaBinanceTage(symbol, vonMs) {
+  const tage = new Map();
+  for (const host of ['https://data-api.binance.vision', 'https://api.binance.com']) {
+    try {
+      let start = vonMs;
+      for (let runde = 0; runde < 10 && start < Date.now(); runde++) {
+        const r = await fetchWithTimeout(`${host}/api/v3/klines?symbol=${symbol}&interval=1d&startTime=${start}&limit=1000`, { timeoutMs: 12000 });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const k = await r.json();
+        if (!Array.isArray(k) || !k.length) break;
+        for (const c of k) tage.set(new Date(Number(c[0])).toISOString().slice(0, 10), Number(c[4]));
+        start = Number(k[k.length - 1][0]) + 86400000;
+        if (k.length < 1000) break;
+      }
+      if (tage.size) return tage;
+    } catch (e) { tage.clear(); }
+  }
+  return tage;
+}
 async function handleAnalyseVolumenKurs(request, env, url) {
   // ZEITRAUM: ?tage=365 (Standard) ODER ?ab=2021-01-01 (beliebig weit zurueck). Midgard liefert
   // hoechstens 400 Tage je Abfrage -> lange Zeitraeume in Bloecken zu 390 Tagen holen.
@@ -5865,51 +5886,58 @@ async function handleAnalyseVolumenKurs(request, env, url) {
     return { intervals: alle.filter(iv => { const k = String(iv.startTime); if (gesehen.has(k)) return false; gesehen.add(k); return true; }) };
   };
   const sw = await holeAlle('/history/swaps');
-  const btc = await holeAlle('/history/depths/BTC.BTC');
-  const bMap = new Map(((btc && btc.intervals) || []).map(iv => [String(iv.startTime), Number(iv.assetPriceUSD)]));
-  const zeilen = ((sw && sw.intervals) || []).map(iv => ({
-    t: Number(iv.startTime), p: Number(iv.runePriceUSD), btc: bMap.get(String(iv.startTime)),
-    kauf: Number(iv.toRuneVolume || 0) / 1e8, verkauf: Number(iv.toAssetVolume || 0) / 1e8, gesamt: Number(iv.totalVolume || 0) / 1e8,
-  })).filter(z => z.p > 0 && z.btc > 0 && z.gesamt > 0).sort((a, b) => a.t - b.t);
-  // letzter (laufender) Tag raus
+  // KURSE VON BINANCE (gewuenscht: "wie meine App"), nicht aus den THORChain-Pools: Ein Swap
+  // verschiebt den Pool-Preis zwangslaeufig -- mit dem Pool-Kurs waere ein Teil des Ergebnisses
+  // reine Mechanik. Binance bildet den Handel ausserhalb von THORChain ab.
+  const [runeB, btcB] = await Promise.all([anaBinanceTage('RUNEUSDT', vonS * 1000), anaBinanceTage('BTCUSDT', vonS * 1000)]);
+  const tagVon = ts => new Date(ts * 1000).toISOString().slice(0, 10);
+  const zeilen = ((sw && sw.intervals) || []).map(iv => {
+    const tag = tagVon(Number(iv.startTime));
+    return { t: Number(iv.startTime), tag, p: runeB.get(tag), btc: btcB.get(tag),
+      kauf: Number(iv.toRuneVolume || 0) / 1e8, verkauf: Number(iv.toAssetVolume || 0) / 1e8, gesamt: Number(iv.totalVolume || 0) / 1e8 };
+  }).filter(z => z.p > 0 && z.btc > 0 && z.gesamt > 0).sort((a, b) => a.t - b.t);
   if (zeilen.length && Date.now() / 1000 - zeilen[zeilen.length - 1].t < 86400) zeilen.pop();
-  const r = [], b = [], n = [], g = [], jahr = [];
+  // NUR ECHTE AUFEINANDERFOLGENDE TAGE: Rendite nur, wenn der Vortag vorhanden ist (sonst wuerde
+  // ueber Luecken hinweg gerechnet); "gestern" ist immer der Kalendertag davor.
+  const r = [], b = [], n = [], g = [], jahr = [], tagIdx = [];
   for (let i = 1; i < zeilen.length; i++) {
+    if (zeilen[i].t - zeilen[i - 1].t !== 86400) continue;
     jahr.push(new Date(zeilen[i].t * 1000).getUTCFullYear());
+    tagIdx.push(Math.round(zeilen[i].t / 86400));
     r.push(Math.log(zeilen[i].p / zeilen[i - 1].p)); b.push(Math.log(zeilen[i].btc / zeilen[i - 1].btc));
     const k = zeilen[i].kauf, v = zeilen[i].verkauf; n.push(k + v > 0 ? (k - v) / (k + v) : 0);
     g.push(Math.log(zeilen[i].gesamt / zeilen[i - 1].gesamt));
   }
-  const mb = b.reduce((a, x) => a + x, 0) / b.length, mr = r.reduce((a, x) => a + x, 0) / r.length;
-  let cov = 0, vb = 0; for (let i = 0; i < b.length; i++) { cov += (r[i] - mr) * (b[i] - mb); vb += (b[i] - mb) ** 2; }
-  const beta = vb ? cov / vb : 0;
-  const e = r.map((x, i) => x - beta * b[i]);
+  // MARKT-KOPPLUNG JE JAHR (statt einer fuer alles): Ueberrendite e mit dem beta des eigenen Jahres.
+  const betaVon = idx => { const rr = idx.map(i => r[i]), bb = idx.map(i => b[i]); const mr = rr.reduce((a, x) => a + x, 0) / rr.length, mb = bb.reduce((a, x) => a + x, 0) / bb.length; let c = 0, v = 0; for (let j = 0; j < rr.length; j++) { c += (rr[j] - mr) * (bb[j] - mb); v += (bb[j] - mb) ** 2; } return v ? c / v : 0; };
+  const jahre = [...new Set(jahr)].sort();
+  const betaJahr = new Map(jahre.map(J => [J, betaVon(jahr.map((x, i) => x === J ? i : -1).filter(i => i >= 0))]));
+  const beta = betaVon(r.map((_, i) => i));
+  const e = r.map((x, i) => x - betaJahr.get(jahr[i]) * b[i]);
   const absE = e.map(Math.abs);
+  // Paare "gestern -> heute" nur fuer wirklich aufeinanderfolgende Tage
+  const paare = []; for (let i = 1; i < e.length; i++) if (tagIdx[i] - tagIdx[i - 1] === 1) paare.push(i);
   const tests = {
     gleichzeitig: anaKorr(n, e),
-    nGesternEHeute: anaKorr(n.slice(0, -1), e.slice(1)),
-    eGesternNHeute: anaKorr(e.slice(0, -1), n.slice(1)),
+    nGesternEHeute: anaKorr(paare.map(i => n[i - 1]), paare.map(i => e[i])),
+    eGesternNHeute: anaKorr(paare.map(i => e[i - 1]), paare.map(i => n[i])),
     volumenUndBewegung: anaKorr(g, absE),
     marktKopplung: anaKorr(r, b),
   };
-  // Granger: e_t ~ e_{t-1}  vs.  e_t ~ e_{t-1} + n_{t-1}
-  const y = e.slice(1), e1 = e.slice(0, -1), n1 = n.slice(0, -1);
+  const y = paare.map(i => e[i]), e1 = paare.map(i => e[i - 1]), n1 = paare.map(i => n[i - 1]);
   const klein = anaRss(y, [e1]), gross = anaRss(y, [e1, n1]);
   let granger = null;
   if (klein && gross && gross.rss > 0) {
     const dfz = y.length - 3, F = (klein.rss - gross.rss) / (gross.rss / dfz);
-    const pApprox = 2 * (1 - anaNormCdf(Math.sqrt(Math.max(0, F))));   // F(1,df) ~ t^2
-    granger = { F, p: pApprox, koeff: gross.beta[2] };
+    granger = { F, p: 2 * (1 - anaNormCdf(Math.sqrt(Math.max(0, F)))), koeff: gross.beta[2] };
   }
-  // JE JAHR: Kaufdruck gestern -> Ueberrendite heute und RUNE~BTC, um Veraenderungen zu sehen.
-  const jahre = [...new Set(jahr)].sort();
   const jeJahr = jahre.map(J => {
+    const pj = paare.filter(i => jahr[i] === J);
     const idx = jahr.map((x, i) => x === J ? i : -1).filter(i => i >= 0);
-    const nG = [], eH = [], rr = [], bb = [];
-    for (const i of idx) { if (i >= 1 && jahr[i - 1] === J) { nG.push(n[i - 1]); eH.push(e[i]); } rr.push(r[i]); bb.push(b[i]); }
-    return { jahr: J, tage: idx.length, lag: anaKorr(nG, eH), markt: anaKorr(rr, bb) };
+    return { jahr: J, tage: idx.length, beta: betaJahr.get(J), lag: anaKorr(pj.map(i => n[i - 1]), pj.map(i => e[i])), markt: anaKorr(idx.map(i => r[i]), idx.map(i => b[i])) };
   });
-  const daten = { tage: r.length, jeJahr, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
+  const kursQuelle = runeB.size ? 'Binance (RUNEUSDT, BTCUSDT)' : 'keine Binance-Daten';
+  const daten = { tage: r.length, kursQuelle, jeJahr, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
   if (url.searchParams.get('format') === 'json') return json(daten, env);
   const f = (x, d = 3) => x == null ? '—' : Number(x).toFixed(d);
   const sig = p => p == null ? '' : p < 0.01 ? '<b style="color:#2dd4bf">deutlich</b>' : p < 0.05 ? '<b style="color:#2dd4bf">ja</b>' : p < 0.1 ? 'schwach' : '<span style="opacity:.6">nein</span>';
@@ -5917,7 +5945,7 @@ async function handleAnalyseVolumenKurs(request, env, url) {
   const html = `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Volumen vs. RUNE-Kurs</title>
 <style>body{font:14px/1.5 Inter,system-ui,sans-serif;background:#0b1117;color:#e6eef2;margin:0;padding:18px;max-width:760px}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin:12px 0}td,th{padding:8px 6px;border-bottom:1px solid #1f2b35;text-align:left;vertical-align:top}th{color:#6b7c87;font-weight:600;font-size:12px}.z{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.h{color:#6b7c87;font-size:12px}.box{background:#111a22;border:1px solid #1f2b35;border-radius:12px;padding:12px 14px;margin:12px 0}</style></head><body>
 <h1>Beeinflusst das Swap-Volumen den RUNE-Kurs?</h1>
-<div class="h">${daten.tage} Tage, ${daten.von} bis ${daten.bis} · Quelle: Midgard (Tageswerte) · Marktbewegung (BTC) herausgerechnet, Kopplung &beta; = ${f(beta, 2)}</div>
+<div class="h">${daten.tage} Tage, ${daten.von} bis ${daten.bis} · Volumen: Midgard · Kurse: ${kursQuelle} (Tagesschluss UTC) · nur aufeinanderfolgende Tage · Marktbewegung (BTC) je Jahr herausgerechnet, gesamt &beta; = ${f(beta, 2)}</div>
 <table><tr><th>Test</th><th class="z">Korr.</th><th class="z">p</th><th class="z">Zusammenhang?</th></tr>
 ${zeile('Netto-Kaufdruck &amp; Kurs am selben Tag', 'Mehr RUNE gekauft als verkauft &rarr; steigt RUNE am selben Tag (ueber den Markt hinaus)?', tests.gleichzeitig)}
 ${zeile('Kaufdruck gestern &rarr; Kurs heute', 'Laeuft der Kaufdruck dem Kurs voraus? (Hinweis auf Ursache)', tests.nGesternEHeute)}
@@ -5925,7 +5953,7 @@ ${zeile('Kurs gestern &rarr; Kaufdruck heute', 'Oder laeuft umgekehrt der Kurs d
 ${zeile('Volumen-Anstieg &amp; Kursbewegung', 'Gehen Tage mit mehr Volumen mit groesseren Kursbewegungen einher (egal welche Richtung)?', tests.volumenUndBewegung)}
 ${zeile('RUNE &amp; BTC (Vergleich)', 'Wie stark haengt RUNE am Gesamtmarkt?', tests.marktKopplung)}
 </table>
-${jeJahr.length > 1 ? `<table><tr><th>Jahr</th><th class="z">Tage</th><th class="z">Kaufdruck gestern &rarr; Kurs heute</th><th class="z">p</th><th class="z">RUNE &amp; BTC</th></tr>${jeJahr.map(J => `<tr><td>${J.jahr}</td><td class="z">${J.tage}</td><td class="z">${f(J.lag.r)}</td><td class="z">${J.lag.p != null ? f(J.lag.p) : '—'} ${sig(J.lag.p)}</td><td class="z">${f(J.markt.r, 2)}</td></tr>`).join('')}</table>` : ''}
+${jeJahr.length > 1 ? `<table><tr><th>Jahr</th><th class="z">Tage</th><th class="z">Kaufdruck gestern &rarr; Kurs heute</th><th class="z">p</th><th class="z">RUNE &amp; BTC</th><th class="z">&beta;</th></tr>${jeJahr.map(J => `<tr><td>${J.jahr}</td><td class="z">${J.tage}</td><td class="z">${f(J.lag.r)}</td><td class="z">${J.lag.p != null ? f(J.lag.p) : '—'} ${sig(J.lag.p)}</td><td class="z">${f(J.markt.r, 2)}</td><td class="z">${f(J.beta, 2)}</td></tr>`).join('')}</table>` : ''}
 <div class="box"><b>Granger-Test</b> (sagt der Kaufdruck von gestern die Ueberrendite von heute voraus, zusaetzlich zur Rendite von gestern?)<br>
 F = ${granger ? f(granger.F, 2) : '—'} · p &asymp; ${granger ? f(granger.p, 3) : '—'} · ${granger ? sig(granger.p) : ''}</div>
 <div class="box h">Lesehilfe: Korrelation von -1 bis +1 (0 = kein Zusammenhang). p unter 0,05 = vermutlich kein Zufall. Ein Zusammenhang ist noch kein Beweis fuer eine Ursache: News, Halts oder Marktpanik koennen beides gleichzeitig treiben. Tageswerte; Effekte innerhalb eines Tages (Arbitrage) sieht man hier nicht.</div>
