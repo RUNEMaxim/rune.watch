@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1600';
+const WORKER_VERSION = '2026-10-23-1700';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5849,7 +5849,11 @@ function anaRss(y, X) {
 }
 // BINANCE-TAGESKURSE (wie die App): Schlusskurs je UTC-Tag. Erst die oeffentliche Markt-Daten-
 // Spiegelung (data-api.binance.vision, ohne Laendersperre), dann api.binance.com. Max. 1000 je Abfrage.
+// Liefert { tage: Map(tag -> Schlusskurs), quelle, fehler[] }. Reihenfolge: Binance direkt (wie die
+// App) -> CryptoCompare mit Kursen von Binance (e=Binance, USDT) -> CryptoCompare-Durchschnitt.
+// Grund (gemeldet: "keine Binance-Daten"): Binance lehnt Anfragen von Cloudflare-Servern oft ab.
 async function anaBinanceTage(symbol, vonMs) {
+  const fehler = [];
   const tage = new Map();
   for (const host of ['https://data-api.binance.vision', 'https://api.binance.com']) {
     try {
@@ -5863,10 +5867,29 @@ async function anaBinanceTage(symbol, vonMs) {
         start = Number(k[k.length - 1][0]) + 86400000;
         if (k.length < 1000) break;
       }
-      if (tage.size) return tage;
-    } catch (e) { tage.clear(); }
+      if (tage.size) return { tage, quelle: 'Binance', fehler };
+    } catch (e) { fehler.push(host.replace('https://', '') + ': ' + (e?.message || e)); tage.clear(); }
   }
-  return tage;
+  const fsym = symbol.replace(/USDT$/, '');
+  for (const variante of [{ e: 'Binance', tsym: 'USDT', name: 'Binance via CryptoCompare' }, { e: null, tsym: 'USD', name: 'CryptoCompare (Durchschnitt)' }]) {
+    try {
+      let bisTs = Math.floor(Date.now() / 1000);
+      for (let runde = 0; runde < 6; runde++) {
+        const q = `/data/v2/histoday?fsym=${fsym}&tsym=${variante.tsym}&limit=2000&toTs=${bisTs}` + (variante.e ? `&e=${variante.e}` : '');
+        const r = await fetchWithTimeout('https://min-api.cryptocompare.com' + q, { timeoutMs: 12000 });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
+        const liste = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
+        if (!liste) throw new Error((j && j.Message) || 'leer');
+        let aelteste = Infinity;
+        for (const c of liste) { if (Number(c.close) > 0) tage.set(new Date(Number(c.time) * 1000).toISOString().slice(0, 10), Number(c.close)); aelteste = Math.min(aelteste, Number(c.time)); }
+        if (!Number.isFinite(aelteste) || aelteste * 1000 <= vonMs) break;
+        bisTs = aelteste - 86400;
+      }
+      if (tage.size) return { tage, quelle: variante.name, fehler };
+    } catch (e) { fehler.push(variante.name + ': ' + (e?.message || e)); tage.clear(); }
+  }
+  return { tage, quelle: null, fehler };
 }
 async function handleAnalyseVolumenKurs(request, env, url) {
   // ZEITRAUM: ?tage=365 (Standard) ODER ?ab=2021-01-01 (beliebig weit zurueck). Midgard liefert
@@ -5889,7 +5912,8 @@ async function handleAnalyseVolumenKurs(request, env, url) {
   // KURSE VON BINANCE (gewuenscht: "wie meine App"), nicht aus den THORChain-Pools: Ein Swap
   // verschiebt den Pool-Preis zwangslaeufig -- mit dem Pool-Kurs waere ein Teil des Ergebnisses
   // reine Mechanik. Binance bildet den Handel ausserhalb von THORChain ab.
-  const [runeB, btcB] = await Promise.all([anaBinanceTage('RUNEUSDT', vonS * 1000), anaBinanceTage('BTCUSDT', vonS * 1000)]);
+  const [runeK, btcK] = await Promise.all([anaBinanceTage('RUNEUSDT', vonS * 1000), anaBinanceTage('BTCUSDT', vonS * 1000)]);
+  const runeB = runeK.tage, btcB = btcK.tage;
   const tagVon = ts => new Date(ts * 1000).toISOString().slice(0, 10);
   const zeilen = ((sw && sw.intervals) || []).map(iv => {
     const tag = tagVon(Number(iv.startTime));
@@ -5936,9 +5960,11 @@ async function handleAnalyseVolumenKurs(request, env, url) {
     const idx = jahr.map((x, i) => x === J ? i : -1).filter(i => i >= 0);
     return { jahr: J, tage: idx.length, beta: betaJahr.get(J), lag: anaKorr(pj.map(i => n[i - 1]), pj.map(i => e[i])), markt: anaKorr(idx.map(i => r[i]), idx.map(i => b[i])) };
   });
-  const kursQuelle = runeB.size ? 'Binance (RUNEUSDT, BTCUSDT)' : 'keine Binance-Daten';
-  const daten = { tage: r.length, kursQuelle, jeJahr, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
+  const kursQuelle = runeK.quelle && btcK.quelle ? (runeK.quelle === btcK.quelle ? runeK.quelle : `RUNE: ${runeK.quelle}, BTC: ${btcK.quelle}`) : 'keine Kursdaten';
+  const kursFehler = [...runeK.fehler.map(x => 'RUNE ' + x), ...btcK.fehler.map(x => 'BTC ' + x)];
+  const daten = { tage: r.length, kursQuelle, kursFehler, jeJahr, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
   if (url.searchParams.get('format') === 'json') return json(daten, env);
+  if (!r.length) return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font:14px system-ui;background:#0b1117;color:#e6eef2;padding:18px"><h3>Keine Daten</h3><p>Kursquelle: ${kursQuelle}</p><pre style="white-space:pre-wrap;color:#9aa">${kursFehler.join('\n') || '—'}</pre><p>Swap-Tage von Midgard: ${((sw && sw.intervals) || []).length}</p></body>`, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
   const f = (x, d = 3) => x == null ? '—' : Number(x).toFixed(d);
   const sig = p => p == null ? '' : p < 0.01 ? '<b style="color:#2dd4bf">deutlich</b>' : p < 0.05 ? '<b style="color:#2dd4bf">ja</b>' : p < 0.1 ? 'schwach' : '<span style="opacity:.6">nein</span>';
   const zeile = (titel, frage, t) => `<tr><td>${titel}<div class="h">${frage}</div></td><td class="z">${f(t.r)}</td><td class="z">${t.p != null ? f(t.p, 3) : '—'}</td><td class="z">${sig(t.p)}</td></tr>`;
