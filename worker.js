@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1100';
+const WORKER_VERSION = '2026-10-23-1330';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4486,6 +4486,9 @@ export default {
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
+      if (url.pathname === '/analyse/volumen-kurs') {
+        try { return await handleAnalyseVolumenKurs(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname.startsWith('/push/')) {
         try { return await handlePush(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -5800,6 +5803,112 @@ async function syncPushPersoenlich(env) {
     for (const m of meldungen.slice(0, 5)) { try { await pushSenden(env, row, m); } catch (e) {} }
     await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(JSON.stringify(z), row.id).run();
   }
+}
+
+// =====================================================================================
+// ANALYSE: Beeinflusst das Swap-Volumen den RUNE-Kurs?   GET /analyse/volumen-kurs?tage=365
+// Daten (Midgard, je Tag): toRuneVolume (Kauf von RUNE), toAssetVolume (Verkauf von RUNE),
+// runePriceUSD; BTC-Kurs aus /history/depths/BTC.BTC. Rechnung:
+//   r  = log-Rendite RUNE, b = log-Rendite BTC, beta = cov(r,b)/var(b)
+//   e  = Ueberrendite = r - beta*b   (Marktbewegung herausgerechnet)
+//   n  = Netto-Richtung = (Kauf - Verkauf) / (Kauf + Verkauf)   (-1 .. +1)
+//   g  = Volumen-Wachstum = log(Gesamtvolumen / Vortag)
+// Tests: Korrelationen gleichzeitig und um 1 Tag versetzt (beide Richtungen) und ein einfacher
+// Granger-Test (erklaert n von gestern die Ueberrendite von heute ueber e von gestern hinaus?).
+// =====================================================================================
+function anaKorr(x, y) {
+  const n = Math.min(x.length, y.length); if (n < 10) return { r: null, n };
+  const mx = x.reduce((a, b) => a + b, 0) / n, my = y.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) { const dx = x[i] - mx, dy = y[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy; }
+  const r = sxx && syy ? sxy / Math.sqrt(sxx * syy) : 0;
+  const t = r * Math.sqrt((n - 2) / Math.max(1e-12, 1 - r * r));
+  const p = 2 * (1 - anaNormCdf(Math.abs(t)));
+  return { r, n, p };
+}
+function anaNormCdf(z) { const t = 1 / (1 + 0.2316419 * z); const d = 0.3989423 * Math.exp(-z * z / 2); return 1 - d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274)))); }
+// OLS-Residuenquadratsumme fuer y ~ 1 + X (X: Liste von Spalten), per Normalgleichungen.
+function anaRss(y, X) {
+  const n = y.length, k = X.length + 1;
+  const A = Array.from({ length: k }, () => Array(k).fill(0)), v = Array(k).fill(0);
+  for (let i = 0; i < n; i++) {
+    const row = [1, ...X.map(c => c[i])];
+    for (let a = 0; a < k; a++) { v[a] += row[a] * y[i]; for (let b = 0; b < k; b++) A[a][b] += row[a] * row[b]; }
+  }
+  // Gauss-Elimination
+  for (let c = 0; c < k; c++) {
+    let p = c; for (let r = c + 1; r < k; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]]; [v[c], v[p]] = [v[p], v[c]];
+    if (Math.abs(A[c][c]) < 1e-15) return null;
+    for (let r = 0; r < k; r++) if (r !== c) { const f = A[r][c] / A[c][c]; for (let b = c; b < k; b++) A[r][b] -= f * A[c][b]; v[r] -= f * v[c]; }
+  }
+  const beta = v.map((x, i) => x / A[i][i]);
+  let rss = 0;
+  for (let i = 0; i < n; i++) { const row = [1, ...X.map(c => c[i])]; const yh = row.reduce((s, x, j) => s + x * beta[j], 0); rss += (y[i] - yh) ** 2; }
+  return { rss, beta };
+}
+async function handleAnalyseVolumenKurs(request, env, url) {
+  const tage = Math.max(60, Math.min(730, Number(url.searchParams.get('tage')) || 365));
+  const [sw, btc] = await Promise.all([
+    fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&count=${tage + 2}`),
+    fetchFromBases(getMidgardBases(), `/history/depths/BTC.BTC?interval=day&count=${tage + 2}`),
+  ]);
+  const bMap = new Map(((btc && btc.intervals) || []).map(iv => [String(iv.startTime), Number(iv.assetPriceUSD)]));
+  const zeilen = ((sw && sw.intervals) || []).map(iv => ({
+    t: Number(iv.startTime), p: Number(iv.runePriceUSD), btc: bMap.get(String(iv.startTime)),
+    kauf: Number(iv.toRuneVolume || 0) / 1e8, verkauf: Number(iv.toAssetVolume || 0) / 1e8, gesamt: Number(iv.totalVolume || 0) / 1e8,
+  })).filter(z => z.p > 0 && z.btc > 0 && z.gesamt > 0).sort((a, b) => a.t - b.t);
+  // letzter (laufender) Tag raus
+  if (zeilen.length && Date.now() / 1000 - zeilen[zeilen.length - 1].t < 86400) zeilen.pop();
+  const r = [], b = [], n = [], g = [];
+  for (let i = 1; i < zeilen.length; i++) {
+    r.push(Math.log(zeilen[i].p / zeilen[i - 1].p)); b.push(Math.log(zeilen[i].btc / zeilen[i - 1].btc));
+    const k = zeilen[i].kauf, v = zeilen[i].verkauf; n.push(k + v > 0 ? (k - v) / (k + v) : 0);
+    g.push(Math.log(zeilen[i].gesamt / zeilen[i - 1].gesamt));
+  }
+  const mb = b.reduce((a, x) => a + x, 0) / b.length, mr = r.reduce((a, x) => a + x, 0) / r.length;
+  let cov = 0, vb = 0; for (let i = 0; i < b.length; i++) { cov += (r[i] - mr) * (b[i] - mb); vb += (b[i] - mb) ** 2; }
+  const beta = vb ? cov / vb : 0;
+  const e = r.map((x, i) => x - beta * b[i]);
+  const absE = e.map(Math.abs);
+  const tests = {
+    gleichzeitig: anaKorr(n, e),
+    nGesternEHeute: anaKorr(n.slice(0, -1), e.slice(1)),
+    eGesternNHeute: anaKorr(e.slice(0, -1), n.slice(1)),
+    volumenUndBewegung: anaKorr(g, absE),
+    marktKopplung: anaKorr(r, b),
+  };
+  // Granger: e_t ~ e_{t-1}  vs.  e_t ~ e_{t-1} + n_{t-1}
+  const y = e.slice(1), e1 = e.slice(0, -1), n1 = n.slice(0, -1);
+  const klein = anaRss(y, [e1]), gross = anaRss(y, [e1, n1]);
+  let granger = null;
+  if (klein && gross && gross.rss > 0) {
+    const dfz = y.length - 3, F = (klein.rss - gross.rss) / (gross.rss / dfz);
+    const pApprox = 2 * (1 - anaNormCdf(Math.sqrt(Math.max(0, F))));   // F(1,df) ~ t^2
+    granger = { F, p: pApprox, koeff: gross.beta[2] };
+  }
+  const daten = { tage: r.length, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
+  if (url.searchParams.get('format') === 'json') return json(daten, env);
+  const f = (x, d = 3) => x == null ? '—' : Number(x).toFixed(d);
+  const sig = p => p == null ? '' : p < 0.01 ? '<b style="color:#2dd4bf">deutlich</b>' : p < 0.05 ? '<b style="color:#2dd4bf">ja</b>' : p < 0.1 ? 'schwach' : '<span style="opacity:.6">nein</span>';
+  const zeile = (titel, frage, t) => `<tr><td>${titel}<div class="h">${frage}</div></td><td class="z">${f(t.r)}</td><td class="z">${t.p != null ? f(t.p, 3) : '—'}</td><td class="z">${sig(t.p)}</td></tr>`;
+  const html = `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Volumen vs. RUNE-Kurs</title>
+<style>body{font:14px/1.5 Inter,system-ui,sans-serif;background:#0b1117;color:#e6eef2;margin:0;padding:18px;max-width:760px}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin:12px 0}td,th{padding:8px 6px;border-bottom:1px solid #1f2b35;text-align:left;vertical-align:top}th{color:#6b7c87;font-weight:600;font-size:12px}.z{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.h{color:#6b7c87;font-size:12px}.box{background:#111a22;border:1px solid #1f2b35;border-radius:12px;padding:12px 14px;margin:12px 0}</style></head><body>
+<h1>Beeinflusst das Swap-Volumen den RUNE-Kurs?</h1>
+<div class="h">${daten.tage} Tage, ${daten.von} bis ${daten.bis} · Quelle: Midgard (Tageswerte) · Marktbewegung (BTC) herausgerechnet, Kopplung &beta; = ${f(beta, 2)}</div>
+<table><tr><th>Test</th><th class="z">Korr.</th><th class="z">p</th><th class="z">Zusammenhang?</th></tr>
+${zeile('Netto-Kaufdruck &amp; Kurs am selben Tag', 'Mehr RUNE gekauft als verkauft &rarr; steigt RUNE am selben Tag (ueber den Markt hinaus)?', tests.gleichzeitig)}
+${zeile('Kaufdruck gestern &rarr; Kurs heute', 'Laeuft der Kaufdruck dem Kurs voraus? (Hinweis auf Ursache)', tests.nGesternEHeute)}
+${zeile('Kurs gestern &rarr; Kaufdruck heute', 'Oder laeuft umgekehrt der Kurs dem Kaufdruck voraus?', tests.eGesternNHeute)}
+${zeile('Volumen-Anstieg &amp; Kursbewegung', 'Gehen Tage mit mehr Volumen mit groesseren Kursbewegungen einher (egal welche Richtung)?', tests.volumenUndBewegung)}
+${zeile('RUNE &amp; BTC (Vergleich)', 'Wie stark haengt RUNE am Gesamtmarkt?', tests.marktKopplung)}
+</table>
+<div class="box"><b>Granger-Test</b> (sagt der Kaufdruck von gestern die Ueberrendite von heute voraus, zusaetzlich zur Rendite von gestern?)<br>
+F = ${granger ? f(granger.F, 2) : '—'} · p &asymp; ${granger ? f(granger.p, 3) : '—'} · ${granger ? sig(granger.p) : ''}</div>
+<div class="box h">Lesehilfe: Korrelation von -1 bis +1 (0 = kein Zusammenhang). p unter 0,05 = vermutlich kein Zufall. Ein Zusammenhang ist noch kein Beweis fuer eine Ursache: News, Halts oder Marktpanik koennen beides gleichzeitig treiben. Tageswerte; Effekte innerhalb eines Tages (Arbitrage) sieht man hier nicht.</div>
+<div class="h">Als JSON: ?format=json · anderer Zeitraum: ?tage=180</div>
+</body></html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
 }
 
 async function runRefreshCycle(env) {
