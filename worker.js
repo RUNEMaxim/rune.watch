@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1330';
+const WORKER_VERSION = '2026-10-23-1445';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5848,11 +5848,24 @@ function anaRss(y, X) {
   return { rss, beta };
 }
 async function handleAnalyseVolumenKurs(request, env, url) {
+  // ZEITRAUM: ?tage=365 (Standard) ODER ?ab=2021-01-01 (beliebig weit zurueck). Midgard liefert
+  // hoechstens 400 Tage je Abfrage -> lange Zeitraeume in Bloecken zu 390 Tagen holen.
+  const abParam = url.searchParams.get('ab');
+  const jetztS = Math.floor(Date.now() / 1000);
   const tage = Math.max(60, Math.min(730, Number(url.searchParams.get('tage')) || 365));
-  const [sw, btc] = await Promise.all([
-    fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&count=${tage + 2}`),
-    fetchFromBases(getMidgardBases(), `/history/depths/BTC.BTC?interval=day&count=${tage + 2}`),
-  ]);
+  const vonS = abParam && /^\d{4}-\d{2}-\d{2}$/.test(abParam) ? Math.floor(Date.parse(abParam + 'T00:00:00Z') / 1000) : jetztS - (tage + 2) * 86400;
+  const holeAlle = async pfad => {
+    const alle = [];
+    for (let von = vonS; von < jetztS; von += 390 * 86400) {
+      const bis = Math.min(jetztS, von + 390 * 86400);
+      const j = await fetchFromBases(getMidgardBases(), `${pfad}?interval=day&from=${von}&to=${bis}`).catch(() => null);
+      for (const iv of (j && j.intervals) || []) alle.push(iv);
+    }
+    const gesehen = new Set();
+    return { intervals: alle.filter(iv => { const k = String(iv.startTime); if (gesehen.has(k)) return false; gesehen.add(k); return true; }) };
+  };
+  const sw = await holeAlle('/history/swaps');
+  const btc = await holeAlle('/history/depths/BTC.BTC');
   const bMap = new Map(((btc && btc.intervals) || []).map(iv => [String(iv.startTime), Number(iv.assetPriceUSD)]));
   const zeilen = ((sw && sw.intervals) || []).map(iv => ({
     t: Number(iv.startTime), p: Number(iv.runePriceUSD), btc: bMap.get(String(iv.startTime)),
@@ -5860,8 +5873,9 @@ async function handleAnalyseVolumenKurs(request, env, url) {
   })).filter(z => z.p > 0 && z.btc > 0 && z.gesamt > 0).sort((a, b) => a.t - b.t);
   // letzter (laufender) Tag raus
   if (zeilen.length && Date.now() / 1000 - zeilen[zeilen.length - 1].t < 86400) zeilen.pop();
-  const r = [], b = [], n = [], g = [];
+  const r = [], b = [], n = [], g = [], jahr = [];
   for (let i = 1; i < zeilen.length; i++) {
+    jahr.push(new Date(zeilen[i].t * 1000).getUTCFullYear());
     r.push(Math.log(zeilen[i].p / zeilen[i - 1].p)); b.push(Math.log(zeilen[i].btc / zeilen[i - 1].btc));
     const k = zeilen[i].kauf, v = zeilen[i].verkauf; n.push(k + v > 0 ? (k - v) / (k + v) : 0);
     g.push(Math.log(zeilen[i].gesamt / zeilen[i - 1].gesamt));
@@ -5887,7 +5901,15 @@ async function handleAnalyseVolumenKurs(request, env, url) {
     const pApprox = 2 * (1 - anaNormCdf(Math.sqrt(Math.max(0, F))));   // F(1,df) ~ t^2
     granger = { F, p: pApprox, koeff: gross.beta[2] };
   }
-  const daten = { tage: r.length, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
+  // JE JAHR: Kaufdruck gestern -> Ueberrendite heute und RUNE~BTC, um Veraenderungen zu sehen.
+  const jahre = [...new Set(jahr)].sort();
+  const jeJahr = jahre.map(J => {
+    const idx = jahr.map((x, i) => x === J ? i : -1).filter(i => i >= 0);
+    const nG = [], eH = [], rr = [], bb = [];
+    for (const i of idx) { if (i >= 1 && jahr[i - 1] === J) { nG.push(n[i - 1]); eH.push(e[i]); } rr.push(r[i]); bb.push(b[i]); }
+    return { jahr: J, tage: idx.length, lag: anaKorr(nG, eH), markt: anaKorr(rr, bb) };
+  });
+  const daten = { tage: r.length, jeJahr, von: zeilen[0] && new Date(zeilen[0].t * 1000).toISOString().slice(0, 10), bis: zeilen.length && new Date(zeilen[zeilen.length - 1].t * 1000).toISOString().slice(0, 10), beta, tests, granger };
   if (url.searchParams.get('format') === 'json') return json(daten, env);
   const f = (x, d = 3) => x == null ? '—' : Number(x).toFixed(d);
   const sig = p => p == null ? '' : p < 0.01 ? '<b style="color:#2dd4bf">deutlich</b>' : p < 0.05 ? '<b style="color:#2dd4bf">ja</b>' : p < 0.1 ? 'schwach' : '<span style="opacity:.6">nein</span>';
@@ -5903,10 +5925,11 @@ ${zeile('Kurs gestern &rarr; Kaufdruck heute', 'Oder laeuft umgekehrt der Kurs d
 ${zeile('Volumen-Anstieg &amp; Kursbewegung', 'Gehen Tage mit mehr Volumen mit groesseren Kursbewegungen einher (egal welche Richtung)?', tests.volumenUndBewegung)}
 ${zeile('RUNE &amp; BTC (Vergleich)', 'Wie stark haengt RUNE am Gesamtmarkt?', tests.marktKopplung)}
 </table>
+${jeJahr.length > 1 ? `<table><tr><th>Jahr</th><th class="z">Tage</th><th class="z">Kaufdruck gestern &rarr; Kurs heute</th><th class="z">p</th><th class="z">RUNE &amp; BTC</th></tr>${jeJahr.map(J => `<tr><td>${J.jahr}</td><td class="z">${J.tage}</td><td class="z">${f(J.lag.r)}</td><td class="z">${J.lag.p != null ? f(J.lag.p) : '—'} ${sig(J.lag.p)}</td><td class="z">${f(J.markt.r, 2)}</td></tr>`).join('')}</table>` : ''}
 <div class="box"><b>Granger-Test</b> (sagt der Kaufdruck von gestern die Ueberrendite von heute voraus, zusaetzlich zur Rendite von gestern?)<br>
 F = ${granger ? f(granger.F, 2) : '—'} · p &asymp; ${granger ? f(granger.p, 3) : '—'} · ${granger ? sig(granger.p) : ''}</div>
 <div class="box h">Lesehilfe: Korrelation von -1 bis +1 (0 = kein Zusammenhang). p unter 0,05 = vermutlich kein Zufall. Ein Zusammenhang ist noch kein Beweis fuer eine Ursache: News, Halts oder Marktpanik koennen beides gleichzeitig treiben. Tageswerte; Effekte innerhalb eines Tages (Arbitrage) sieht man hier nicht.</div>
-<div class="h">Als JSON: ?format=json · anderer Zeitraum: ?tage=180</div>
+<div class="h">Als JSON: ?format=json · anderer Zeitraum: ?tage=180 oder ?ab=2021-01-01</div>
 </body></html>`;
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
 }
