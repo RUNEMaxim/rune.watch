@@ -1311,11 +1311,34 @@ async function handleWallets(request, env, ctx) {
     // WIEDER HINZUGEFUEGT (restoredAddrs): aus der Loeschliste nehmen -- sonst verschwand eine frueher
     // entfernte Wallet beim erneuten Eintragen sofort wieder.
     const restored = Array.isArray(body.restoredAddrs) ? body.restoredAddrs.filter((w) => typeof w === 'string' && w.trim()) : [];
+    // WIEDERHERSTELLUNG MIT ZEITSTEMPEL (gemeldet: "die Adresse, wo ich nicht bonde, springt nach
+    // einer Zeit raus"): Ein ANDERES Geraet (z. B. Safari vs. Home-Bildschirm-Icon, die getrennt
+    // speichern) schickte seine alte Loeschmarke immer wieder mit und loeschte die gerade neu
+    // eingetragene Adresse erneut. Jetzt merkt sich der Server, WANN eine Adresse wieder
+    // hinzugefuegt wurde, und nimmt eine Loeschung nur noch an, wenn sie NACHWEISLICH spaeter
+    // passiert ist (deletedAt vom Geraet). Alte Loeschmarken ohne Zeit loeschen nichts mehr.
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS user_wallet_lists_restored (address TEXT, wallet TEXT, restored_at INTEGER, PRIMARY KEY (address, wallet))').run();
     if (restored.length) {
       const del = env.DB.prepare('DELETE FROM user_wallet_lists_deleted WHERE address = ? AND deleted_wallet = ?');
-      await env.DB.batch(restored.map((w) => del.bind(address, w)));
+      const rest = env.DB.prepare('INSERT OR REPLACE INTO user_wallet_lists_restored (address, wallet, restored_at) VALUES (?, ?, ?)');
+      const nowR = Date.now();
+      await env.DB.batch([...restored.map((w) => del.bind(address, w)), ...restored.map((w) => rest.bind(address, w, nowR))]);
     }
-    const newlyDeletedOhne = newlyDeleted.filter((w) => !restored.includes(w));
+    const restoredRows = ((await env.DB.prepare('SELECT wallet, restored_at FROM user_wallet_lists_restored WHERE address = ?').bind(address).all()).results) || [];
+    const restoredAt = new Map(restoredRows.map((r) => [r.wallet, Number(r.restored_at) || 0]));
+    const deletedAt = body.deletedAt && typeof body.deletedAt === 'object' ? body.deletedAt : {};
+    const incomingSet = new Set(Array.isArray(body.wallets) ? body.wallets : []);
+    const newlyDeletedOhne = newlyDeleted.filter((w) => {
+      if (restored.includes(w) || incomingSet.has(w)) return false;          // gleichzeitig vorhanden -> nicht loeschen
+      const r = restoredAt.get(w);
+      if (r == null) return true;                                             // nie wiederhergestellt -> wie bisher
+      return (Number(deletedAt[w]) || 0) > r;                                 // nur eine spaetere echte Loeschung zaehlt
+    });
+    const wiederGeloescht = newlyDeletedOhne.filter((w) => restoredAt.has(w));
+    if (wiederGeloescht.length) {
+      const delR = env.DB.prepare('DELETE FROM user_wallet_lists_restored WHERE address = ? AND wallet = ?');
+      await env.DB.batch(wiederGeloescht.map((w) => delR.bind(address, w)));
+    }
 
     if (newlyDeletedOhne.length) {
       const now0 = Date.now();
@@ -1751,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1030';
+const WORKER_VERSION = '2026-10-23-1100';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
