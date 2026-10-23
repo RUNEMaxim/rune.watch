@@ -5739,7 +5739,9 @@ async function syncPushPersoenlich(env) {
         else if (p.bond && !churnNeu && a.s === 'Active' && v.s === 'Active' && delta < -0.5) {
           const offen = (z.slashVerdacht || {})[na];
           if (offen && Math.abs(offen.b - v.b) < 0.5) {
-            meldungen.push({ titel: de ? 'Slash' : 'Slash', text: `\u2212${runeTxt(a.b - v.b)} RUNE \u00b7 Node ${kurzNode(na)}`, tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
+            // PERSOENLICH: a.b/v.b sind die Summe DEINER Bond-Provider-Eintraege bei dieser Node,
+            // nicht der Bond der ganzen Node -- die Meldung nennt also deinen eigenen Verlust.
+            meldungen.push({ titel: de ? 'Slash bei deinem Bond' : 'Slash on your bond', text: (de ? 'Du hast ' : 'You lost ') + `${runeTxt(a.b - v.b)} RUNE` + (de ? ` verloren \u00b7 Node ${kurzNode(na)}` : ` \u00b7 node ${kurzNode(na)}`), tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
             delete z.slashVerdacht[na];
           } else {
             z.slashVerdacht = { ...(z.slashVerdacht || {}), [na]: { b: v.b, t: Date.now() } };
