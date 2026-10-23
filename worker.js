@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1700';
+const WORKER_VERSION = '2026-10-23-1745';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4486,6 +4486,9 @@ export default {
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
+      if (url.pathname === '/analyse/swaps.csv') {
+        try { return await handleAnalyseSwapsCsv(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/analyse/volumen-kurs') {
         try { return await handleAnalyseVolumenKurs(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -5859,7 +5862,8 @@ async function anaBinanceTage(symbol, vonMs) {
     try {
       let start = vonMs;
       for (let runde = 0; runde < 10 && start < Date.now(); runde++) {
-        const r = await fetchWithTimeout(`${host}/api/v3/klines?symbol=${symbol}&interval=1d&startTime=${start}&limit=1000`, { timeoutMs: 12000 });
+        // Kurze Wartezeit: Binance antwortet Cloudflare oft gar nicht -- nicht 12 s haengen bleiben.
+        const r = await fetchWithTimeout(`${host}/api/v3/klines?symbol=${symbol}&interval=1d&startTime=${start}&limit=1000`, { timeoutMs: 5000 });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const k = await r.json();
         if (!Array.isArray(k) || !k.length) break;
@@ -5890,6 +5894,25 @@ async function anaBinanceTage(symbol, vonMs) {
     } catch (e) { fehler.push(variante.name + ': ' + (e?.message || e)); tage.clear(); }
   }
   return { tage, quelle: null, fehler };
+}
+// CSV-EXPORT der THORChain-Swaps je Tag (Midgard), fuer die Auswertung ausserhalb des Workers.
+// GET /analyse/swaps.csv?ab=2020-09-01   Spalten in RUNE (nicht 1e8).
+async function handleAnalyseSwapsCsv(request, env, url) {
+  const abParam = url.searchParams.get('ab') || '2020-09-01';
+  const jetztS = Math.floor(Date.now() / 1000);
+  const vonS = /^\d{4}-\d{2}-\d{2}$/.test(abParam) ? Math.floor(Date.parse(abParam + 'T00:00:00Z') / 1000) : jetztS - 400 * 86400;
+  const alle = new Map();
+  for (let von = vonS; von < jetztS; von += 390 * 86400) {
+    const bis = Math.min(jetztS, von + 390 * 86400);
+    const j = await fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&from=${von}&to=${bis}`).catch(() => null);
+    for (const iv of (j && j.intervals) || []) alle.set(String(iv.startTime), iv);
+  }
+  const zeilen = [...alle.values()].sort((a, b) => Number(a.startTime) - Number(b.startTime));
+  const z = v => (Number(v || 0) / 1e8).toFixed(4);
+  const csv = ['date,toRuneVolume,toAssetVolume,totalVolume,toRuneCount,toAssetCount,totalCount,runePriceUSD_midgard']
+    .concat(zeilen.map(iv => [new Date(Number(iv.startTime) * 1000).toISOString().slice(0, 10), z(iv.toRuneVolume), z(iv.toAssetVolume), z(iv.totalVolume), iv.toRuneCount || 0, iv.toAssetCount || 0, iv.totalCount || 0, iv.runePriceUSD || ''].join(',')))
+    .join('\n');
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="thorchain-swaps-1D.csv"', 'Cache-Control': 'no-store' } });
 }
 async function handleAnalyseVolumenKurs(request, env, url) {
   // ZEITRAUM: ?tage=365 (Standard) ODER ?ab=2021-01-01 (beliebig weit zurueck). Midgard liefert
