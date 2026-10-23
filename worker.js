@@ -1751,7 +1751,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-21-1930';
+const WORKER_VERSION = '2026-10-23-1030';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5731,8 +5731,22 @@ async function syncPushPersoenlich(env) {
         if (p.node && v.l && !a.l) meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)}: Austritt angefragt` : `Your node ${kurzNode(na)}: leave requested`, tag: 'rw-leave-' + na });
         const delta = v.b - a.b;
         if (churnNeu && delta > 0) rewardSumme += delta;
-        // Bond sinkt waehrend die Node aktiv ist und kein Churn war -> Slash.
-        else if (p.bond && !churnNeu && a.s === 'Active' && v.s === 'Active' && delta < -0.5) meldungen.push({ titel: de ? 'Slash' : 'Slash', text: `\u2212${runeTxt(-delta)} RUNE \u00b7 Node ${kurzNode(na)}`, tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
+        // Bond sinkt waehrend die Node aktiv ist und kein Churn war -> MOEGLICHER Slash.
+        // BESTAETIGUNG NOETIG (gemeldet: Push "-1.800 RUNE", Slash-Check fand nichts): Die
+        // THORNode-Server antworten nicht immer vom selben Stand -- besonders waehrend eines
+        // Upgrades kann einer einen aelteren Bond liefern. Deshalb erst melden, wenn der niedrigere
+        // Wert beim NAECHSTEN Lauf bestaetigt ist; bis dahin bleibt der alte Wert die Basis.
+        else if (p.bond && !churnNeu && a.s === 'Active' && v.s === 'Active' && delta < -0.5) {
+          const offen = (z.slashVerdacht || {})[na];
+          if (offen && Math.abs(offen.b - v.b) < 0.5) {
+            meldungen.push({ titel: de ? 'Slash' : 'Slash', text: `\u2212${runeTxt(a.b - v.b)} RUNE \u00b7 Node ${kurzNode(na)}`, tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
+            delete z.slashVerdacht[na];
+          } else {
+            z.slashVerdacht = { ...(z.slashVerdacht || {}), [na]: { b: v.b, t: Date.now() } };
+            neu[na] = { ...v, b: a.b };   // alten Bond als Basis behalten, bis bestaetigt
+          }
+        }
+        else if (z.slashVerdacht && z.slashVerdacht[na]) delete z.slashVerdacht[na];
       }
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
       if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)`, tag: 'rw-refund-' + na });
