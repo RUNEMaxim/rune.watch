@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-23-1745';
+const WORKER_VERSION = '2026-10-24-1900';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -3584,7 +3584,23 @@ function mrKompakt(m) {
     datumMs: alsMs((m && (m.merged_at || m.updated_at)) || null),
     entwurf: !!(m && (m.draft || m.work_in_progress)),
     url: (m && m.web_url) || null,
+    visualReview: visualReviewVon(m),
   };
+}
+// VISUAL REVIEW (Son of Odin, Okt. 2026: Skill thorchain/misc/visual-review, ueber den Bot Huginn
+// an jede MR gehaengt): eine verstaendliche, bebilderte Erklaerung der Aenderung. Gesucht wird in
+// der MR-Beschreibung eine Zeile mit "visual review" und dem ersten Link darin, sonst ein Link,
+// dessen Adresse "visual" enthaelt. Format noch nicht bestaetigt -- deshalb bewusst grosszuegig.
+function visualReviewVon(m) {
+  const txt = String((m && m.description) || '');
+  if (!txt) return null;
+  const linkIn = z => { const t = z.match(/\]\((https?:\/\/[^)\s]+)\)/) || z.match(/(https?:\/\/[^\s)<>"']+)/); return t ? t[1] : null; };
+  for (const zeile of txt.split(/\r?\n/)) {
+    if (/visual[\s_-]*review/i.test(zeile)) { const u = linkIn(zeile); if (u) return u.slice(0, 400); }
+  }
+  const alle = txt.match(/https?:\/\/[^\s)<>"']+/g) || [];
+  const v = alle.find(u => /visual/i.test(u));
+  return v ? v.slice(0, 400) : null;
 }
 
 // Mehrere Seiten holen. Eine einzige Seite mit 20 Eintraegen deckte nur wenige Tage ab --
