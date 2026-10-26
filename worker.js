@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-26-1200';
+const WORKER_VERSION = '2026-10-26-1300';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4504,7 +4504,7 @@ export default {
       }
       if (url.pathname === '/rujira-brune-history') {
         try {
-          if (url.searchParams.get('neu') === '1') { try { await syncRujiraBruneKurs(env, 15); } catch (e) {} }
+          if (url.searchParams.get('neu') === '1') { try { await Promise.race([syncRujiraBruneKurs(env, 10), new Promise(r => setTimeout(r, 20000))]); } catch (e) {} }
           return await handleRujiraBruneHistory(request, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -6056,21 +6056,27 @@ async function findeRujiraBruneVertrag(env) {
   await sichereBruneTabellen(env);
   const m = await env.DB.prepare("SELECT v FROM rujira_brune_state WHERE k = 'vertrag'").first();
   if (m && m.v) { rujiraBruneVertragCache = m.v; return m.v; }
+  const merke = async a => { rujiraBruneVertragCache = a; await env.DB.prepare("INSERT OR REPLACE INTO rujira_brune_state (k, v) VALUES ('vertrag', ?)").bind(a).run(); return a; };
+  const passt = async a => { try { const cfg = await wasmSmart(a, { config: {} }); return !!(cfg && /brune/i.test(String(cfg.bond_denom))); } catch (e) { return false; } };
+  // SCHNELL (gemeldet: Zeitueberschreitung): Der Staking-Vertrag haelt fast alle bRUNE (laut
+  // Richliste ~4,9 Mio.). Also die groessten Besitzer der Denom x/brune pruefen, statt alle
+  // Vertraege eines Code-Typs einzeln abzufragen.
+  try {
+    const j = await fetchFromBases(getThornodeBases(), `/cosmos/bank/v1beta1/denom_owners/${encodeURIComponent('x/brune')}?pagination.limit=200`);
+    const liste = ((j && j.denom_owners) || []).map(o => ({ a: String(o.address || ''), n: Number(o.balance && o.balance.amount) || 0 }))
+      .filter(o => o.a.length > 50).sort((x, y) => y.n - x.n).slice(0, 6);   // Vertragsadressen sind lang
+    for (const o of liste) if (await passt(o.a)) return merke(o.a);
+  } catch (e) {}
   const info = await fetchFromBases(getThornodeBases(), `/cosmwasm/wasm/v1/contract/${RUJI_STAKING_VERTRAG}`);
   const codeId = Number(info && info.contract_info && info.contract_info.code_id);
   if (!codeId) return null;
-  for (const id of [codeId, codeId + 1, codeId - 1, codeId + 2, codeId - 2, codeId + 3, codeId - 3]) {
+  const bis = Date.now() + 15000;   // Notweg mit Zeitlimit
+  for (const id of [codeId, codeId + 1, codeId - 1]) {
     let liste = null;
     try { liste = await fetchFromBases(getThornodeBases(), `/cosmwasm/wasm/v1/code/${id}/contracts?pagination.limit=200`); } catch (e) { continue; }
     for (const a of (liste && liste.contracts) || []) {
-      try {
-        const cfg = await wasmSmart(a, { config: {} });
-        if (cfg && /brune/i.test(String(cfg.bond_denom)) && cfg.revenue_denom != null) {
-          rujiraBruneVertragCache = a;
-          await env.DB.prepare("INSERT OR REPLACE INTO rujira_brune_state (k, v) VALUES ('vertrag', ?)").bind(a).run();
-          return a;
-        }
-      } catch (e) {}
+      if (Date.now() > bis) return null;
+      if (await passt(a)) return merke(a);
     }
   }
   return null;
