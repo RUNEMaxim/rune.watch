@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-24-1900';
+const WORKER_VERSION = '2026-10-26-1200';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4502,6 +4502,12 @@ export default {
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
+      if (url.pathname === '/rujira-brune-history') {
+        try {
+          if (url.searchParams.get('neu') === '1') { try { await syncRujiraBruneKurs(env, 15); } catch (e) {} }
+          return await handleRujiraBruneHistory(request, env);
+        } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
       if (url.pathname === '/analyse/swaps.csv') {
         try { return await handleAnalyseSwapsCsv(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
@@ -6027,6 +6033,99 @@ F = ${granger ? f(granger.F, 2) : '—'} · p &asymp; ${granger ? f(granger.p, 3
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
 }
 
+// =====================================================================================
+// bRUNE AUF RUJIRA (Liquid Bonded RUNE): RUNE 1:1 -> bRUNE, bRUNE staken (Auszahlung in RUNE)
+// oder Auto-Compound -> ybRUNE (x/staking-x/brune). Gleicher Staking-Vertragstyp wie RUJI/TCY,
+// config.bond_denom == "x/brune". Kurs 1 ybRUNE = amount/shares bRUNE aus den liquid.bond-
+// Einzahlungen aller Nutzer (wie sTCY), dazu der aktuelle Stand aus status.
+// GET /rujira-brune-history -> { vertrag, jetzt: { kurs }, tage: [{ tag, ms, kurs }] }
+// =====================================================================================
+let rujiraBruneVertragCache = null;
+let bruneTabellenOk = false;
+async function sichereBruneTabellen(env) {
+  if (bruneTabellenOk) return;
+  await sichereRujiraTabellen(env);
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_brune_kurs (tag TEXT PRIMARY KEY, ms INTEGER, kurs REAL)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS rujira_brune_state (k TEXT PRIMARY KEY, v TEXT)`),
+  ]);
+  bruneTabellenOk = true;
+}
+async function findeRujiraBruneVertrag(env) {
+  if (rujiraBruneVertragCache) return rujiraBruneVertragCache;
+  await sichereBruneTabellen(env);
+  const m = await env.DB.prepare("SELECT v FROM rujira_brune_state WHERE k = 'vertrag'").first();
+  if (m && m.v) { rujiraBruneVertragCache = m.v; return m.v; }
+  const info = await fetchFromBases(getThornodeBases(), `/cosmwasm/wasm/v1/contract/${RUJI_STAKING_VERTRAG}`);
+  const codeId = Number(info && info.contract_info && info.contract_info.code_id);
+  if (!codeId) return null;
+  for (const id of [codeId, codeId + 1, codeId - 1, codeId + 2, codeId - 2, codeId + 3, codeId - 3]) {
+    let liste = null;
+    try { liste = await fetchFromBases(getThornodeBases(), `/cosmwasm/wasm/v1/code/${id}/contracts?pagination.limit=200`); } catch (e) { continue; }
+    for (const a of (liste && liste.contracts) || []) {
+      try {
+        const cfg = await wasmSmart(a, { config: {} });
+        if (cfg && /brune/i.test(String(cfg.bond_denom)) && cfg.revenue_denom != null) {
+          rujiraBruneVertragCache = a;
+          await env.DB.prepare("INSERT OR REPLACE INTO rujira_brune_state (k, v) VALUES ('vertrag', ?)").bind(a).run();
+          return a;
+        }
+      } catch (e) {}
+    }
+  }
+  return null;
+}
+async function syncRujiraBruneKurs(env, seiten = 6) {
+  await sichereBruneTabellen(env);
+  const vertrag = await findeRujiraBruneVertrag(env);
+  if (!vertrag) return;
+  const st = await env.DB.prepare("SELECT v FROM rujira_brune_state WHERE k = 'kurs_token'").first();
+  const fertig = await env.DB.prepare("SELECT v FROM rujira_brune_state WHERE k = 'kurs_fertig'").first();
+  const speichere = (ms, kurs) => env.DB.prepare(
+    `INSERT INTO rujira_brune_kurs (tag, ms, kurs) VALUES (?, ?, ?)
+     ON CONFLICT(tag) DO UPDATE SET ms = excluded.ms, kurs = excluded.kurs WHERE excluded.ms > rujira_brune_kurs.ms`
+  ).bind(new Date(ms).toISOString().slice(0, 10), ms, kurs).run();
+  const seite = async token => {
+    const j = await fetchFromBases(getMidgardBases(), `/actions?address=${vertrag}&type=contract&limit=50${token ? `&nextPageToken=${token}` : ''}`);
+    for (const act of (j && j.actions) || []) {
+      const c = act && act.metadata && act.metadata.contract;
+      const typ = String(c && c.contractType || '');
+      const bond = /rujira-staking\/liquid\.bond$/.test(typ), unbond = /rujira-staking\/liquid\.unbond$/.test(typ);
+      if (!bond && !unbond) continue;
+      const a = Number(c.attributes && (bond ? c.attributes.amount : c.attributes.returned)), sh = Number(c.attributes && c.attributes.shares);
+      const ms = Math.round(Number(act.date) / 1e6);
+      if (a > 0 && sh > 0 && ms > 0) await speichere(ms, a / sh);
+    }
+    return (j && j.meta && j.meta.nextPageToken) || null;
+  };
+  await seite(null);
+  // Aktueller Stand aus dem Vertrag (auch an Tagen ohne Einzahlung)
+  try {
+    const s = await wasmSmart(vertrag, { status: {} });
+    const sh = Number(s && s.liquid_bond_shares), sz = Number(s && s.liquid_bond_size);
+    if (sh > 0 && sz > 0) await speichere(Date.now(), sz / sh);
+  } catch (e) {}
+  if (fertig) return;
+  let token = st && st.v || null;
+  if (!token) token = await seite(null);
+  for (let i = 0; i < seiten && token; i++) token = await seite(token);
+  await env.DB.prepare("INSERT OR REPLACE INTO rujira_brune_state (k, v) VALUES ('kurs_token', ?)").bind(token || '').run();
+  if (!token) await env.DB.prepare("INSERT OR REPLACE INTO rujira_brune_state (k, v) VALUES ('kurs_fertig', '1')").run();
+}
+async function handleRujiraBruneHistory(request, env) {
+  await sichereBruneTabellen(env);
+  const r = await env.DB.prepare('SELECT tag, ms, kurs FROM rujira_brune_kurs ORDER BY tag ASC').all();
+  let jetzt = null;
+  try {
+    const v = await findeRujiraBruneVertrag(env);
+    const s = v ? await wasmSmart(v, { status: {} }) : null;
+    const sh = Number(s && s.liquid_bond_shares), sz = Number(s && s.liquid_bond_size);
+    if (sh > 0 && sz > 0) jetzt = { kurs: sz / sh, groesse: sz / 1e8 };
+  } catch (e) {}
+  const fertig = await env.DB.prepare("SELECT v FROM rujira_brune_state WHERE k = 'kurs_fertig'").first();
+  return json({ vertrag: rujiraBruneVertragCache, jetzt, kursFertig: !!fertig, tage: r.results || [] }, env);
+}
+
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -6041,6 +6140,7 @@ async function runRefreshCycle(env) {
   await schritt('Rujira TCY Kurs', () => syncRujiraKursEreignisse(env));
   await schritt('TCY native Referenz', () => syncTcyNativeReferenz(env));
   await schritt('Spenden-Verlauf', () => syncDonationHistory(env));
+  await schritt('bRUNE-Kurs', () => syncRujiraBruneKurs(env));
   await schritt('Push', () => syncPush(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
