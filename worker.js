@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-26-1400';
+const WORKER_VERSION = '2026-10-26-1530';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5640,10 +5640,10 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
-      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname,
+      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
     // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
-    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname);
+    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname || p.woche !== false);
     const adr = persoenlich ? [...new Set((Array.isArray(body.adressen) ? body.adressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => isValidThorAddress(a)))].slice(0, 20) : [];
     await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at, adressen = excluded.adressen`)
@@ -5814,6 +5814,35 @@ async function syncPushPersoenlich(env) {
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
       if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)`, tag: 'rw-refund-' + na });
       if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : ''), tag: 'rw-churn-' + churnH });
+    }
+    // WOCHEN-REVIEW (gewuenscht): Rewards der Woche mitzaehlen und montags um 8:00 UTC eine
+    // Zusammenfassung schicken -- Rewards in RUNE und $, Zahl der Churns, aktueller Bond, RUNE-Kurs
+    // im Vergleich zur Vorwoche. Thema "woche" (Standard an).
+    {
+      const jetzt = new Date();
+      const montag = new Date(Date.UTC(jetzt.getUTCFullYear(), jetzt.getUTCMonth(), jetzt.getUTCDate() - ((jetzt.getUTCDay() + 6) % 7)));
+      const wocheKey = montag.toISOString().slice(0, 10);
+      const bondJetzt = Object.values(neu).reduce((q, v) => q + (Number(v.b) || 0), 0);
+      if (!z.woche) z.woche = { key: wocheKey, rune: 0, churns: 0, preis0: preis || null };
+      if (alt && churnH && z.churn && churnH !== z.churn) {
+        let r2 = 0;
+        for (const [na, v] of Object.entries(neu)) { const a = alt[na]; if (a && v.b - a.b > 0) r2 += v.b - a.b; }
+        if (r2 > 0.01) { z.woche.rune = (Number(z.woche.rune) || 0) + r2; z.woche.churns = (Number(z.woche.churns) || 0) + 1; }
+      }
+      const sendeZeit = montag.getTime() + 8 * 3600e3;
+      if (z.woche.key !== wocheKey && Date.now() >= sendeZeit) {
+        const w = z.woche;
+        if (p.woche !== false && bondJetzt > 0) {
+          const pr = preis && w.preis0 ? ((preis / w.preis0 - 1) * 100) : null;
+          const teile = [];
+          teile.push(w.rune > 0.01 ? `+${runeTxt(w.rune)} RUNE` + (preis ? ` ($${(w.rune * preis).toFixed(0)})` : '') + (de ? ` aus ${w.churns} Churn${w.churns === 1 ? '' : 's'}` : ` from ${w.churns} churn${w.churns === 1 ? '' : 's'}`)
+                                 : (de ? 'Keine neuen Rewards (kein Churn)' : 'No new rewards (no churn)'));
+          teile.push((de ? 'Bond ' : 'Bond ') + runeTxt(bondJetzt) + ' RUNE');
+          if (preis) teile.push('RUNE $' + preis.toFixed(3) + (pr != null ? ` (${pr >= 0 ? '+' : ''}${pr.toFixed(1)} %)` : ''));
+          meldungen.push({ titel: de ? 'Deine Woche bei THORChain' : 'Your week on THORChain', text: teile.join(' \u00b7 '), tag: 'rw-woche-' + w.key });
+        }
+        z.woche = { key: wocheKey, rune: 0, churns: 0, preis0: preis || null };
+      }
     }
     z.nodes = neu;
     if (churnH) z.churn = churnH;
