@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-26-1300';
+const WORKER_VERSION = '2026-10-26-1400';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2878,7 +2878,14 @@ async function baueDexVergleich() {
   const letzteTage = Object.values(reihen).filter((r) => r.length)
     .map((r) => { const nurAbgeschlossen = r.filter((e) => e.day < heute); return nurAbgeschlossen.length ? nurAbgeschlossen[nurAbgeschlossen.length - 1].day : null; })
     .filter(Boolean);
-  const stichtag = letzteTage.length ? letzteTage.sort()[0] : null;
+  // NACHZUEGLER NICHT ALLES AUFHALTEN LASSEN (gemeldet: "Was ist mit DefiLlama?" -- Anzeige stand
+  // am 26. noch auf dem 22., weil EINE DefiLlama-Reihe seit Tagen nichts Neues hatte). Quellen,
+  // die mehr als 1 Tag hinter der neuesten liegen, bestimmen den Stichtag nicht mehr; sie stehen
+  // fuer den Stichtag ohne Wert ("wartet auf DefiLlama") und holen von selbst auf.
+  const tagMinus = (tag, n) => new Date(Date.parse(tag + 'T00:00:00Z') - n * 86400000).toISOString().slice(0, 10);
+  const juengster = letzteTage.length ? letzteTage.slice().sort().pop() : null;
+  const aktuelle = juengster ? letzteTage.filter(d => d >= tagMinus(juengster, 1)) : [];
+  const stichtag = aktuelle.length ? aktuelle.slice().sort()[0] : (letzteTage.length ? letzteTage.slice().sort()[0] : null);
   // Welche Quelle haengt hinterher? Der Stichtag ist bewusst der FRUEHESTE gemeinsame Tag
   // (sonst stuende ein voller Tag THORChain gegen einen halben Tag Chainflip). Nur sagte die
   // Anzeige nie, WORAUF sie wartet -- gemeldet: "warum noch nicht der 20., es ist doch nach
@@ -2890,8 +2897,10 @@ async function baueDexVergleich() {
   }
   const neuesterTag = letzteTage.length ? letzteTage.slice().sort().pop() : null;
   const nachzuegler = stichtag && neuesterTag && neuesterTag > stichtag
-    ? Object.entries(letzterTagJe).filter(([, d]) => d === stichtag).map(([k]) => k)
+    ? Object.entries(letzterTagJe).filter(([, d]) => !d || d <= stichtag).map(([k]) => k)
     : [];
+  // Quellen, die fuer den Stichtag gar keinen Wert haben (laenger als 1 Tag im Rueckstand).
+  const veraltetSeit = Object.fromEntries(Object.entries(letzterTagJe).filter(([, d]) => d && stichtag && d < stichtag));
 
   const ALLE = [{ key: 'thorchain', name: 'THORChain', source: thorMidgardTage.length && !thorVanaTage.length ? 'midgard' : 'vanaheimex' },
     ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name,
@@ -3064,6 +3073,7 @@ async function baueDexVergleich() {
     // und welche Quellen ihn noch nicht haben.
     naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
     wartetAuf: nachzuegler,
+    veraltetSeit,
     sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': nearDune.tage.size ? 'dune-near' : 'defillama',
                maya: 'maya-midgard', mayaFallback: 'defillama' },
     // Maya-Tage, fuer die Mayas Midgard nichts hatte und DefiLlama einspringen musste.
