@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-26-1530';
+const WORKER_VERSION = '2026-10-26-1545';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -4510,6 +4510,17 @@ export default {
           const f = await env.DB.prepare("SELECT v FROM rujira_tcy_state WHERE k = 'kurs_fertig'").first();
           return json({ ok: true, tage: Number(c?.n) || 0, aeltester: c?.von || null,
             kursTage: Number(k?.n) || 0, kursAeltester: k?.von || null, kursFertig: !!f }, env);
+        } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+      }
+      // Node-Liste fuer "Beispiel ansehen": nur die noetigen Felder, 10 Minuten zwischengespeichert.
+      if (url.pathname === '/nodes-raw') {
+        try {
+          if (!globalThis.__rwNodesRaw || Date.now() - globalThis.__rwNodesRaw.t > 600000) {
+            const n = await fetchFromBases(getThornodeBases(), '/thorchain/nodes');
+            if (Array.isArray(n)) globalThis.__rwNodesRaw = { t: Date.now(), d: n.map(x => ({ status: x.status, slash_points: x.slash_points, node_operator_address: x.node_operator_address,
+              bond_providers: { providers: ((x.bond_providers && x.bond_providers.providers) || []).map(p => ({ bond_address: p.bond_address, bond: p.bond })) } })) };
+          }
+          return json(globalThis.__rwNodesRaw ? globalThis.__rwNodesRaw.d : [], env);
         } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/rujira-brune-history') {
