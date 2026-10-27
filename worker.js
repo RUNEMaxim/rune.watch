@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-28-1530';
+const WORKER_VERSION = '2026-10-28-1600';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5824,22 +5824,42 @@ async function syncPush(env) {
   if (!Number(anzahl && anzahl.n)) return;
   // 1) HALTS: Chains mit Handel- oder Chain-Halt laut inbound_addresses + globale Mimir-Halts.
   try {
-    const [inb, mimir] = await Promise.all([
+    const [inb, mimir, lb] = await Promise.all([
       fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses').catch(() => null),
       fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null),
+      fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null),
     ]);
     if (Array.isArray(inb) && mimir) {
+      // GLEICHE ERKENNUNG WIE IN DER APP (gemeldet: "Halts sind gar nicht erschienen" -- die App
+      // zeigte "Chain halted: GAIA, SOL", der Worker sah nichts). Der Worker pruefte nur
+      // inbound_addresses (halted / chain_trading_paused) und den nicht existierenden Schluessel
+      // HALTSIGNINGGLOBAL. Halts per Mimir je Chain (HALT<C>CHAIN, HALT<C>TRADING, HALTSIGNING<C>,
+      // SOLVENCYHALT<C>CHAIN) und LP-Pausen blieben unsichtbar. Mimir-Werte > 1 sind Blockhoehen:
+      // aktiv erst ab dieser Hoehe (wie in der App).
+      const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
+      const M = {}; for (const [k, v] of Object.entries(mimir)) M[String(k).toUpperCase()] = Number(v);
+      const aktiv = v => Number.isFinite(v) && v > 0 && (v <= 1 || !H || v <= H);
       const jetzt = new Set();
-      for (const c of inb) if (c && (c.halted || c.chain_trading_paused)) jetzt.add(String(c.chain));
-      for (const [k, v] of Object.entries(mimir)) if (/^(HALTTRADING|HALTCHAINGLOBAL|HALTSIGNINGGLOBAL)$/.test(k) && Number(v) > 0) jetzt.add('GLOBAL');
+      for (const c of inb) {
+        const C = String(c && c.chain || '').toUpperCase(); if (!C) continue;
+        if (c.halted || c.chain_trading_paused || c.chain_lp_actions_paused
+          || ['SOLVENCYHALT' + C + 'CHAIN', 'HALT' + C + 'CHAIN', 'HALT' + C + 'TRADING', 'HALTSIGNING' + C].some(k => aktiv(M[k]))) jetzt.add(C);
+      }
+      if (['HALTCHAINGLOBAL', 'HALTTRADING', 'HALTSIGNING'].some(k => aktiv(M[k])) || inb.some(x => x && x.global_trading_paused)
+        || (Number.isFinite(M.NODEPAUSECHAINGLOBAL) && H && M.NODEPAUSECHAINGLOBAL > H)) jetzt.add('GLOBAL');
       const altRoh = await pushState(env, 'halts');
       const alt = altRoh ? new Set(JSON.parse(altRoh)) : null;
       if (alt) {
         const neu = [...jetzt].filter(x => !alt.has(x)), frei = [...alt].filter(x => !jetzt.has(x));
-        if (neu.length) await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: neu.includes('GLOBAL') ? (de ? 'Handel netzweit angehalten' : 'Trading halted network-wide') : (de ? `Angehalten: ${neu.join(', ')}` : `Halted: ${neu.join(', ')}`), tag: 'rw-halt-' + neu.join('-') }));
-        if (frei.length) await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: frei.includes('GLOBAL') ? (de ? 'Handel l\u00e4uft wieder' : 'Trading resumed') : (de ? `Wieder aktiv: ${frei.join(', ')}` : `Active again: ${frei.join(', ')}`), tag: 'rw-frei-' + frei.join('-') }));
-      }
-      await pushStateSet(env, 'halts', JSON.stringify([...jetzt]));
+        // ERNEUT VERSUCHEN statt still verlieren: Ging an niemanden etwas raus, obwohl es Abos
+        // fuer Halts gibt, bleibt der alte Stand gespeichert -- der naechste Lauf versucht es nochmal.
+        const haltAbos = (await env.DB.prepare("SELECT prefs FROM push_subs WHERE fails < 20").all()).results.filter(r => { try { return JSON.parse(r.prefs || '{}').halt; } catch (e) { return false; } }).length;
+        let gesendet = 0;
+        if (neu.length) gesendet += await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: neu.includes('GLOBAL') ? (de ? 'Handel netzweit angehalten' : 'Trading halted network-wide') : (de ? `Angehalten: ${neu.join(', ')}` : `Halted: ${neu.join(', ')}`), tag: 'rw-halt-' + neu.join('-') }));
+        if (frei.length) gesendet += await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: frei.includes('GLOBAL') ? (de ? 'Handel l\u00e4uft wieder' : 'Trading resumed') : (de ? `Wieder aktiv: ${frei.join(', ')}` : `Active again: ${frei.join(', ')}`), tag: 'rw-frei-' + frei.join('-') }));
+        if ((neu.length || frei.length) && haltAbos > 0 && gesendet === 0) console.warn('[push] Halt-Meldung an niemanden zugestellt, neuer Versuch im naechsten Lauf');
+        else await pushStateSet(env, 'halts', JSON.stringify([...jetzt]));
+      } else await pushStateSet(env, 'halts', JSON.stringify([...jetzt]));
       // 2) UPDATES: Bond Yield freigeschaltet
       const by = Number(mimir.BONDYIELDENABLED) > 0;
       const byAlt = await pushState(env, 'bondyield');
