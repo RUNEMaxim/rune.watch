@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-27-0930';
+const WORKER_VERSION = '2026-10-28-1200';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -1807,6 +1807,133 @@ async function handleClick(request, env, ctx) {
     })());
   }
   return new Response(null, { status: 204 });
+}
+
+// ============================================================================================
+// MARKTGROESSE (gewuenscht: "wie viele Wallets und User gibt es bei THORChain -- wie viel Potenzial
+// hat rune.watch?"). Zaehlt ADRESSEN (keine Personen): Bonder (exakt, aus der Node-Liste),
+// Node-Betreiber, TCY-/bRUNE-/ybRUNE-/RUNE-Halter (Besitzerlisten, mit Zeitlimit -> ggf. Untergrenze),
+// RUNEPool-Anbieter, gestakte TCY -- und wie viele davon schon in rune.watch eingetragen sind.
+// Ergebnis 12 h zwischengespeichert; ?neu=1 rechnet neu. Nur mit Statistik-Schluessel.
+// ============================================================================================
+async function handleMarkt(request, env) {
+  const url = new URL(request.url);
+  if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'FORBIDDEN' }, env, 403);
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS markt_cache (k TEXT PRIMARY KEY, v TEXT, at INTEGER)').run();
+  if (url.searchParams.get('neu') !== '1') {
+    const c = await env.DB.prepare('SELECT v, at FROM markt_cache WHERE k = ?').bind('markt').first().catch(() => null);
+    if (c && Date.now() - c.at < 12 * 3600e3) return marktAntwort(JSON.parse(c.v), url, env);
+  }
+  const t0 = Date.now(), BUDGET = 25000;
+  const zeitUebrig = () => BUDGET - (Date.now() - t0);
+  const E8 = 1e8;
+  const erg = { stand: new Date().toISOString(), hinweis: 'Gezaehlt werden Adressen, nicht Personen.' };
+
+  // 1) Nodes: Bonder + Betreiber (exakt)
+  const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
+  const bonder = new Map(), betreiber = new Set();
+  let aktiv = 0;
+  for (const n of (Array.isArray(nodes) ? nodes : [])) {
+    if (n.status === 'Active') aktiv++;
+    if (n.node_operator_address) betreiber.add(String(n.node_operator_address).toLowerCase());
+    for (const pr of ((n.bond_providers && n.bond_providers.providers) || [])) {
+      const a = String(pr.bond_address || '').toLowerCase(); if (!a) continue;
+      bonder.set(a, (bonder.get(a) || 0) + Number(pr.bond || 0) / E8);
+    }
+  }
+  const klassen = { 'unter 1.000': 0, '1.000-10.000': 0, '10.000-100.000': 0, 'ueber 100.000': 0 };
+  let bondSumme = 0;
+  for (const v of bonder.values()) { bondSumme += v; if (v < 1000) klassen['unter 1.000']++; else if (v < 10000) klassen['1.000-10.000']++; else if (v < 100000) klassen['10.000-100.000']++; else klassen['ueber 100.000']++; }
+  erg.nodes = { gesamt: Array.isArray(nodes) ? nodes.length : null, aktiv, betreiber: betreiber.size };
+  erg.bonder = { adressen: bonder.size, mitBondUeber0: [...bonder.values()].filter(v => v > 0).length, bondRUNE: Math.round(bondSumme), nachGroesse: klassen };
+
+  // 2) Besitzerlisten (mit Zeitlimit)
+  const zaehleDenom = async (denom, minEinheiten, maxSeiten) => {
+    let key = null, n = 0, ueber = 0, seiten = 0, total = null, vollstaendig = false;
+    while (seiten < maxSeiten && zeitUebrig() > 3000) {
+      const q = `/cosmos/bank/v1beta1/denom_owners/${encodeURIComponent(denom)}?pagination.limit=1000${seiten === 0 ? '&pagination.count_total=true' : ''}${key ? '&pagination.key=' + encodeURIComponent(key) : ''}`;
+      const j = await fetchFromBases(getThornodeBases(), q).catch(() => null);
+      if (!j) break;
+      if (seiten === 0 && j.pagination && j.pagination.total != null) total = Number(j.pagination.total) || null;
+      const liste = j.denom_owners || [];
+      for (const o of liste) { n++; if (Number(o.balance && o.balance.amount) >= minEinheiten) ueber++; }
+      seiten++;
+      key = j.pagination && j.pagination.next_key;
+      if (!key) { vollstaendig = true; break; }
+    }
+    return { adressenGesamt: total != null ? total : n, gezaehlt: n, abMindestmenge: ueber, mindestmenge: minEinheiten / E8, vollstaendig };
+  };
+  erg.tcyHalter = await zaehleDenom('tcy', 1 * E8, 30).catch(() => null);
+  erg.bruneHalter = await zaehleDenom('x/brune', 1 * E8, 5).catch(() => null);
+  erg.ybruneHalter = await zaehleDenom('x/staking-x/brune', 1 * E8, 5).catch(() => null);
+  try {
+    const st = await fetchFromBases(getThornodeBases(), '/thorchain/tcy_stakers').catch(() => null);
+    const liste = (st && (st.tcy_stakers || st)) || [];
+    erg.tcyGestakt = Array.isArray(liste) ? { adressen: liste.filter(x => Number(x.amount || 0) > 0).length } : null;
+  } catch (e) { erg.tcyGestakt = null; }
+  try {
+    const rp = await fetchFromBases(getThornodeBases(), '/thorchain/rune_providers').catch(() => null);
+    erg.runePool = Array.isArray(rp) ? { adressen: rp.filter(x => Number(x.units || x.deposit_amount || 0) > 0).length } : null;
+  } catch (e) { erg.runePool = null; }
+  // RUNE zuletzt (groesste Liste), nur Konten ab 10 RUNE zaehlen als "Halter"
+  erg.runeHalter = await zaehleDenom('rune', 10 * E8, 200).catch(() => null);
+
+  // 3) rune.watch: eingetragene Wallets (alle Wallet-Listen) und Ueberschneidung mit den Bondern
+  const rw = new Set();
+  try {
+    const rows = await env.DB.prepare('SELECT wallets FROM user_wallet_lists').all();
+    for (const r of (rows.results || [])) {
+      let w = []; try { w = JSON.parse(r.wallets || '[]'); } catch (e) {}
+      for (const x of w) { const a = String((x && (x.address || x)) || '').toLowerCase(); if (a.startsWith('thor1')) rw.add(a); }
+    }
+  } catch (e) {}
+  try {
+    const rows = await env.DB.prepare('SELECT DISTINCT address FROM sync_activity_days').all();
+    for (const r of (rows.results || [])) { const a = String(r.address || '').toLowerCase(); if (a.startsWith('thor1')) rw.add(a); }
+  } catch (e) {}
+  let rwBonder = 0, rwBond = 0;
+  for (const a of rw) if (bonder.has(a)) { rwBonder++; rwBond += bonder.get(a); }
+  erg.runeWatch = {
+    adressen: rw.size,
+    davonBonder: rwBonder,
+    anteilAnBondern: bonder.size ? Math.round(rwBonder / bonder.size * 1000) / 10 : null,
+    bondRUNE: Math.round(rwBond),
+    anteilAmBond: bondSumme ? Math.round(rwBond / bondSumme * 1000) / 10 : null,
+  };
+  erg.dauerMs = Date.now() - t0;
+  await env.DB.prepare('INSERT OR REPLACE INTO markt_cache (k, v, at) VALUES (?, ?, ?)').bind('markt', JSON.stringify(erg), Date.now()).run().catch(() => {});
+  return marktAntwort(erg, url, env);
+}
+
+function marktAntwort(erg, url, env) {
+  if (url.searchParams.get('format') === 'json') return json(erg, env);
+  const f = n => n == null ? '\u2013' : Number(n).toLocaleString('de-DE');
+  const h = x => x ? (x.vollstaendig ? f(x.adressenGesamt) : f(x.adressenGesamt) + (x.adressenGesamt === x.gezaehlt ? ' (Untergrenze)' : '')) : '\u2013';
+  const ab = x => x ? f(x.abMindestmenge) + (x.vollstaendig ? '' : ' (von ' + f(x.gezaehlt) + ' gezaehlten)') : '\u2013';
+  const zeilen = [
+    ['Nodes (aktiv)', `${f(erg.nodes && erg.nodes.gesamt)} (${f(erg.nodes && erg.nodes.aktiv)})`],
+    ['Node-Betreiber', f(erg.nodes && erg.nodes.betreiber)],
+    ['Bonder (Adressen)', f(erg.bonder && erg.bonder.adressen)],
+    ['  davon unter 1.000 RUNE', f(erg.bonder && erg.bonder.nachGroesse['unter 1.000'])],
+    ['  1.000 - 10.000', f(erg.bonder && erg.bonder.nachGroesse['1.000-10.000'])],
+    ['  10.000 - 100.000', f(erg.bonder && erg.bonder.nachGroesse['10.000-100.000'])],
+    ['  ueber 100.000', f(erg.bonder && erg.bonder.nachGroesse['ueber 100.000'])],
+    ['Bond gesamt (RUNE)', f(erg.bonder && erg.bonder.bondRUNE)],
+    ['TCY-Halter (Wallet) / ab 1 TCY', `${h(erg.tcyHalter)} / ${ab(erg.tcyHalter)}`],
+    ['TCY gestakt (Adressen)', f(erg.tcyGestakt && erg.tcyGestakt.adressen)],
+    ['bRUNE-Halter / ybRUNE-Halter', `${h(erg.bruneHalter)} / ${h(erg.ybruneHalter)}`],
+    ['RUNEPool-Anbieter', f(erg.runePool && erg.runePool.adressen)],
+    ['RUNE-Konten / ab 10 RUNE', `${h(erg.runeHalter)} / ${ab(erg.runeHalter)}`],
+    ['rune.watch: eingetragene Adressen', f(erg.runeWatch && erg.runeWatch.adressen)],
+    ['rune.watch: davon Bonder', `${f(erg.runeWatch && erg.runeWatch.davonBonder)} (${erg.runeWatch && erg.runeWatch.anteilAnBondern != null ? erg.runeWatch.anteilAnBondern + ' %' : '\u2013'} aller Bonder)`],
+    ['rune.watch: Anteil am gesamten Bond', erg.runeWatch && erg.runeWatch.anteilAmBond != null ? erg.runeWatch.anteilAmBond + ' %' : '\u2013'],
+  ];
+  const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>rune.watch Markt</title>
+<style>body{font:15px system-ui;background:#0b1418;color:#e6f2f2;margin:20px}table{border-collapse:collapse;width:100%;max-width:640px}td{padding:7px 6px;border-bottom:1px solid #1d2c31}td:last-child{text-align:right;font-variant-numeric:tabular-nums;color:#00DEE1}small{color:#8aa}</style>
+<h2>THORChain-Markt fuer rune.watch</h2><small>Stand ${erg.stand} \u00b7 ${erg.hinweis} \u00b7 Rechenzeit ${f(erg.dauerMs)} ms</small>
+<table>${zeilen.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('')}</table>
+<p><small>Neu rechnen: Adresse mit &amp;neu=1 aufrufen. Rohdaten: &amp;format=json</small></p>`;
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
 async function handleStats(request, env) {
@@ -4565,6 +4692,9 @@ export default {
       }
       if (url.pathname === '/stats') {
         return await handleStats(request, env);
+      }
+      if (url.pathname === '/analyse/markt') {
+        return await handleMarkt(request, env);
       }
       if (url.pathname.startsWith('/memoless/')) {
         return await handleMemoless(request, env);
