@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-28-1330';
+const WORKER_VERSION = '2026-10-28-1530';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5751,11 +5751,15 @@ async function pushVerschluesseln(sub, nutzlast) {
 async function pushSenden(env, sub, nachricht) {
   const koerper = await pushVerschluesseln(sub, JSON.stringify(nachricht));
   const { jwt, pub } = await vapidJwt(env, sub.endpoint);
+  // WICHTIGES SOFORT (Halt, Slash, Node raus): Urgency "high" -- iPhones stellen "normal" im
+  // Energiesparmodus oder bei wenig Akku teils erst spaeter oder gar nicht zu.
+  const dringend = /^rw-(halt|bond|slash|node)/.test(String(nachricht && nachricht.tag || '')) || /halt|slash/i.test(String(nachricht && nachricht.text || ''));
   const r = await fetch(sub.endpoint, { method: 'POST', body: koerper, headers: {
-    'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: 'normal',
+    'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: dringend ? 'high' : 'normal',
     Authorization: `vapid t=${jwt}, k=${pub}` } });
   if (r.status === 404 || r.status === 410) { await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(sub.id).run(); return 'weg'; }
-  if (!r.ok) { await env.DB.prepare('UPDATE push_subs SET fails = fails + 1 WHERE id = ?').bind(sub.id).run(); return 'fehler ' + r.status; }
+  // Fehler merken (Status + Zeit), damit man im Push-Status sieht, WARUM nichts ankommt.
+  if (!r.ok) { let txt = ''; try { txt = (await r.text()).slice(0, 120); } catch (e) {} await env.DB.prepare('UPDATE push_subs SET fails = fails + 1 WHERE id = ?').bind(sub.id).run(); await pushStateSet(env, 'letzterFehler', JSON.stringify({ at: Date.now(), status: r.status, txt, host: new URL(sub.endpoint).host })).catch(() => {}); return 'fehler ' + r.status; }
   await env.DB.prepare('UPDATE push_subs SET fails = 0 WHERE id = ?').bind(sub.id).run();
   return 'ok';
 }
@@ -5787,7 +5791,7 @@ async function handlePush(request, env, url) {
     const persoenlich = !!(p.churn || p.node || p.bond || p.thorname || p.woche !== false || p.tcy !== false);
     const adr = persoenlich ? [...new Set((Array.isArray(body.adressen) ? body.adressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => isValidThorAddress(a)))].slice(0, 20) : [];
     await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
-      ON CONFLICT(id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at, adressen = excluded.adressen`)
+      ON CONFLICT(id) DO UPDATE SET fails = 0, p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at, adressen = excluded.adressen`)
       .bind(id, sub.endpoint, keys.p256dh, keys.auth, prefs, body.lang === 'de' ? 'de' : 'en', besitzer, Date.now(), JSON.stringify(adr)).run();
     return json({ ok: true, besitzer: !!besitzer }, env);
   }
@@ -5904,12 +5908,17 @@ async function syncPushPersoenlich(env) {
   const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
   const preis = Number(st && st.runePriceUSD) || null;
   const heute = new Date().toISOString().slice(0, 10);
-  for (const row of subs) {
+  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
+}
+// EIN ABO (eigene Funktion, damit ein Fehler bei einem Abo nicht alle folgenden stoppt -- vorher
+// brach die ganze Schleife ab, und alle spaeteren Abos bekamen in diesem Durchgang nichts).
+async function pushEinAbo(env, row, nodes, churnH, preis, heute) {
+  {
     let p = {}, z = {}, adr = [];
     try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
     try { z = JSON.parse(row.zustand || '{}'); } catch (e) {}
     try { adr = JSON.parse(row.adressen || '[]'); } catch (e) {}
-    if (!adr.length) continue;
+    if (!adr.length) return;
     const de = row.lang === 'de';
     const meldungen = [];
     const alt = z.nodes || null;            // { node: { s: status, b: bond des Providers, l: leave } }
@@ -6353,6 +6362,11 @@ async function runRefreshCycle(env) {
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
   // nicht -- auch der Dune-Abruf. Dune steht jetzt vorn; gedrosselt kostet er nur eine D1-Abfrage.
   const schritt = async (name, fn) => { try { await fn(); } catch (e) { console.warn(`[rune-rewards-backend] ${name}:`, e?.message || String(e)); } };
+  // PUSH ZUERST (gemeldet: "Notifications noch nicht zuverlaessig"): Push lief als einer der
+  // letzten Schritte. Jeder Cron-Durchgang hat ein festes Budget an Unteranfragen und Laufzeit;
+  // verbrauchten die Schritte davor (Dune, Swap-Paare, Node-Historie, TCY ...) viel davon,
+  // scheiterten die Push-Abrufe und -Sendungen still -- mal kam eine Meldung, mal nicht.
+  await schritt('Push', () => syncPush(env));
   await schritt('Dune NEAR', () => syncNearDune(env));
   await schritt('Churns', () => refreshChurnsCache(env));
   await schritt('Swap-Paare', () => collectSwapPairStats(env));
@@ -6363,7 +6377,6 @@ async function runRefreshCycle(env) {
   await schritt('TCY native Referenz', () => syncTcyNativeReferenz(env));
   await schritt('Spenden-Verlauf', () => syncDonationHistory(env));
   await schritt('bRUNE-Kurs', () => syncRujiraBruneKurs(env));
-  await schritt('Push', () => syncPush(env));
   await schritt('Timeline', () => waermeTimeline(env));
 
   const now = Date.now();
