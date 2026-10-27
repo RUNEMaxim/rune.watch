@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-26-1545';
+const WORKER_VERSION = '2026-10-27-0930';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5788,7 +5788,13 @@ async function syncPushPersoenlich(env) {
       const prov = ((n.bond_providers && n.bond_providers.providers) || []).filter(x => adr.includes(String(x.bond_address || '').toLowerCase()));
       if (!prov.length) continue;
       const bond = prov.reduce((q, x) => q + Number(x.bond || 0) / 1e8, 0);
-      neu[n.node_address] = { s: n.status, b: bond, l: !!n.requested_to_leave };
+      // JE ADRESSE merken (gemeldet: "keine RUNE verloren und trotzdem Slash-Meldung", 1.228 RUNE):
+      // Aendert sich die Adressliste des Abos (eine Wallet fehlt kurz, anderes Geraet meldet weniger
+      // Wallets), sank die SUMME -- das sah aus wie ein Slash. Verglichen wird jetzt nur, was bei
+      // denselben Adressen passiert ist. tb = Gesamt-Bond der Node zum Gegencheck.
+      const pa = {};
+      for (const x of prov) pa[String(x.bond_address).toLowerCase()] = Number(x.bond || 0) / 1e8;
+      neu[n.node_address] = { s: n.status, b: bond, l: !!n.requested_to_leave, pa, tb: Number(n.total_bond || 0) / 1e8 };
     }
     if (alt) {
       let rewardSumme = 0;
@@ -5801,29 +5807,35 @@ async function syncPushPersoenlich(env) {
           else if (a.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist nicht mehr aktiv (${v.s})` : `Your node ${kurzNode(na)} is no longer active (${v.s})`, tag: 'rw-node-' + na });
         }
         if (p.node && v.l && !a.l) meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)}: Austritt angefragt` : `Your node ${kurzNode(na)}: leave requested`, tag: 'rw-leave-' + na });
-        const delta = v.b - a.b;
+        // Nur gemeinsame Adressen vergleichen; alte Eintraege ohne Aufschluesselung -> kein Slash-Test.
+        const gemeinsam = a.pa ? Object.keys(v.pa || {}).filter(k => k in a.pa) : [];
+        const delta = a.pa ? gemeinsam.reduce((q, k) => q + (v.pa[k] - a.pa[k]), 0) : (churnNeu ? v.b - a.b : 0);
+        // Ein echter Slash senkt auch den Gesamt-Bond der Node (mindestens um unseren Anteil).
+        const nodeSank = a.tb > 0 && v.tb > 0 ? (a.tb - v.tb) >= Math.max(0.5, -delta * 0.9) : false;
         if (churnNeu && delta > 0) rewardSumme += delta;
         // Bond sinkt waehrend die Node aktiv ist und kein Churn war -> MOEGLICHER Slash.
         // BESTAETIGUNG NOETIG (gemeldet: Push "-1.800 RUNE", Slash-Check fand nichts): Die
         // THORNode-Server antworten nicht immer vom selben Stand -- besonders waehrend eines
         // Upgrades kann einer einen aelteren Bond liefern. Deshalb erst melden, wenn der niedrigere
         // Wert beim NAECHSTEN Lauf bestaetigt ist; bis dahin bleibt der alte Wert die Basis.
-        else if (p.bond && !churnNeu && a.s === 'Active' && v.s === 'Active' && delta < -0.5) {
+        else if (p.bond && !churnNeu && a.s === 'Active' && v.s === 'Active' && delta < -0.5 && nodeSank) {
           const offen = (z.slashVerdacht || {})[na];
-          if (offen && Math.abs(offen.b - v.b) < 0.5) {
+          const vGem = gemeinsam.reduce((q, k) => q + v.pa[k], 0);
+          if (offen && Math.abs(offen.b - vGem) < 0.5) {
             // PERSOENLICH: a.b/v.b sind die Summe DEINER Bond-Provider-Eintraege bei dieser Node,
             // nicht der Bond der ganzen Node -- die Meldung nennt also deinen eigenen Verlust.
-            meldungen.push({ titel: de ? 'Slash bei deinem Bond' : 'Slash on your bond', text: (de ? 'Du hast ' : 'You lost ') + `${runeTxt(a.b - v.b)} RUNE` + (de ? ` verloren \u00b7 Node ${kurzNode(na)}` : ` \u00b7 node ${kurzNode(na)}`), tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
+            meldungen.push({ titel: de ? 'Slash bei deinem Bond' : 'Slash on your bond', text: (de ? 'Du hast ' : 'You lost ') + `${runeTxt(-delta)} RUNE` + (de ? ` verloren \u00b7 Node ${kurzNode(na)}` : ` \u00b7 node ${kurzNode(na)}`), tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
             delete z.slashVerdacht[na];
           } else {
-            z.slashVerdacht = { ...(z.slashVerdacht || {}), [na]: { b: v.b, t: Date.now() } };
-            neu[na] = { ...v, b: a.b };   // alten Bond als Basis behalten, bis bestaetigt
+            z.slashVerdacht = { ...(z.slashVerdacht || {}), [na]: { b: vGem, t: Date.now() } };
+            neu[na] = { ...v, b: a.b, pa: { ...(v.pa || {}), ...Object.fromEntries(gemeinsam.map(k => [k, a.pa[k]])) }, tb: a.tb };   // alte Werte als Basis, bis bestaetigt
           }
         }
         else if (z.slashVerdacht && z.slashVerdacht[na]) delete z.slashVerdacht[na];
       }
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
-      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)`, tag: 'rw-refund-' + na });
+      // Nur melden, wenn die Adresse noch im Abo ist -- sonst wurde nur eine Wallet entfernt.
+      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1 && (!a.pa || Object.keys(a.pa).some(k => adr.includes(k)))) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)`, tag: 'rw-refund-' + na });
       if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : ''), tag: 'rw-churn-' + churnH });
     }
     // WOCHEN-REVIEW (gewuenscht): Rewards der Woche mitzaehlen und montags um 8:00 UTC eine
