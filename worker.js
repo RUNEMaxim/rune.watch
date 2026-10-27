@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-28-1200';
+const WORKER_VERSION = '2026-10-28-1330';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -5781,10 +5781,10 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
-      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false,
+      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
     // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
-    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname || p.woche !== false);
+    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname || p.woche !== false || p.tcy !== false);
     const adr = persoenlich ? [...new Set((Array.isArray(body.adressen) ? body.adressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => isValidThorAddress(a)))].slice(0, 20) : [];
     await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at, adressen = excluded.adressen`)
@@ -5999,6 +5999,30 @@ async function syncPushPersoenlich(env) {
     }
     z.nodes = neu;
     if (churnH) z.churn = churnH;
+    // TCY-AUSZAHLUNG (gewuenscht): Einmal je neuem Auszahlungstag. Betrag = gestakte TCY aller
+    // Adressen x RUNE je TCY dieses Tages (dieselbe Referenz wie die TCY-Karte: tcy_native_ref,
+    // gemessen an nativen Stakern mit unveraendertem Bestand). Nur wenn wirklich etwas gestakt ist.
+    if (p.tcy !== false && adr.length) {
+      try {
+        const ref = await env.DB.prepare('SELECT tag, rune_pro_tcy FROM tcy_native_ref ORDER BY tag DESC LIMIT 1').first().catch(() => null);
+        if (ref && ref.tag && Number(ref.rune_pro_tcy) > 0 && z.tcyTag !== ref.tag) {
+          let gestakt = 0;
+          for (const a of adr) {
+            const st = await fetchFromBases(getThornodeBases(), `/thorchain/tcy_staker/${a}`).catch(() => null);
+            gestakt += Number(st && st.amount) / 1e8 || 0;
+          }
+          const erste = z.tcyTag == null;   // erster Lauf: nur merken, keine Meldung fuer alte Tage
+          z.tcyTag = ref.tag;
+          const rune = gestakt * Number(ref.rune_pro_tcy);
+          if (!erste && gestakt > 0 && rune >= 0.01) {
+            const usd = preis ? ` ($${(rune * preis).toFixed(rune * preis < 10 ? 2 : 0)})` : '';
+            meldungen.push({ titel: de ? 'TCY-Auszahlung' : 'TCY payout',
+              text: de ? `+${runeTxt(rune)} RUNE${usd} f\u00fcr ${runeTxt(gestakt)} gestakte TCY` : `+${runeTxt(rune)} RUNE${usd} for ${runeTxt(gestakt)} staked TCY`,
+              tag: 'rw-tcy-' + ref.tag });
+          }
+        }
+      } catch (e) {}
+    }
     // THORName: einmal pro Tag pruefen, Meldung bei < 30 Tagen (einmal pro Name und Tag).
     if (p.thorname && z.tnTag !== heute) {
       z.tnTag = heute;
