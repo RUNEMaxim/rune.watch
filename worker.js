@@ -1774,7 +1774,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-28-1600';
+const WORKER_VERSION = '2026-10-28-1630';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
@@ -2121,6 +2121,20 @@ async function handleStats(request, env) {
     return json(stats, env);
   }
 
+  // MARKT (THORChain-Adressen, Bonder, TCY ...) als dritte Seite (gewuenscht): aus dem 12-h-Speicher von
+  // /analyse/markt; fehlt er oder ist er aelter als 24 h, wird er hier neu gerechnet (~10-25 s).
+  let markt = null;
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS markt_cache (k TEXT PRIMARY KEY, v TEXT, at INTEGER)').run();
+    const c = await env.DB.prepare('SELECT v, at FROM markt_cache WHERE k = ?').bind('markt').first();
+    if (c && Date.now() - c.at < 24 * 3600e3) markt = JSON.parse(c.v);
+    else {
+      const u = new URL(request.url); u.pathname = '/analyse/markt'; u.searchParams.set('neu', '1'); u.searchParams.set('format', 'json');
+      const r = await handleMarkt(new Request(u.toString()), env);
+      if (r.ok) markt = await r.json();
+    }
+  } catch (e) { markt = null; }
+
   // Datum auf der Statistikseite englisch: 22 Sep 2026 statt 22.09.2026.
   const deDate = (isoDay) => {
     if (!isoDay) return null;
@@ -2249,6 +2263,7 @@ async function handleStats(request, env) {
   <div class="tabs" role="tablist">
     <button class="tab-nav active" data-page="0" role="tab">Addresses</button>
     <button class="tab-nav" data-page="1" role="tab">Visitors</button>
+    <button class="tab-nav" data-page="2" role="tab">Market</button>
   </div>
 
   <div class="pager" id="pager">
@@ -2351,11 +2366,37 @@ async function handleStats(request, env) {
           stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
     </section>
+    <section class="page">
+      <div class="page-title">3 · THORChain market (addresses, not people)</div>
+      ${markt ? (() => {
+        const f = n => n == null ? '\u2014' : Number(n).toLocaleString('en-US');
+        const b = markt.bonder || {}, g = b.nachGroesse || {}, rw = markt.runeWatch || {}, nd = markt.nodes || {};
+        const maxK = Math.max(1, ...Object.values(g));
+        const zeile = (l, n) => `<div class="depth-row"><div class="depth-label">${l}</div><div class="depth-bar-track"><div class="depth-bar-fill" style="width:${Math.round((n || 0) / maxK * 100)}%"></div></div><div style="text-align:right;">${f(n)}</div><div></div></div>`;
+        return `<div class="grid">
+          ${tile('m-bonder', 'Bonders', f(b.adressen), 'bond provider addresses, all nodes')}
+          ${tile('m-rw', 'rune.watch bonders', f(rw.davonBonder), (rw.anteilAnBondern != null ? rw.anteilAnBondern + ' % of all bonders' : ''))}
+          ${tile('m-bond', 'Share of total bond', rw.anteilAmBond != null ? rw.anteilAmBond + ' %' : '\u2014', f(rw.bondRUNE) + ' of ' + f(b.bondRUNE) + ' RUNE')}
+          ${tile('m-ops', 'Node operators', f(nd.betreiber), f(nd.aktiv) + ' active of ' + f(nd.gesamt) + ' nodes')}
+          <div class="tile wide"><div class="tile-label" style="margin-top:0; margin-bottom:10px;">Bonders by size (RUNE)</div>
+            ${zeile('< 1k', g['unter 1.000'])}${zeile('1k\u201310k', g['1.000-10.000'])}${zeile('10k\u2013100k', g['10.000-100.000'])}${zeile('> 100k', g['ueber 100.000'])}
+          </div>
+          ${tile('m-tcys', 'TCY stakers', f(markt.tcyGestakt && markt.tcyGestakt.adressen), 'staked TCY, native')}
+          ${tile('m-tcyw', 'TCY in wallets', f(markt.tcyHalter && markt.tcyHalter.adressenGesamt), f(markt.tcyHalter && markt.tcyHalter.abMindestmenge) + ' with \u2265 1 TCY')}
+          ${tile('m-brune', 'bRUNE / ybRUNE', f(markt.bruneHalter && markt.bruneHalter.adressenGesamt) + ' / ' + f(markt.ybruneHalter && markt.ybruneHalter.adressenGesamt), 'holder addresses')}
+          ${tile('m-pool', 'RUNEPool', f(markt.runePool && markt.runePool.adressen), 'provider addresses')}
+          ${tile('m-rune', 'RUNE accounts', f(markt.runeHalter && markt.runeHalter.adressenGesamt), f(markt.runeHalter && markt.runeHalter.abMindestmenge) + ' with \u2265 10 RUNE' + (markt.runeHalter && !markt.runeHalter.vollstaendig ? ' (counted part)' : ''))}
+          ${tile('m-rwall', 'rune.watch addresses', f(rw.adressen), 'entered in rune.watch')}
+        </div>
+        <div class="tile-hint" style="margin-top:8px;">As of ${String(markt.stand || '').replace('T', ' ').slice(0, 16)} UTC \u00b7 refreshed every 12\u201324 h \u00b7 exchanges and contracts count as single addresses.</div>`;
+      })() : '<div class="tile-hint">Market data not available right now.</div>'}
+    </section>
   </div>
 
   <div class="dots">
     <button class="dot-nav active" data-page="0" aria-label="Page 1: addresses"></button>
     <button class="dot-nav" data-page="1" aria-label="Page 2: visitors"></button>
+    <button class="dot-nav" data-page="2" aria-label="Page 3: market"></button>
   </div>
 
   <div class="refresh"><span class="dot"></span><span id="stamp">As of ${new Date().toLocaleString('en-GB', { timeZone: 'UTC' })} UTC · updating live</span></div>
