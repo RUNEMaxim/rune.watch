@@ -17,10 +17,11 @@ function getThornodeBases({ needsHeight = false } = {}) {
   const bases = [];
   if (key) bases.push(`https://gateway.liquify.com/api=${key}`);
   bases.push('https://gateway.liquify.com/chain/thorchain_api');
-  if (!needsHeight) {
-    bases.push('https://public-thornode.nativeswap.io');
-    bases.push('https://thornode.thorchain.network');
-  }
+  // Auch fuer Abfragen MIT Blockhoehe die anderen Knoten als Rueckfall (gemeldet: Slash-Check
+  // "HTTP_500 (gateway.liquify.com)" -- Liquify war die einzige Quelle; fiel sie aus, ging nichts).
+  // Die Rueckfall-Knoten halten nicht unbedingt alte Staende vor, fuer die letzten Tage aber meist schon.
+  bases.push('https://public-thornode.nativeswap.io');
+  bases.push('https://thornode.thorchain.network');
   return bases;
 }
 
@@ -158,8 +159,17 @@ function fetchNodes() {
   return promise;
 }
 
-function fetchNodesAtHeight(height) {
-  return fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/nodes?height=${height}`);
+async function fetchNodesAtHeight(height) {
+  // Einzelne Hoehen liefern bei Liquify gelegentlich HTTP 500 -- dann die direkt folgenden Bloecke
+  // versuchen (ein paar Sekunden Unterschied aendern beim Bond nichts).
+  let letzter = null;
+  for (const h of [height, height + 1, height + 5]) {
+    try {
+      const r = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/nodes?height=${h}`);
+      if (Array.isArray(r) && r.length) return r;
+    } catch (e) { letzter = e; }
+  }
+  throw letzter || new Error('NODES_AT_HEIGHT_EMPTY');
 }
 
 function fetchNodeAtHeight(nodeAddress, height) {
@@ -1774,7 +1784,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-28-1630';
+const WORKER_VERSION = '2026-10-28-1700';
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
 let klickSpalteGeprueft = false;
