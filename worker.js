@@ -969,9 +969,14 @@ async function refreshDonationBalance(env, expectedMonth) {
     const currentUsdc = highWaterMark(rawUsdc, row ? row.last_balance_usdc : null, sameMonth);
     const currentEth = highWaterMark(rawEth, row ? row.last_balance_eth : null, sameMonth);
 
-    const baselineRune = sameMonth ? row.baseline_rune : (currentRune ?? 0);
-    const baselineUsdc = sameMonth ? (row.baseline_usdc ?? 0) : (currentUsdc ?? 0);
-    const baselineEth = sameMonth ? (row.baseline_eth ?? 0) : (currentEth ?? 0);
+    // MONATSBASIS NICHT MEHR AUF 0, WENN EIN ABRUF FEHLSCHLAEGT (gemeldet: "Tips this month $0.01,
+    // obwohl keine Spende"): Schlug zum Monatswechsel der Abruf einer Waehrung fehl, wurde ihre Basis
+    // auf 0 gesetzt -- spaeter zaehlte dann der ganze Restbestand der Adresse als "Spende". Jetzt
+    // steht -1 fuer "noch unbekannt" und wird mit dem ersten erfolgreichen Abruf ersetzt.
+    const basis = (alt, aktuell) => (alt == null || alt < 0) ? (aktuell ?? -1) : alt;
+    const baselineRune = sameMonth ? basis(row.baseline_rune, currentRune) : (currentRune ?? -1);
+    const baselineUsdc = sameMonth ? basis(row.baseline_usdc, currentUsdc) : (currentUsdc ?? -1);
+    const baselineEth = sameMonth ? basis(row.baseline_eth, currentEth) : (currentEth ?? -1);
 
     await env.DB.prepare(
       `INSERT INTO donation_tracking (id, month, baseline_rune, baseline_usdc, baseline_eth, last_balance_rune, last_balance_usdc, last_balance_eth, last_eth_usd_price, last_balance_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -982,9 +987,15 @@ async function refreshDonationBalance(env, expectedMonth) {
   }
 }
 
+// Zuwachs seit Monatsbeginn; unbekannte Basis (-1 bzw. null) zaehlt als "noch kein Zuwachs".
+function seitBasis(aktuell, basis) {
+  if (aktuell == null || basis == null || basis < 0) return 0;
+  return Math.max(0, aktuell - basis);
+}
+
 function receivedEthUsdFrom(row) {
   if (row.last_balance_eth == null || row.last_eth_usd_price == null) return 0;
-  const receivedEth = Math.max(0, row.last_balance_eth - (row.baseline_eth || 0));
+  const receivedEth = seitBasis(row.last_balance_eth, row.baseline_eth);
   return receivedEth * row.last_eth_usd_price;
 }
 
@@ -1000,8 +1011,8 @@ async function handleDonationProgress(request, env, ctx) {
         const refresh = refreshDonationBalance(env, currentMonth);
         if (ctx && ctx.waitUntil) ctx.waitUntil(refresh); else await refresh;
       }
-      const receivedRune = row.last_balance_rune != null ? Math.max(0, row.last_balance_rune - row.baseline_rune) : 0;
-      const receivedUsdc = row.last_balance_usdc != null ? Math.max(0, row.last_balance_usdc - (row.baseline_usdc || 0)) : 0;
+      const receivedRune = seitBasis(row.last_balance_rune, row.baseline_rune);
+      const receivedUsdc = seitBasis(row.last_balance_usdc, row.baseline_usdc);
       return json({ receivedRune, receivedUsdc, receivedEthUsd: receivedEthUsdFrom(row), month: currentMonth }, env);
     }
 
@@ -1021,7 +1032,7 @@ async function handleDonationProgress(request, env, ctx) {
       await env.DB.prepare(
         `INSERT INTO donation_tracking (id, month, baseline_rune, baseline_usdc, baseline_eth, last_balance_rune, last_balance_usdc, last_balance_eth, last_eth_usd_price, last_balance_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET month = excluded.month, baseline_rune = excluded.baseline_rune, baseline_usdc = excluded.baseline_usdc, baseline_eth = excluded.baseline_eth, last_balance_rune = excluded.last_balance_rune, last_balance_usdc = excluded.last_balance_usdc, last_balance_eth = excluded.last_balance_eth, last_eth_usd_price = excluded.last_eth_usd_price, last_balance_at = excluded.last_balance_at, updated_at = excluded.updated_at`
-      ).bind(currentMonth, currentRune ?? 0, currentUsdc ?? 0, currentEth ?? 0, currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now(), Date.now()).run();
+      ).bind(currentMonth, currentRune ?? -1, currentUsdc ?? -1, currentEth ?? -1, currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now(), Date.now()).run();
       return json({ receivedRune: 0, receivedUsdc: 0, receivedEthUsd: 0, month: currentMonth }, env);
     }
 
@@ -1031,15 +1042,19 @@ async function handleDonationProgress(request, env, ctx) {
       && gleich(currentEth, row.last_balance_eth)
       && gleich(ethUsdPrice, row.last_eth_usd_price);
     const letzterSchreibvorgang = Number(row.last_balance_at) || 0;
-    if (!unveraendert || Date.now() - letzterSchreibvorgang > 3600000) {
+    // Unbekannte Monatsbasis (-1) mit dem ersten erfolgreichen Abruf nachtragen.
+    const nachtragen = (b, c) => ((b == null || b < 0) && c != null) ? c : b;
+    const bRune = nachtragen(row.baseline_rune, currentRune), bUsdc = nachtragen(row.baseline_usdc, currentUsdc), bEth = nachtragen(row.baseline_eth, currentEth);
+    const basisNeu = bRune !== row.baseline_rune || bUsdc !== row.baseline_usdc || bEth !== row.baseline_eth;
+    if (!unveraendert || basisNeu || Date.now() - letzterSchreibvorgang > 3600000) {
       await env.DB.prepare(
-        `UPDATE donation_tracking SET last_balance_rune = ?, last_balance_usdc = ?, last_balance_eth = ?, last_eth_usd_price = ?, last_balance_at = ? WHERE id = 1`
-      ).bind(currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now()).run();
+        `UPDATE donation_tracking SET baseline_rune = ?, baseline_usdc = ?, baseline_eth = ?, last_balance_rune = ?, last_balance_usdc = ?, last_balance_eth = ?, last_eth_usd_price = ?, last_balance_at = ? WHERE id = 1`
+      ).bind(bRune, bUsdc, bEth, currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now()).run();
     }
 
-    const receivedRune = currentRune != null ? Math.max(0, currentRune - row.baseline_rune) : 0;
-    const receivedUsdc = currentUsdc != null ? Math.max(0, currentUsdc - (row.baseline_usdc || 0)) : 0;
-    const receivedEth = currentEth != null ? Math.max(0, currentEth - (row.baseline_eth || 0)) : 0;
+    const receivedRune = seitBasis(currentRune, bRune);
+    const receivedUsdc = seitBasis(currentUsdc, bUsdc);
+    const receivedEth = seitBasis(currentEth, bEth);
     const receivedEthUsd = ethUsdPrice != null ? receivedEth * ethUsdPrice : 0;
     return json({ receivedRune, receivedUsdc, receivedEthUsd, month: currentMonth }, env);
   } catch (e) {
