@@ -4676,6 +4676,12 @@ export default {
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
       }
+      if (url.pathname === '/mimir-votes') {
+        // OFFENE MIMIR-ABSTIMMUNGEN fuer die App (Uebersicht "Offene Abstimmungen").
+        await sicherePushTabellen(env);
+        const erg = await offeneAbstimmungen(env, null, url.searchParams.get('fresh') === '1');
+        return json(erg || { error: 'NO_DATA' }, env, erg ? 200 : 502);
+      }
       if (url.pathname === '/purchases') {
         return await handlePurchases(request, env, ctx);
       }
@@ -5868,10 +5874,10 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
-      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false,
+      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
     // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
-    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname || p.woche !== false || p.tcy !== false);
+    const persoenlich = !!(p.churn || p.node || p.bond || p.thorname || p.woche !== false || p.tcy !== false || p.abst !== false);
     const adr = persoenlich ? [...new Set((Array.isArray(body.adressen) ? body.adressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => isValidThorAddress(a)))].slice(0, 20) : [];
     await env.DB.prepare(`INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
       ON CONFLICT(id) DO UPDATE SET fails = 0, p256dh = excluded.p256dh, auth = excluded.auth, prefs = excluded.prefs, lang = excluded.lang, besitzer = excluded.besitzer, at = excluded.at, adressen = excluded.adressen`)
@@ -6011,6 +6017,48 @@ async function syncPush(env) {
   try { await syncPushPersoenlich(env); } catch (e) { console.warn('[push] persoenlich', e?.message || e); }
 }
 const kurzNode = a => '\u2026' + String(a || '').slice(-4);
+// OFFENE MIMIR-ABSTIMMUNGEN (gewuenscht: "Wie koennte man jeden Node kontaktieren?" -- Devs im Discord:
+// "BPs, wenn eure Node unter 'Not Voted' steht, macht eurem Betreiber Druck"). THORNode liefert unter
+// /thorchain/mimir/nodes_all jede Stimme (Schluessel, Wert, Node). Gezaehlt werden nur AKTIVE Nodes.
+// Angenommen ist ein Wert ab 2/3 der aktiven Nodes. "Offen" = mindestens 5 Stimmen, aber die
+// staerkste Antwort hat die Mehrheit noch nicht. Zwischengespeichert fuer 5 Minuten.
+async function offeneAbstimmungen(env, nodesVorab, frisch) {
+  if (!frisch) {
+    try {
+      const c = JSON.parse((await pushState(env, 'abstCache')) || 'null');
+      if (c && Date.now() - c.t < 5 * 60e3) return c;
+    } catch (e) {}
+  }
+  const nodes = Array.isArray(nodesVorab) ? nodesVorab : await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
+  const roh = await fetchFromBases(getThornodeBases(), '/thorchain/mimir/nodes_all').catch(() => null);
+  if (!Array.isArray(nodes) || !roh) return null;
+  const stimmen = Array.isArray(roh) ? roh : (Array.isArray(roh.mimirs) ? roh.mimirs : []);
+  const aktiv = nodes.filter(n => String(n && n.status) === 'Active').map(n => String(n.node_address).toLowerCase());
+  const aktivSet = new Set(aktiv);
+  const noetig = Math.ceil(aktiv.length * 2 / 3);
+  const jeSchluessel = new Map();
+  for (const v of stimmen) {
+    const key = String(v && v.key || '').toUpperCase(), sig = String(v && v.signer || '').toLowerCase();
+    if (!key || !aktivSet.has(sig)) continue;
+    if (!jeSchluessel.has(key)) jeSchluessel.set(key, new Map());
+    jeSchluessel.get(key).set(sig, String(v.value));
+  }
+  const liste = [];
+  for (const [key, m] of jeSchluessel) {
+    if (m.size < 5) continue;
+    const werte = new Map();
+    for (const w of m.values()) werte.set(w, (werte.get(w) || 0) + 1);
+    const sortiert = [...werte.entries()].sort((a, b) => b[1] - a[1]);
+    const [topWert, topAnzahl] = sortiert[0];
+    if (topAnzahl >= noetig) continue;
+    liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig, abgestimmt: m.size, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
+      fehlen: aktiv.filter(a => !m.has(a)) });
+  }
+  liste.sort((a, b) => b.stimmen / b.noetig - a.stimmen / a.noetig);
+  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20) };
+  try { await pushStateSet(env, 'abstCache', JSON.stringify(erg)); } catch (e) {}
+  return erg;
+}
 const runeTxt = x => Number(x).toLocaleString('en-US', { maximumFractionDigits: Math.abs(x) >= 100 ? 1 : 2 });
 async function syncPushPersoenlich(env) {
   const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
@@ -6034,11 +6082,13 @@ async function syncPushPersoenlich(env) {
   const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
   const preis = Number(st && st.runePriceUSD) || null;
   const heute = new Date().toISOString().slice(0, 10);
-  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
+  let abst = null;
+  try { abst = await offeneAbstimmungen(env, nodes, false); } catch (e) { abst = null; }
+  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute, abst); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
 }
 // EIN ABO (eigene Funktion, damit ein Fehler bei einem Abo nicht alle folgenden stoppt -- vorher
 // brach die ganze Schleife ab, und alle spaeteren Abos bekamen in diesem Durchgang nichts).
-async function pushEinAbo(env, row, nodes, churnH, preis, heute) {
+async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
   {
     let p = {}, z = {}, adr = [];
     try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
@@ -6145,6 +6195,27 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute) {
     }
     z.nodes = neu;
     if (churnH) z.churn = churnH;
+    // DEINE NODE HAT NOCH NICHT ABGESTIMMT (gewuenscht): Einmal je Abstimmung und Node. Bonder
+    // haben den direkten Draht zum Betreiber -- genau sie sollen es erfahren.
+    if (p.abst !== false && abst && Array.isArray(abst.liste)) {
+      const offen = new Set();
+      const gemeldet = z.abst || {};
+      for (const a of abst.liste) {
+        for (const na of Object.keys(neu)) {
+          if (neu[na].s !== 'Active' || !a.fehlen.includes(String(na).toLowerCase())) continue;
+          const k = a.key + ':' + na;
+          offen.add(k);
+          if (gemeldet[k]) continue;
+          gemeldet[k] = Date.now();
+          meldungen.push({ titel: 'rune.watch', tag: 'rw-abst-' + a.key + '-' + na,
+            text: de ? `Deine Node ${kurzNode(na)} hat bei ${a.key} noch nicht abgestimmt (${a.stimmen}/${a.noetig}). Sprich deinen Betreiber an.`
+                     : `Your node ${kurzNode(na)} hasn't voted on ${a.key} yet (${a.stimmen}/${a.noetig}). Ask your operator to vote.` });
+        }
+      }
+      // Erledigte Abstimmungen vergessen (nach 30 Tagen auch alte Eintraege)
+      for (const k of Object.keys(gemeldet)) if (!offen.has(k) && Date.now() - gemeldet[k] > 3600e3) delete gemeldet[k];
+      z.abst = gemeldet;
+    }
     // TCY-AUSZAHLUNG (gewuenscht): Einmal je neuem Auszahlungstag. Betrag = gestakte TCY aller
     // Adressen x RUNE je TCY dieses Tages (dieselbe Referenz wie die TCY-Karte: tcy_native_ref,
     // gemessen an nativen Stakern mit unveraendertem Bestand). Nur wenn wirklich etwas gestakt ist.
