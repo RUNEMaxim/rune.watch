@@ -6138,11 +6138,14 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       for (const [na, v] of Object.entries(neu)) {
         const a = alt[na];
         if (!a) continue;
-        if (p.node && a.s !== v.s) {
+        // Statusmeldungen nur fuer Nodes, bei denen wirklich Bond liegt (oder lag) -- nicht fuer
+        // Nodes, bei denen die Wallet nur freigeschaltet ist (0 RUNE).
+        const echterBond = v.b > 0.01 || a.b > 0.01;
+        if (p.node && echterBond && a.s !== v.s) {
           if (v.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist wieder aktiv` : `Your node ${kurzNode(na)} is active again`, tag: 'rw-node-' + na });
           else if (a.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist nicht mehr aktiv (${v.s})` : `Your node ${kurzNode(na)} is no longer active (${v.s})`, tag: 'rw-node-' + na });
         }
-        if (p.node && v.l && !a.l) meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)}: Austritt angefragt` : `Your node ${kurzNode(na)}: leave requested`, tag: 'rw-leave-' + na });
+        if (p.node && echterBond && v.l && !a.l) meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)}: Austritt angefragt` : `Your node ${kurzNode(na)}: leave requested`, tag: 'rw-leave-' + na });
         // Nur gemeinsame Adressen vergleichen; alte Eintraege ohne Aufschluesselung -> kein Slash-Test.
         const gemeinsam = a.pa ? Object.keys(v.pa || {}).filter(k => k in a.pa) : [];
         const delta = a.pa ? gemeinsam.reduce((q, k) => q + (v.pa[k] - a.pa[k]), 0) : (churnNeu ? v.b - a.b : 0);
@@ -6223,7 +6226,8 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       const gemeldet = z.abst || {};
       for (const a of abst.liste) {
         for (const na of Object.keys(neu)) {
-          if (neu[na].s !== 'Active' || !a.fehlen.includes(String(na).toLowerCase())) continue;
+          // Nur Nodes mit echtem Bond (nicht nur freigeschaltet mit 0 RUNE).
+          if (neu[na].s !== 'Active' || !(neu[na].b > 0.01) || !a.fehlen.includes(String(na).toLowerCase())) continue;
           const k = a.key + ':' + na;
           offen.add(k);
           if (gemeldet[k]) continue;
