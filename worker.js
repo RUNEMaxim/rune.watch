@@ -4792,11 +4792,16 @@ export default {
     // allein (schnell, kein Dune/Swap-Paare davor); der grosse Durchgang bleibt wie er ist.
     if (event && event.cron === '* * * * *') {
       ctx.waitUntil((async () => {
+        const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
-        // Halts und Updates zusaetzlich alle 15 s innerhalb dieser Minute
-        for (let i = 1; i < 4; i++) {
-          await new Promise(r => setTimeout(r, 15000));
-          try { await sicherePushTabellen(env); await syncHaltsOps(env); } catch (e) { console.warn('[push] halts 15s', e?.message || e); }
+        // Danach alle 6 Sekunden (feste Zeitpunkte ab Minutenbeginn), bis kurz vor dem naechsten Lauf.
+        for (let k = 1; k < 10; k++) {
+          const ziel = t0 + k * 6000;
+          if (ziel > t0 + 54000) break;
+          const warten = ziel - Date.now();
+          if (warten > 0) await new Promise(r => setTimeout(r, warten));
+          if (Date.now() - t0 > 56000) break;
+          try { await syncPushSchnell(env); } catch (e) { console.warn('[push] 6s', e?.message || e); }
         }
       })());
       return;
@@ -5968,18 +5973,7 @@ async function syncHaltsOps(env) {
     }
   } catch (e) {}
 }
-async function syncPush(env) {
-  await sicherePushTabellen(env);
-  const anzahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM push_subs').first();
-  if (!Number(anzahl && anzahl.n)) return;
-  // Nicht doppelt laufen (Minuten-Takt + grosser Durchgang in derselben Minute): sonst koennte
-  // dieselbe Meldung zweimal rausgehen.
-  const zuletzt = Number(await pushState(env, 'pushLauf')) || 0;
-  if (Date.now() - zuletzt < 45000) return;
-  await pushStateSet(env, 'pushLauf', Date.now());
-  // 1)-3) HALTS und THORCHAIN-UPDATES (eigene Funktion, laeuft im Minuten-Takt zusaetzlich alle 15 s)
-  await syncHaltsOps(env);
-  // 4) PREIS-ALARM je Abo (RUNE in USD, Midgard)
+async function syncPreisAlarm(env) {
   try {
     const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
     const preis = Number(st && st.runePriceUSD);
@@ -5994,10 +5988,37 @@ async function syncPush(env) {
         if (p.preisOben > 0) { const d = preis >= p.preisOben; if (d && z.oben === false) meldungen.push({ titel: de ? `RUNE \u00fcber $${p.preisOben}` : `RUNE above $${p.preisOben}`, text: '$' + preis.toFixed(3), tag: 'rw-preis-oben' }); z.oben = d; }
         if (p.preisUnten > 0) { const d = preis <= p.preisUnten; if (d && z.unten === false) meldungen.push({ titel: de ? `RUNE unter $${p.preisUnten}` : `RUNE below $${p.preisUnten}`, text: '$' + preis.toFixed(3), tag: 'rw-preis-unten' }); z.unten = d; }
         for (const m of meldungen) { try { await pushSenden(env, row, m); } catch (e) {} }
-        await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(JSON.stringify(z), row.id).run();
+        const zNeu = JSON.stringify(z);
+        if (zNeu !== (row.zustand || '')) await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(zNeu, row.id).run();
       }
     }
   } catch (e) { console.warn('[push] preis', e?.message || e); }
+}
+// 6-SEKUNDEN-TAKT (gewuenscht: "jede Einstellung jede Sekunde pruefen" -- sinnvoll ist einmal je
+// THORChain-Block, also etwa alle 6 Sekunden; oefter aendert sich der Zustand nicht). Prueft alle
+// zeitkritischen Themen: Halts, Updates, Preis, Nodes, Slash, Rewards, Abstimmungen. Spenden laufen
+// im Minutentakt (sie kommen aus dem grossen Durchgang).
+async function syncPushSchnell(env) {
+  await sicherePushTabellen(env);
+  const anzahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM push_subs').first();
+  if (!Number(anzahl && anzahl.n)) return;
+  try { await syncHaltsOps(env); } catch (e) { console.warn('[push] halts 6s', e?.message || e); }
+  try { await syncPreisAlarm(env); } catch (e) { console.warn('[push] preis 6s', e?.message || e); }
+  try { await syncPushPersoenlich(env); } catch (e) { console.warn('[push] persoenlich 6s', e?.message || e); }
+}
+async function syncPush(env) {
+  await sicherePushTabellen(env);
+  const anzahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM push_subs').first();
+  if (!Number(anzahl && anzahl.n)) return;
+  // Nicht doppelt laufen (Minuten-Takt + grosser Durchgang in derselben Minute): sonst koennte
+  // dieselbe Meldung zweimal rausgehen.
+  const zuletzt = Number(await pushState(env, 'pushLauf')) || 0;
+  if (Date.now() - zuletzt < 45000) return;
+  await pushStateSet(env, 'pushLauf', Date.now());
+  // 1)-3) HALTS und THORCHAIN-UPDATES (eigene Funktion, laeuft im Minuten-Takt zusaetzlich alle 15 s)
+  await syncHaltsOps(env);
+  // 4) PREIS-ALARM je Abo (eigene Funktion, laeuft auch im 6-Sekunden-Takt)
+  await syncPreisAlarm(env);
   // 5) SPENDEN (nur Betreiber-Abos)
   try {
     await sichereDonTabellen(env);
@@ -6021,12 +6042,12 @@ const kurzNode = a => '\u2026' + String(a || '').slice(-4);
 // "BPs, wenn eure Node unter 'Not Voted' steht, macht eurem Betreiber Druck"). THORNode liefert unter
 // /thorchain/mimir/nodes_all jede Stimme (Schluessel, Wert, Node). Gezaehlt werden nur AKTIVE Nodes.
 // Angenommen ist ein Wert ab 2/3 der aktiven Nodes. "Offen" = mindestens 5 Stimmen, aber die
-// staerkste Antwort hat die Mehrheit noch nicht. Zwischengespeichert fuer 5 Minuten.
+// staerkste Antwort hat die Mehrheit noch nicht. Zwischengespeichert fuer 30 Sekunden.
 async function offeneAbstimmungen(env, nodesVorab, frisch) {
   if (!frisch) {
     try {
       const c = JSON.parse((await pushState(env, 'abstCache')) || 'null');
-      if (c && Date.now() - c.t < 5 * 60e3) return c;
+      if (c && Date.now() - c.t < 30e3) return c;
     } catch (e) {}
   }
   const nodes = Array.isArray(nodesVorab) ? nodesVorab : await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
@@ -6259,7 +6280,8 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       } catch (e) {}
     }
     for (const m of meldungen.slice(0, 5)) { try { await pushSenden(env, row, m); } catch (e) {} }
-    await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(JSON.stringify(z), row.id).run();
+    const zNeu = JSON.stringify(z);
+    if (zNeu !== (row.zustand || '')) await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(zNeu, row.id).run();
   }
 }
 
