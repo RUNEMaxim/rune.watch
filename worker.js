@@ -4781,6 +4781,20 @@ export default {
 
   async scheduled(event, env, ctx) {
     currentEnv = env;
+    // EIGENER MINUTEN-TAKT FUER PUSH (gemeldet: "alles sehr zeitversetzt"): Push lief nur im
+    // grossen Durchgang. Mit einem zweiten Cron "* * * * *" in wrangler.toml laeuft er jede Minute
+    // allein (schnell, kein Dune/Swap-Paare davor); der grosse Durchgang bleibt wie er ist.
+    if (event && event.cron === '* * * * *') {
+      ctx.waitUntil((async () => {
+        try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
+        // Halts und Updates zusaetzlich alle 15 s innerhalb dieser Minute
+        for (let i = 1; i < 4; i++) {
+          await new Promise(r => setTimeout(r, 15000));
+          try { await sicherePushTabellen(env); await syncHaltsOps(env); } catch (e) { console.warn('[push] halts 15s', e?.message || e); }
+        }
+      })());
+      return;
+    }
     ctx.waitUntil(runRefreshCycle(env));
   },
 };
@@ -5819,7 +5833,10 @@ async function pushSenden(env, sub, nachricht) {
   const { jwt, pub } = await vapidJwt(env, sub.endpoint);
   // WICHTIGES SOFORT (Halt, Slash, Node raus): Urgency "high" -- iPhones stellen "normal" im
   // Energiesparmodus oder bei wenig Akku teils erst spaeter oder gar nicht zu.
-  const dringend = /^rw-(halt|bond|slash|node)/.test(String(nachricht && nachricht.tag || '')) || /halt|slash/i.test(String(nachricht && nachricht.text || ''));
+  // ZEITVERSATZ (gemeldet: "alles sehr zeitversetzt"): iPhones stellen "normal" gebuendelt und
+  // spaeter zu. Jetzt ist alles "high" ausser dem Wochen-Review und dem Test.
+  const tagStr = String(nachricht && nachricht.tag || '');
+  const dringend = !/^rw-(woche|push-test)/.test(tagStr);
   const r = await fetch(sub.endpoint, { method: 'POST', body: koerper, headers: {
     'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: dringend ? 'high' : 'normal',
     Authorization: `vapid t=${jwt}, k=${pub}` } });
@@ -5884,10 +5901,11 @@ async function pushAnThema(env, thema, baue) {
   return n;
 }
 // CRON: Ereignisse erkennen und verschicken.
-async function syncPush(env) {
-  await sicherePushTabellen(env);
-  const anzahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM push_subs').first();
-  if (!Number(anzahl && anzahl.n)) return;
+// HALTS + UPDATES SCHNELL (gemeldet: "Chain Halts, THORChain Updates sind sehr zeitversetzt, meistens
+// minutenlang -- ich will sofortige Meldung"): Cron laeuft hoechstens einmal pro Minute. Fuer diese
+// zeitkritischen Themen prueft der Minuten-Takt deshalb zusaetzlich alle 15 Sekunden (4 Pruefungen
+// je Minute) -- nur Halts und Updates, mit wenigen Abrufen. Andere Themen bleiben im Minutentakt.
+async function syncHaltsOps(env) {
   // 1) HALTS: Chains mit Handel- oder Chain-Halt laut inbound_addresses + globale Mimir-Halts.
   try {
     const [inb, mimir, lb] = await Promise.all([
@@ -5943,6 +5961,18 @@ async function syncPush(env) {
       await pushStateSet(env, 'xmr', xmr ? '1' : '0');
     }
   } catch (e) {}
+}
+async function syncPush(env) {
+  await sicherePushTabellen(env);
+  const anzahl = await env.DB.prepare('SELECT COUNT(*) AS n FROM push_subs').first();
+  if (!Number(anzahl && anzahl.n)) return;
+  // Nicht doppelt laufen (Minuten-Takt + grosser Durchgang in derselben Minute): sonst koennte
+  // dieselbe Meldung zweimal rausgehen.
+  const zuletzt = Number(await pushState(env, 'pushLauf')) || 0;
+  if (Date.now() - zuletzt < 45000) return;
+  await pushStateSet(env, 'pushLauf', Date.now());
+  // 1)-3) HALTS und THORCHAIN-UPDATES (eigene Funktion, laeuft im Minuten-Takt zusaetzlich alle 15 s)
+  await syncHaltsOps(env);
   // 4) PREIS-ALARM je Abo (RUNE in USD, Midgard)
   try {
     const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
@@ -5988,9 +6018,19 @@ async function syncPushPersoenlich(env) {
   if (!subs.length) return;
   const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
   if (!Array.isArray(nodes)) return;
-  // Letzter Churn (Midgard): Hoehe als Kennung, um Rewards dem Churn zuzuordnen.
-  const churns = await fetchFromBases(getMidgardBases(), '/churns').catch(() => null);
-  const churnH = Array.isArray(churns) && churns[0] ? String(churns[0].height) : null;
+  // LETZTER CHURN DIREKT AUS THORNODE (gemeldet: "alles sehr zeitversetzt", Rewards kamen spaet
+  // oder gar nicht): Vorher kam die Churn-Hoehe von Midgard, das oft Minuten bis Stunden
+  // hinterherhinkt. Stieg der Bond nach dem Churn schon, war fuer Midgard aber noch kein neuer
+  // Churn da, wurde der Zuwachs nicht als Reward erkannt -- und spaeter fehlte er, weil der neue
+  // Bond schon die Basis war. Jetzt: hoechstes status_since aller AKTIVEN Nodes = Hoehe des
+  // letzten Churns (in den aktiven Satz kommt man nur beim Churn). Midgard nur noch als Rueckfall.
+  let churnH = null;
+  const aktivSeit = nodes.filter(n => String(n && n.status) === 'Active').map(n => Number(n.status_since) || 0);
+  if (aktivSeit.length) churnH = String(Math.max(...aktivSeit));
+  if (!churnH || churnH === '0') {
+    const churns = await fetchFromBases(getMidgardBases(), '/churns').catch(() => null);
+    churnH = Array.isArray(churns) && churns[0] ? String(churns[0].height) : null;
+  }
   const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
   const preis = Number(st && st.runePriceUSD) || null;
   const heute = new Date().toISOString().slice(0, 10);
@@ -6038,6 +6078,16 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute) {
         // Ein echter Slash senkt auch den Gesamt-Bond der Node (mindestens um unseren Anteil).
         const nodeSank = a.tb > 0 && v.tb > 0 ? (a.tb - v.tb) >= Math.max(0.5, -delta * 0.9) : false;
         if (churnNeu && delta > 0) rewardSumme += delta;
+        // Zuwachs OHNE erkannten Churn: bis zu 2 Stunden als Kandidat halten (alte Werte bleiben
+        // die Basis). Kommt der Churn in dieser Zeit, zaehlt der Zuwachs als Reward; sonst war es
+        // eine eigene Einzahlung und wird still uebernommen.
+        else if (!churnNeu && delta > 0.01 && a.s === 'Active' && v.s === 'Active') {
+          const k = (z.rewardKandidat || {})[na];
+          if (!k || Date.now() - k.t < 2 * 3600e3) {
+            z.rewardKandidat = { ...(z.rewardKandidat || {}), [na]: { t: k ? k.t : Date.now() } };
+            neu[na] = { ...v, b: a.b, pa: { ...(v.pa || {}), ...Object.fromEntries(gemeinsam.map(q => [q, a.pa[q]])) }, tb: a.tb };
+          } else delete z.rewardKandidat[na];
+        }
         // Bond sinkt waehrend die Node aktiv ist und kein Churn war -> MOEGLICHER Slash.
         // BESTAETIGUNG NOETIG (gemeldet: Push "-1.800 RUNE", Slash-Check fand nichts): Die
         // THORNode-Server antworten nicht immer vom selben Stand -- besonders waehrend eines
@@ -6057,6 +6107,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute) {
           }
         }
         else if (z.slashVerdacht && z.slashVerdacht[na]) delete z.slashVerdacht[na];
+        if (churnNeu && z.rewardKandidat && z.rewardKandidat[na]) delete z.rewardKandidat[na];
       }
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
       // Nur melden, wenn die Adresse noch im Abo ist -- sonst wurde nur eine Wallet entfernt.
