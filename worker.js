@@ -6620,8 +6620,21 @@ async function syncLeaveZeiten(env) {
   const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
   const curH = Number(Array.isArray(lb) && lb[0] && lb[0].thorchain) || 0;
   if (!curH) return;
+  // NUR DER AKTUELLE CHURN (gewuenscht: "die Leaves nur fuer die aktuellen Churns"): Gesucht wird
+  // zwischen dem letzten Churn und jetzt. Eintraege fuer Nodes, die nicht mehr aktiv mit Leave-Antrag
+  // im Set stehen (schon ausgetreten), werden entfernt.
+  const aktivSeit = nodes.filter(n => String(n && n.status) === 'Active').map(n => Number(n.status_since) || 0);
+  const churnH = aktivSeit.length ? Math.max(...aktivSeit) : 0;
+  const relevant = new Set(nodes.filter(n => n && n.requested_to_leave && String(n.status) === 'Active').map(n => String(n.node_address).toLowerCase()));
+  try {
+    const alle = ((await env.DB.prepare('SELECT addr FROM node_leave').all()).results || []).map(z => z.addr);
+    for (const a of alle) if (!relevant.has(a)) await env.DB.prepare('DELETE FROM node_leave WHERE addr = ?').bind(a).run();
+  } catch (e) {}
   const bekannt = new Set(((await env.DB.prepare('SELECT addr FROM node_leave').all()).results || []).map(z => z.addr));
-  const offen = nodes.filter(n => n && n.requested_to_leave && !bekannt.has(String(n.node_address).toLowerCase())).slice(0, 2);
+  // NUR AKTIVE NODES (die beiden ersten Treffer waren laengst ausgetretene Nodes -- bei ihnen bleibt
+  // requested_to_leave einfach stehen; ihr Zeitpunkt interessiert niemanden und verbrauchte die
+  // Suche). Gesucht werden die, die beim naechsten Churn gehen. Bis zu 4 je Durchgang.
+  const offen = nodes.filter(n => n && n.requested_to_leave && String(n.status) === 'Active' && !bekannt.has(String(n.node_address).toLowerCase())).slice(0, 4);
   if (!offen.length) return;
   // NUR SERVER, DIE ALTE STAENDE WIRKLICH LIEFERN: Probe mit /thorchain/lastblock?height=h -- ein
   // Archiv-Server antwortet mit h, ein normaler mit der aktuellen Hoehe.
@@ -6654,14 +6667,12 @@ async function syncLeaveZeiten(env) {
           return false;
         }
       };
-      // Fenster schrittweise: 30 Tage, sonst 180 Tage (~14 400 Bloecke je Tag)
+      // Fenster: vom letzten Churn bis jetzt. War Leave schon beim letzten Churn gesetzt, wurde es
+      // davor beantragt (exakt = 0, Zeit = letzter Churn).
       let hi = curH, lo = 0, exakt = 1;
-      for (const tage of [30, 180]) {
-        const kandidat = Math.max(1, curH - tage * 14400);
-        if (!(await gesetzt(kandidat))) { lo = kandidat; break; }
-        hi = kandidat;
-      }
-      if (!lo) exakt = 0; // auch vor 180 Tagen schon gesetzt
+      const start = churnH > 0 && churnH < curH ? churnH : Math.max(1, curH - 7 * 14400);
+      if (!(await gesetzt(start))) lo = start; else hi = start;
+      if (!lo) exakt = 0;
       else {
         while (hi - lo > 1) {
           const mid = Math.floor((lo + hi) / 2);
@@ -6669,12 +6680,15 @@ async function syncLeaveZeiten(env) {
         }
       }
       let zeit = Date.now() - (curH - hi) * 6000;
-      try {
-        const b = await holen(archiv, `/thorchain/block?height=${hi}`);
-        const t = b && ((b.header && b.header.time) || (b.block && b.block.header && b.block.header.time));
-        const ms = t ? Date.parse(t) : NaN;
-        if (Number.isFinite(ms)) zeit = ms;
-      } catch (e) {}
+      // Blockzeit; ein zweiter Versuch, weil die Schaetzung (6 s je Block) ueber Monate um Tage abweicht
+      for (let versuch = 0; versuch < 2; versuch++) {
+        try {
+          const b = await holen(archiv, `/thorchain/block?height=${hi}`);
+          const t = b && ((b.header && b.header.time) || (b.block && b.block.header && b.block.header.time));
+          const ms = t ? Date.parse(t) : NaN;
+          if (Number.isFinite(ms)) { zeit = ms; break; }
+        } catch (e) { await new Promise(r => setTimeout(r, 800)); }
+      }
       await env.DB.prepare('INSERT OR REPLACE INTO node_leave (addr, hoehe, zeit, exakt, gesehen, v) VALUES (?, ?, ?, ?, ?, 2)').bind(addr, hi, Math.round(zeit), exakt, Date.now()).run();
     } catch (e) { console.warn('[leave] Suche', addr, e?.message || e); }
   }
