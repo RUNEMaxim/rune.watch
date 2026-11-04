@@ -4676,6 +4676,14 @@ export default {
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
       }
+      if (url.pathname === '/podcast') {
+        // THORCHAIN-PODCAST fuer den Player in der App: Folgenliste aus dem oeffentlichen RSS-Feed
+        // (rss.com). Der Browser darf den Feed wegen CORS nicht selbst lesen, deshalb holt ihn der
+        // Worker und gibt eine kleine Liste zurueck; zwischengespeichert fuer 1 Stunde.
+        await sicherePushTabellen(env);
+        const erg = await podcastFolgen(env, url.searchParams.get('fresh') === '1');
+        return json(erg || { error: 'NO_FEED' }, env, erg ? 200 : 502);
+      }
       if (url.pathname === '/chain-halts') {
         // WANN WURDEN CHAINS ANGEHALTEN? (Halt-Verlauf der letzten 30 Tage, aus Mimir)
         await sichereHaltTabelle(env);
@@ -6801,6 +6809,45 @@ async function syncHaltVerlauf(env) {
   }
   // aelter als 45 Tage vergessen
   try { await env.DB.prepare('DELETE FROM halt_verlauf WHERE zeit < ?').bind(Date.now() - 45 * 86400e3).run(); } catch (e) {}
+}
+const PODCAST_FEEDS = ['https://media.rss.com/thorchain/feed.xml', 'https://rss.com/podcasts/thorchain/feed.xml'];
+async function podcastFolgen(env, frisch) {
+  if (!frisch) {
+    try { const c = JSON.parse((await pushState(env, 'podcastCache')) || 'null'); if (c && Date.now() - c.t < 3600e3) return c; } catch (e) {}
+  }
+  let xml = null;
+  for (const u of PODCAST_FEEDS) {
+    try {
+      const r = await fetch(u, { headers: { accept: 'application/rss+xml, application/xml, text/xml' }, signal: AbortSignal.timeout(12000) });
+      if (r.ok) { const t = await r.text(); if (/<item[\s>]/i.test(t)) { xml = t; break; } }
+    } catch (e) {}
+  }
+  if (!xml) {
+    try { const c = JSON.parse((await pushState(env, 'podcastCache')) || 'null'); if (c) return c; } catch (e) {}
+    return null;
+  }
+  const text = (blk, tag) => {
+    const m = new RegExp('<' + tag + '[^>]*>([\\s\\S]*?)</' + tag + '>', 'i').exec(blk);
+    if (!m) return '';
+    return m[1].replace(/^\s*<!\[CDATA\[/, '').replace(/\]\]>\s*$/, '').replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim();
+  };
+  const attr = (blk, tag, a) => { const m = new RegExp('<' + tag + '[^>]*\\s' + a + '="([^"]+)"', 'i').exec(blk); return m ? m[1].replace(/&amp;/g, '&') : ''; };
+  const dauer = d => { if (!d) return null; if (/^\d+$/.test(d)) return Number(d); const t = d.split(':').map(Number); return t.reduce((s, v) => s * 60 + (v || 0), 0) || null; };
+  const kanal = xml.split(/<item[\s>]/i)[0];
+  const showBild = attr(kanal, 'itunes:image', 'href') || text(kanal.replace(/[\s\S]*<image>/i, '<image>'), 'url');
+  const folgen = xml.split(/<item[\s>]/i).slice(1).map(b => b.split(/<\/item>/i)[0]).map(b => ({
+    titel: text(b, 'title'),
+    datum: Date.parse(text(b, 'pubDate')) || null,
+    audio: attr(b, 'enclosure', 'url'),
+    dauer: dauer(text(b, 'itunes:duration')),
+    bild: attr(b, 'itunes:image', 'href') || showBild,
+    link: text(b, 'link'),
+    beschreibung: text(b, 'itunes:summary') || text(b, 'description'),
+  })).filter(f => f.titel && f.audio).slice(0, 40);
+  const erg = { t: Date.now(), show: text(kanal, 'title') || 'THORChain Livestream Podcast', bild: showBild, folgen: folgen.map(f => ({ ...f, beschreibung: f.beschreibung.slice(0, 600) })) };
+  try { await pushStateSet(env, 'podcastCache', JSON.stringify(erg)); } catch (e) {}
+  return erg;
 }
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
