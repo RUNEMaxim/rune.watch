@@ -6610,6 +6610,11 @@ async function sichereLeaveTabelle(env) {
 }
 async function syncLeaveZeiten(env) {
   await sichereLeaveTabelle(env);
+  // Version 2: Eintraege der ersten Fassung neu suchen (gemeldet: beide Nodes standen mit derselben
+  // Hoehe \"vor mehr als 30 Tagen\" -- vermutlich hat ein Server die Blockhoehe ignoriert und den
+  // AKTUELLEN Stand geliefert).
+  try { await env.DB.prepare('ALTER TABLE node_leave ADD COLUMN v INTEGER').run(); } catch (e) {}
+  try { await env.DB.prepare('DELETE FROM node_leave WHERE v IS NULL').run(); } catch (e) {}
   const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
   if (!Array.isArray(nodes)) return;
   const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
@@ -6617,49 +6622,65 @@ async function syncLeaveZeiten(env) {
   if (!curH) return;
   const bekannt = new Set(((await env.DB.prepare('SELECT addr FROM node_leave').all()).results || []).map(z => z.addr));
   const offen = nodes.filter(n => n && n.requested_to_leave && !bekannt.has(String(n.node_address).toLowerCase())).slice(0, 2);
-  const basen = getThornodeBases({ needsHeight: true });
+  if (!offen.length) return;
+  // NUR SERVER, DIE ALTE STAENDE WIRKLICH LIEFERN: Probe mit /thorchain/lastblock?height=h -- ein
+  // Archiv-Server antwortet mit h, ein normaler mit der aktuellen Hoehe.
+  const holen = async (base, pfad) => {
+    const r = await fetch(base + pfad, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+    if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+    return r.json();
+  };
+  let archiv = null;
+  for (const b of getThornodeBases({ needsHeight: true })) {
+    try {
+      const probeH = curH - 50000;
+      const j = await holen(b, `/thorchain/lastblock?height=${probeH}`);
+      const h = Number(Array.isArray(j) && j[0] && j[0].thorchain) || 0;
+      if (h && h <= probeH + 5) { archiv = b; break; }
+    } catch (e) {}
+  }
+  if (!archiv) { console.warn('[leave] kein Archiv-Server liefert alte Staende'); return; }
   for (const n of offen) {
     const addr = String(n.node_address).toLowerCase();
     try {
-      // Gab es die Node bei dieser Hoehe noch nicht, antwortet THORNode mit einem Fehler -- das zaehlt
-      // als "nicht gesetzt". Mehr als 3 Fehler: Suche abbrechen und im naechsten Durchgang neu.
       let fehler = 0;
       const gesetzt = async h => {
         try {
-          const j = await fetchFromBases(basen, `/thorchain/node/${n.node_address}?height=${h}`);
+          const j = await holen(archiv, `/thorchain/node/${n.node_address}?height=${h}`);
           return !!(j && j.requested_to_leave);
         } catch (e) {
-          const m = String(e && e.message || e);
-          if (/404|not ?found|does not exist/i.test(m)) return false;
+          if (e && (e.status === 404 || e.status === 400)) return false; // Node gab es da noch nicht
           if (++fehler > 3) throw e;
           return false;
         }
       };
-      const FENSTER = 30 * 14400; // ~30 Tage bei ~6 s je Block
-      let lo = Math.max(1, curH - FENSTER), hi = curH;
-      let exakt = 1;
-      if (await gesetzt(lo)) { exakt = 0; hi = lo; }
+      // Fenster schrittweise: 30 Tage, sonst 180 Tage (~14 400 Bloecke je Tag)
+      let hi = curH, lo = 0, exakt = 1;
+      for (const tage of [30, 180]) {
+        const kandidat = Math.max(1, curH - tage * 14400);
+        if (!(await gesetzt(kandidat))) { lo = kandidat; break; }
+        hi = kandidat;
+      }
+      if (!lo) exakt = 0; // auch vor 180 Tagen schon gesetzt
       else {
-        // Invariante: bei lo nicht gesetzt, bei hi gesetzt
         while (hi - lo > 1) {
           const mid = Math.floor((lo + hi) / 2);
           if (await gesetzt(mid)) hi = mid; else lo = mid;
         }
       }
-      // Uhrzeit des Blocks; sonst aus der Blockzeit geschaetzt
       let zeit = Date.now() - (curH - hi) * 6000;
       try {
-        const b = await fetchFromBases(basen, `/thorchain/block?height=${hi}`);
+        const b = await holen(archiv, `/thorchain/block?height=${hi}`);
         const t = b && ((b.header && b.header.time) || (b.block && b.block.header && b.block.header.time));
         const ms = t ? Date.parse(t) : NaN;
         if (Number.isFinite(ms)) zeit = ms;
       } catch (e) {}
-      await env.DB.prepare('INSERT OR REPLACE INTO node_leave (addr, hoehe, zeit, exakt, gesehen) VALUES (?, ?, ?, ?, ?)').bind(addr, hi, Math.round(zeit), exakt, Date.now()).run();
+      await env.DB.prepare('INSERT OR REPLACE INTO node_leave (addr, hoehe, zeit, exakt, gesehen, v) VALUES (?, ?, ?, ?, ?, 2)').bind(addr, hi, Math.round(zeit), exakt, Date.now()).run();
     } catch (e) { console.warn('[leave] Suche', addr, e?.message || e); }
   }
-  // Nodes, die laengst weg sind, nach 90 Tagen vergessen
   try { await env.DB.prepare('DELETE FROM node_leave WHERE gesehen < ?').bind(Date.now() - 90 * 86400e3).run(); } catch (e) {}
 }
+
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
