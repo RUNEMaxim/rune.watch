@@ -6714,7 +6714,9 @@ function haltArt(key) {
   let m;
   if ((m = /^SOLVENCYHALT([A-Z0-9]+)CHAIN$/.exec(k))) return { chain: m[1], art: 'solvency' };
   if ((m = /^HALTSIGNING([A-Z0-9]+)$/.exec(k))) return { chain: m[1], art: 'signing' };
-  if (k === 'HALTCHAINGLOBAL' || k === 'NODEPAUSECHAINGLOBAL') return { chain: 'ALL', art: 'chain' };
+  if (k === 'HALTCHAINGLOBAL') return { chain: 'ALL', art: 'chain' };
+  // Node-Pause: einzelne Nodes koennen alle Chains fuer eine Weile pausieren; der Wert ist die Hoehe, BIS zu der die Pause gilt.
+  if (k === 'NODEPAUSECHAINGLOBAL') return { chain: 'ALL', art: 'pause' };
   if (k === 'HALTTRADING') return { chain: 'ALL', art: 'trading' };
   if (k === 'HALTCHURNING') return { chain: 'ALL', art: 'churn' };
   if ((m = /^HALT([A-Z0-9]+)CHAIN$/.exec(k))) return { chain: m[1], art: 'chain' };
@@ -6750,10 +6752,14 @@ async function syncHaltVerlauf(env) {
     if (!mimir || typeof mimir !== 'object') return;
     for (const [k0, v0] of Object.entries(mimir)) {
       const k = String(k0).toUpperCase(), v = Number(v0);
-      if (!HALT_KEY_RE.test(k) || !(v > 1) || v > curH) continue;
+      if (!HALT_KEY_RE.test(k) || !(v > 1)) continue;
+      // Node-Pause: Wert = Ende der Pause (darf in der Zukunft liegen); aktiv nur, solange das Ende noch kommt.
+      const pause = k === 'NODEPAUSECHAINGLOBAL';
+      if (!pause && v > curH) continue;
       const id = k + ':' + v;
       const alt = fund.get(id);
-      fund.set(id, { key: k, start: v, aktiv: aktiv || (alt && alt.aktiv) || false });
+      const jetztAktiv = aktiv && (!pause || v > curH);
+      fund.set(id, { key: k, start: v, aktiv: jetztAktiv || (alt && alt.aktiv) || false });
     }
   };
   // aktueller Stand
@@ -6777,11 +6783,12 @@ async function syncHaltVerlauf(env) {
   const bekannt = new Map(((await env.DB.prepare('SELECT key, start, zeit FROM halt_verlauf').all()).results || []).map(z => [z.key + ':' + z.start, z.zeit]));
   for (const [id, f] of fund) {
     let zeit = bekannt.get(id);
-    if (!zeit) {
+    if (!zeit || f.start > curH) {
       zeit = Date.now() - (curH - f.start) * 6000;
       try {
         if (!archiv) archiv = await archivBasis(curH);
         if (archiv) {
+          if (f.start > curH) throw new Error('Zukunft');
           const b = await archiv.holen(`/thorchain/block?height=${f.start}`);
           const t = b && ((b.header && b.header.time) || (b.block && b.block.header && b.block.header.time));
           const ms = t ? Date.parse(t) : NaN;
