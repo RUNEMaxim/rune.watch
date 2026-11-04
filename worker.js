@@ -4676,6 +4676,12 @@ export default {
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
       }
+      if (url.pathname === '/chain-halts') {
+        // WANN WURDEN CHAINS ANGEHALTEN? (Halt-Verlauf der letzten 30 Tage, aus Mimir)
+        await sichereHaltTabelle(env);
+        const r = await env.DB.prepare('SELECT key, start, zeit, zuletzt, aktiv FROM halt_verlauf ORDER BY start DESC').all();
+        return json({ halts: ((r && r.results) || []).map(z => ({ key: z.key, ...haltArt(z.key), hoehe: z.start, zeit: z.zeit, aktiv: !!z.aktiv })) }, env);
+      }
       if (url.pathname === '/node-leaves') {
         // WANN HAT EINE NODE ZUM ERSTEN MAL "LEAVE" GEDRUECKT? (fuer die Node-Karte der App)
         await sichereLeaveTabelle(env);
@@ -6695,6 +6701,100 @@ async function syncLeaveZeiten(env) {
   try { await env.DB.prepare('DELETE FROM node_leave WHERE gesehen < ?').bind(Date.now() - 90 * 86400e3).run(); } catch (e) {}
 }
 
+// HALT-VERLAUF (gewuenscht: \"angeben, wann die Chains gehalted wurden, besonders nach dem Double-
+// Spending-Problem von ETH -- ich will nachweisen, dass die Nodes schon vorher leaven wollten\").
+// THORChain fuehrt Halts als Mimir-Werte: HALT<CHAIN>CHAIN, HALT<CHAIN>TRADING, SOLVENCYHALT<CHAIN>CHAIN,
+// HALTSIGNING<CHAIN>, HALTCHAINGLOBAL, HALTTRADING ... Der WERT ist die Blockhoehe, ab der der Halt gilt.
+// Liest man Mimir an alten Hoehen (Archiv-Server), steht dort also direkt der Start jedes Halts --
+// auch von Halts, die laengst wieder aufgehoben sind. Einmal am Tag werden 31 Tage rueckwaerts
+// abgetastet (ein Abruf je 6 Stunden), sonst nur der aktuelle Stand; die Blockzeit je Start wird gespeichert.
+const HALT_KEY_RE = /^(SOLVENCYHALT[A-Z0-9]+CHAIN|HALT[A-Z0-9]+CHAIN|HALT[A-Z0-9]+TRADING|HALTSIGNING[A-Z0-9]+|HALTCHAINGLOBAL|HALTTRADING|HALTCHURNING|NODEPAUSECHAINGLOBAL)$/;
+function haltArt(key) {
+  const k = String(key || '');
+  let m;
+  if ((m = /^SOLVENCYHALT([A-Z0-9]+)CHAIN$/.exec(k))) return { chain: m[1], art: 'solvency' };
+  if ((m = /^HALTSIGNING([A-Z0-9]+)$/.exec(k))) return { chain: m[1], art: 'signing' };
+  if (k === 'HALTCHAINGLOBAL' || k === 'NODEPAUSECHAINGLOBAL') return { chain: 'ALL', art: 'chain' };
+  if (k === 'HALTTRADING') return { chain: 'ALL', art: 'trading' };
+  if (k === 'HALTCHURNING') return { chain: 'ALL', art: 'churn' };
+  if ((m = /^HALT([A-Z0-9]+)CHAIN$/.exec(k))) return { chain: m[1], art: 'chain' };
+  if ((m = /^HALT([A-Z0-9]+)TRADING$/.exec(k))) return { chain: m[1], art: 'trading' };
+  return { chain: '?', art: '?' };
+}
+async function sichereHaltTabelle(env) {
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS halt_verlauf (key TEXT, start INTEGER, zeit INTEGER, zuletzt INTEGER, aktiv INTEGER, PRIMARY KEY (key, start))').run();
+}
+async function archivBasis(curH) {
+  const holen = async (base, pfad) => {
+    const r = await fetch(base + pfad, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(12000) });
+    if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+    return r.json();
+  };
+  for (const b of getThornodeBases({ needsHeight: true })) {
+    try {
+      const probeH = curH - 50000;
+      const j = await holen(b, `/thorchain/lastblock?height=${probeH}`);
+      const h = Number(Array.isArray(j) && j[0] && j[0].thorchain) || 0;
+      if (h && h <= probeH + 5) return { base: b, holen: pfad => holen(b, pfad) };
+    } catch (e) {}
+  }
+  return null;
+}
+async function syncHaltVerlauf(env) {
+  await sichereHaltTabelle(env);
+  const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
+  const curH = Number(Array.isArray(lb) && lb[0] && lb[0].thorchain) || 0;
+  if (!curH) return;
+  const fund = new Map(); // key:start -> { key, start, aktiv }
+  const lesen = (mimir, aktiv) => {
+    if (!mimir || typeof mimir !== 'object') return;
+    for (const [k0, v0] of Object.entries(mimir)) {
+      const k = String(k0).toUpperCase(), v = Number(v0);
+      if (!HALT_KEY_RE.test(k) || !(v > 1) || v > curH) continue;
+      const id = k + ':' + v;
+      const alt = fund.get(id);
+      fund.set(id, { key: k, start: v, aktiv: aktiv || (alt && alt.aktiv) || false });
+    }
+  };
+  // aktueller Stand
+  const jetzt = await fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null);
+  lesen(jetzt, true);
+  // Einmal am Tag: 31 Tage rueckwaerts abtasten
+  const letzteSuche = Number(await pushState(env, 'haltVerlaufSuche')) || 0;
+  let archiv = null;
+  if (Date.now() - letzteSuche > 20 * 3600e3) {
+    archiv = await archivBasis(curH);
+    if (archiv) {
+      // alle 6 Stunden (3600 Bloecke), damit auch kurze Halts von wenigen Stunden erfasst werden
+      for (let schritt = 1; schritt <= 31 * 4; schritt++) {
+        try { lesen(await archiv.holen(`/thorchain/mimir?height=${curH - schritt * 3600}`), false); } catch (e) {}
+      }
+      await pushStateSet(env, 'haltVerlaufSuche', Date.now());
+    }
+  }
+  // Aktiv-Kennzeichen zuruecksetzen, dann speichern
+  await env.DB.prepare('UPDATE halt_verlauf SET aktiv = 0').run();
+  const bekannt = new Map(((await env.DB.prepare('SELECT key, start, zeit FROM halt_verlauf').all()).results || []).map(z => [z.key + ':' + z.start, z.zeit]));
+  for (const [id, f] of fund) {
+    let zeit = bekannt.get(id);
+    if (!zeit) {
+      zeit = Date.now() - (curH - f.start) * 6000;
+      try {
+        if (!archiv) archiv = await archivBasis(curH);
+        if (archiv) {
+          const b = await archiv.holen(`/thorchain/block?height=${f.start}`);
+          const t = b && ((b.header && b.header.time) || (b.block && b.block.header && b.block.header.time));
+          const ms = t ? Date.parse(t) : NaN;
+          if (Number.isFinite(ms)) zeit = ms;
+        }
+      } catch (e) {}
+    }
+    await env.DB.prepare('INSERT INTO halt_verlauf (key, start, zeit, zuletzt, aktiv) VALUES (?, ?, ?, ?, ?) ON CONFLICT(key, start) DO UPDATE SET zuletzt = excluded.zuletzt, aktiv = excluded.aktiv' + (bekannt.get(id) ? '' : ', zeit = excluded.zeit'))
+      .bind(f.key, f.start, Math.round(zeit), Date.now(), f.aktiv ? 1 : 0).run();
+  }
+  // aelter als 45 Tage vergessen
+  try { await env.DB.prepare('DELETE FROM halt_verlauf WHERE zeit < ?').bind(Date.now() - 45 * 86400e3).run(); } catch (e) {}
+}
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -6717,6 +6817,7 @@ async function runRefreshCycle(env) {
   await schritt('bRUNE-Kurs', () => syncRujiraBruneKurs(env));
   await schritt('Timeline', () => waermeTimeline(env));
   await schritt('Leave-Zeitpunkte', () => syncLeaveZeiten(env));
+  await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
 
   const now = Date.now();
 
