@@ -4676,6 +4676,14 @@ export default {
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
       }
+      if (url.pathname === '/node-leaves') {
+        // WANN HAT EINE NODE ZUM ERSTEN MAL "LEAVE" GEDRUECKT? (fuer die Node-Karte der App)
+        await sichereLeaveTabelle(env);
+        const r = await env.DB.prepare('SELECT addr, hoehe, zeit, exakt FROM node_leave').all();
+        const out = {};
+        for (const z of (r && r.results) || []) out[z.addr] = { hoehe: z.hoehe, zeit: z.zeit, exakt: !!z.exakt };
+        return json({ leaves: out }, env);
+      }
       if (url.pathname === '/mimir-votes') {
         // OFFENE MIMIR-ABSTIMMUNGEN fuer die App (Uebersicht "Offene Abstimmungen").
         await sicherePushTabellen(env);
@@ -6591,6 +6599,67 @@ async function handleRujiraBruneHistory(request, env) {
   return json({ vertrag: rujiraBruneVertragCache, jetzt, kursFertig: !!fertig, tage: r.results || [] }, env);
 }
 
+// LEAVE-ZEITPUNKT JE NODE (gewuenscht: \"zeigen, wann genau Nodes zum ersten Mal Leave gedrueckt
+// haben\"): THORNode sagt nur requested_to_leave = true, nicht seit wann. Fuer jede Node mit diesem
+// Kennzeichen sucht der Worker einmalig per Binaersuche ueber historische Blockhoehen die erste Hoehe,
+// ab der das Kennzeichen gesetzt ist (etwa 20 Abfragen je Node, hoechstens 2 Nodes pro Durchgang),
+// und die Uhrzeit dieses Blocks. Suchfenster 30 Tage; liegt es weiter zurueck, steht \"vor mehr als
+// 30 Tagen\" (exakt = 0).
+async function sichereLeaveTabelle(env) {
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS node_leave (addr TEXT PRIMARY KEY, hoehe INTEGER, zeit INTEGER, exakt INTEGER, gesehen INTEGER)').run();
+}
+async function syncLeaveZeiten(env) {
+  await sichereLeaveTabelle(env);
+  const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
+  if (!Array.isArray(nodes)) return;
+  const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
+  const curH = Number(Array.isArray(lb) && lb[0] && lb[0].thorchain) || 0;
+  if (!curH) return;
+  const bekannt = new Set(((await env.DB.prepare('SELECT addr FROM node_leave').all()).results || []).map(z => z.addr));
+  const offen = nodes.filter(n => n && n.requested_to_leave && !bekannt.has(String(n.node_address).toLowerCase())).slice(0, 2);
+  const basen = getThornodeBases({ needsHeight: true });
+  for (const n of offen) {
+    const addr = String(n.node_address).toLowerCase();
+    try {
+      // Gab es die Node bei dieser Hoehe noch nicht, antwortet THORNode mit einem Fehler -- das zaehlt
+      // als "nicht gesetzt". Mehr als 3 Fehler: Suche abbrechen und im naechsten Durchgang neu.
+      let fehler = 0;
+      const gesetzt = async h => {
+        try {
+          const j = await fetchFromBases(basen, `/thorchain/node/${n.node_address}?height=${h}`);
+          return !!(j && j.requested_to_leave);
+        } catch (e) {
+          const m = String(e && e.message || e);
+          if (/404|not ?found|does not exist/i.test(m)) return false;
+          if (++fehler > 3) throw e;
+          return false;
+        }
+      };
+      const FENSTER = 30 * 14400; // ~30 Tage bei ~6 s je Block
+      let lo = Math.max(1, curH - FENSTER), hi = curH;
+      let exakt = 1;
+      if (await gesetzt(lo)) { exakt = 0; hi = lo; }
+      else {
+        // Invariante: bei lo nicht gesetzt, bei hi gesetzt
+        while (hi - lo > 1) {
+          const mid = Math.floor((lo + hi) / 2);
+          if (await gesetzt(mid)) hi = mid; else lo = mid;
+        }
+      }
+      // Uhrzeit des Blocks; sonst aus der Blockzeit geschaetzt
+      let zeit = Date.now() - (curH - hi) * 6000;
+      try {
+        const b = await fetchFromBases(basen, `/thorchain/block?height=${hi}`);
+        const t = b && ((b.header && b.header.time) || (b.block && b.block.header && b.block.header.time));
+        const ms = t ? Date.parse(t) : NaN;
+        if (Number.isFinite(ms)) zeit = ms;
+      } catch (e) {}
+      await env.DB.prepare('INSERT OR REPLACE INTO node_leave (addr, hoehe, zeit, exakt, gesehen) VALUES (?, ?, ?, ?, ?)').bind(addr, hi, Math.round(zeit), exakt, Date.now()).run();
+    } catch (e) { console.warn('[leave] Suche', addr, e?.message || e); }
+  }
+  // Nodes, die laengst weg sind, nach 90 Tagen vergessen
+  try { await env.DB.prepare('DELETE FROM node_leave WHERE gesehen < ?').bind(Date.now() - 90 * 86400e3).run(); } catch (e) {}
+}
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -6612,6 +6681,7 @@ async function runRefreshCycle(env) {
   await schritt('Spenden-Verlauf', () => syncDonationHistory(env));
   await schritt('bRUNE-Kurs', () => syncRujiraBruneKurs(env));
   await schritt('Timeline', () => waermeTimeline(env));
+  await schritt('Leave-Zeitpunkte', () => syncLeaveZeiten(env));
 
   const now = Date.now();
 
