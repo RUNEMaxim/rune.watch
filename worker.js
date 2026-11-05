@@ -727,7 +727,8 @@ async function handleBondHistory(request, env, ctx) {
         let offenRows = null;
         try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
         const nachgerechnet = !!(await pushState(env, 'bondNachgerechnet:' + address));
-        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet };
+        let letzterLauf = null; try { letzterLauf = JSON.parse((await pushState(env, 'beschlInfo:' + address)) || 'null'); } catch (e) {}
+        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet, letzterLauf };
       } catch (e) { return null; }
     })(),
   }, env);
@@ -7034,7 +7035,7 @@ async function syncBondNachrechnung(env) {
     for (const na of nodesA) {
       abfragen++;
       try {
-        const n = await fetchNodeAtHeight(na, r.churn_height - 1);
+        const n = await fetchArchiv(`/thorchain/node/${na}?height=${r.churn_height - 1}`).catch(e => { if (/HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; });
         for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === r.bond_address) summe += (Number(pr.bond) || 0) / 1e8;
       } catch (e) { ok = false; break; }
     }
@@ -7141,8 +7142,27 @@ async function syncUpgradeListe(env) {
   await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-50)));
   await pushStateSet(env, 'upgVer', JSON.stringify({ ver: aktuell, h: hoehe }));
 }
+// ARCHIV-ABRUF SPARSAM: nacheinander statt parallel an alle Quellen (jede parallele Anfrage zaehlt bei
+// Cloudflare als eigene Unteranfrage), und nur Liquify -- die Rueckfall-Knoten halten alte Staende meist
+// nicht vor, die Anfrage dort waere verschenkt. Bei 429 kurz warten und einmal wiederholen.
+async function fetchArchiv(path) {
+  const key = currentEnv && currentEnv.LIQUIFY_API_KEY;
+  const bases = [...(key ? [`https://gateway.liquify.com/api=${key}`] : []), 'https://gateway.liquify.com/chain/thorchain_api'];
+  let letzter = null;
+  for (const b of bases) {
+    for (let v = 0; v < 2; v++) {
+      try {
+        const r = await fetch(b + path, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+        if (r.status === 429) { letzter = new Error('HTTP_429 Archiv (Liquify)'); await new Promise(x => setTimeout(x, 1200)); continue; }
+        if (!r.ok) { letzter = new Error('HTTP_' + r.status + ' Archiv'); break; }
+        return await r.json();
+      } catch (e) { letzter = e; break; }
+    }
+  }
+  throw letzter || new Error('ARCHIV_NICHT_ERREICHBAR');
+}
 async function runeGuthabenBei(adresse, hoehe) {
-  const j = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe}`);
+  const j = await fetchArchiv(`/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe}`);
   const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
   return b ? Number(b.amount) / 1e8 : 0;
 }
@@ -7183,9 +7203,13 @@ async function beschleunigeAdresse(env, address) {
   const adr = String(address);
   const sperre = 'beschl:' + adr;
   const zuletzt = Number(await pushState(env, sperre)) || 0;
-  if (Date.now() - zuletzt < 2 * 60e3) return;
+  if (Date.now() - zuletzt < 60e3) return;
   await pushStateSet(env, sperre, String(Date.now()));
   const parallel = async (liste, n, fn) => { for (let i = 0; i < liste.length; i += n) await Promise.all(liste.slice(i, i + n).map(fn)); };
+  // DIAGNOSE (gemeldet: nach dem Beschleunigen nur 1 Churn weiter): Erfolge und Fehler zaehlen und den
+  // ersten Fehlertext merken -- die App zeigt ihn an, damit sichtbar ist, WARUM es haengt.
+  const info = { t: Date.now(), ok: 0, fehler: 0, text: null };
+  const fehler = e => { info.fehler++; if (!info.text) info.text = String(e && e.message || e).slice(0, 140); };
   let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
   const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
   await parallel(ups, 4, async up => {
@@ -7196,20 +7220,29 @@ async function beschleunigeAdresse(env, address) {
       if (nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .bind(`upgrade|${up.hoehe}|${adr.toLowerCase()}`, adr.toLowerCase(), 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
       await pushStateSet(env, key, '1');
-    } catch (e) {}
+      info.ok++;
+    } catch (e) { fehler(e); }
   });
   const t = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
   let nodesA = []; try { nodesA = JSON.parse((t && t.node_addresses) || '[]'); } catch (e) {}
   const offen = ((await env.DB.prepare('SELECT churn_height FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL ORDER BY churn_height DESC LIMIT 400').bind(adr).all().catch(() => ({ results: [] }))).results) || [];
   const updates = [];
-  await parallel(offen, 8, async r => {
+  // Budget je Aufruf (Cloudflare zaehlt Unteranfragen): hoechstens ~150 Archiv-Abfragen, in 4er-Gruppen
+  const proChurn = Math.max(1, nodesA.length);
+  const offenJetzt = offen.slice(0, Math.max(1, Math.floor(150 / proChurn)));
+  await parallel(offenJetzt, 4, async r => {
     let summe = 0;
     try {
-      const nodes = await Promise.all(nodesA.map(na => fetchNodeAtHeight(na, r.churn_height - 1)));
+      // Gab es eine Node zu dieser Hoehe noch nicht (HTTP 4xx ausser 429), zaehlt sie mit 0 -- sonst bliebe
+      // der Churn fuer immer offen und die Nachrechnung liefe nie.
+      const nodes = await Promise.all(nodesA.map(na => fetchArchiv(`/thorchain/node/${na}?height=${r.churn_height - 1}`)
+        .catch(e => { if (/HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
       for (const n of nodes) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
       updates.push(env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(summe, adr, r.churn_height));
-    } catch (e) {}
+      info.ok++;
+    } catch (e) { fehler(e); }
   });
+  try { await pushStateSet(env, 'beschlInfo:' + adr, JSON.stringify({ ...info, nodes: nodesA.length, offen: offen.length, versucht: offenJetzt.length })); } catch (e) {}
   for (let i = 0; i < updates.length; i += 80) { try { await env.DB.batch(updates.slice(i, i + 80)); } catch (e) {} }
   const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(adr).first().catch(() => null);
   if (rest && rest.n === 0) { try { await bondNachrechnenAdresse(env, adr); } catch (e) {} }
