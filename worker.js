@@ -7035,7 +7035,7 @@ async function syncBondNachrechnung(env) {
     for (const na of nodesA) {
       abfragen++;
       try {
-        const n = await fetchArchiv(`/thorchain/node/${na}?height=${r.churn_height - 1}`).catch(e => { if (/HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; });
+        const n = await fetchArchivNahe(h => `/thorchain/node/${na}?height=${h}`, r.churn_height - 1, [0, -1, -5]).catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; });
         for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === r.bond_address) summe += (Number(pr.bond) || 0) / 1e8;
       } catch (e) { ok = false; break; }
     }
@@ -7154,15 +7154,32 @@ async function fetchArchiv(path) {
       try {
         const r = await fetch(b + path, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
         if (r.status === 429) { letzter = new Error('HTTP_429 Archiv (Liquify)'); await new Promise(x => setTimeout(x, 1200)); continue; }
-        if (!r.ok) { letzter = new Error('HTTP_' + r.status + ' Archiv'); break; }
+        if (!r.ok) {
+          // Fehlertext mitnehmen (Diagnose) -- "not found" heisst: das Objekt gab es zu dieser Hoehe nicht
+          let txt = ''; try { txt = (await r.text()).replace(/\s+/g, ' ').slice(0, 90); } catch (e) {}
+          letzter = new Error('HTTP_' + r.status + ' Archiv' + (txt ? ': ' + txt : ''));
+          if (/not\s*found|does not exist|unknown node/i.test(txt)) letzter.fehltZurHoehe = true;
+          break;
+        }
         return await r.json();
       } catch (e) { letzter = e; break; }
     }
   }
   throw letzter || new Error('ARCHIV_NICHT_ERREICHBAR');
 }
-async function runeGuthabenBei(adresse, hoehe) {
-  const j = await fetchArchiv(`/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe}`);
+async function fetchArchivNahe(pfadFn, hoehe, schritte) {
+  let letzter = null;
+  for (const d of schritte) {
+    try { return await fetchArchiv(pfadFn(hoehe + d)); }
+    catch (e) { letzter = e; if (e && e.fehltZurHoehe) throw e; }
+  }
+  // Letzter Versuch ueber alle THORNode-Quellen (wie beim Aufbau der Reward-Historie, der so funktioniert hat)
+  try { return await fetchFromBases(getThornodeBases({ needsHeight: true }), pfadFn(hoehe)); } catch (e) {}
+  throw letzter;
+}
+async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
+  // vor dem Upgrade weiter zurueck ausweichen, danach weiter vor -- nie ueber den Upgrade-Block hinweg
+  const j = await fetchArchivNahe(h => `/cosmos/bank/v1beta1/balances/${adresse}?height=${h}`, hoehe, richtung < 0 ? [0, -1, -3] : [0, 1, 3]);
   const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
   return b ? Number(b.amount) / 1e8 : 0;
 }
@@ -7180,8 +7197,8 @@ async function syncUpgradeErstattungen(env) {
       if (await pushState(env, key)) continue;
       abfragen += 2;
       try {
-        const vor = await runeGuthabenBei(adr, up.hoehe - 1);
-        const nach = await runeGuthabenBei(adr, up.hoehe + 2);
+        const vor = await runeGuthabenBei(adr, up.hoehe - 1, -1);
+        const nach = await runeGuthabenBei(adr, up.hoehe + 2, 1);
         const plus = nach - vor;
         if (plus > 0.01) {
           await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -7216,7 +7233,7 @@ async function beschleunigeAdresse(env, address) {
     const key = `upErst:${up.hoehe}:${adr.toLowerCase()}`;
     if (await pushState(env, key)) return;
     try {
-      const [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1), runeGuthabenBei(adr, up.hoehe + 2)]);
+      const [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1, -1), runeGuthabenBei(adr, up.hoehe + 2, 1)]);
       if (nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .bind(`upgrade|${up.hoehe}|${adr.toLowerCase()}`, adr.toLowerCase(), 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
       await pushStateSet(env, key, '1');
@@ -7235,8 +7252,8 @@ async function beschleunigeAdresse(env, address) {
     try {
       // Gab es eine Node zu dieser Hoehe noch nicht (HTTP 4xx ausser 429), zaehlt sie mit 0 -- sonst bliebe
       // der Churn fuer immer offen und die Nachrechnung liefe nie.
-      const nodes = await Promise.all(nodesA.map(na => fetchArchiv(`/thorchain/node/${na}?height=${r.churn_height - 1}`)
-        .catch(e => { if (/HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
+      const nodes = await Promise.all(nodesA.map(na => fetchArchivNahe(h => `/thorchain/node/${na}?height=${h}`, r.churn_height - 1, [0, -1, -5])
+        .catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
       for (const n of nodes) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
       updates.push(env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(summe, adr, r.churn_height));
       info.ok++;
