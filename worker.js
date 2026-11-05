@@ -713,6 +713,8 @@ async function handleBondHistory(request, env, ctx) {
         return (r.results || []).map(x => ({ node: x.node, art: x.art, amount: x.amount, dateMs: x.ts }));
       } catch (e) { return []; }
     })(),
+    // Laeuft die Pruefung noch, fuer diese Adresse sofort im Hintergrund beschleunigen
+    _beschl: (ctx && ctx.waitUntil ? (ctx.waitUntil(beschleunigeAdresse(env, address).catch(e => console.warn('[beschl]', e?.message || e))), undefined) : undefined),
     // Stand der Pruefung (damit die App "wird geprueft" statt nichts zeigen kann)
     eventsPruefung: await (async () => {
       try {
@@ -7048,13 +7050,18 @@ async function syncBondNachrechnung(env) {
     const zuletzt = Number(await pushState(env, merkKey)) || 0;
     if (Date.now() - zuletzt < 6 * 3600e3) continue;
     gerechnet++;
+    await bondNachrechnenAdresse(env, adr);
+  }
+}
+async function bondNachrechnenAdresse(env, adr) {
+    const merkKey = 'bondNachgerechnet:' + adr;
     const rows = ((await env.DB.prepare('SELECT churn_height, churn_timestamp, reward_amount, bond_vor FROM bond_history_rows WHERE bond_address = ? AND reward_amount IS NOT NULL ORDER BY churn_height ASC').bind(adr).all()).results) || [];
-    if (rows.length < 2) { await pushStateSet(env, merkKey, String(Date.now())); continue; }
+    if (rows.length < 2) { await pushStateSet(env, merkKey, String(Date.now())); return true; }
     let bonds = [], unbonds = [], leaves = [];
     try {
       const [b, u, l] = await Promise.all([fetchActionsForType(adr, 'bond'), fetchActionsForType(adr, 'unbond'), fetchActionsForType(adr, 'leave').catch(() => ({ items: [] }))]);
       bonds = b.items || []; unbonds = u.items || []; leaves = l.items || [];
-    } catch (e) { continue; } // ohne eigene Bewegungen lieber nichts rechnen
+    } catch (e) { return false; } // ohne eigene Bewegungen lieber nichts rechnen
     // Schon live erkannte Ereignisse nicht doppelt zaehlen
     const live = ((await env.DB.prepare("SELECT ts FROM bond_events WHERE address = ? AND id NOT LIKE 'hist|%'").bind(adr).all()).results || []).map(x => Number(x.ts));
     const schreiben = [];
@@ -7079,7 +7086,7 @@ async function syncBondNachrechnung(env) {
     }
     for (let i = 0; i < schreiben.length; i += 80) await env.DB.batch(schreiben.slice(i, i + 80));
     await pushStateSet(env, merkKey, String(Date.now()));
-  }
+    return true;
 }
 // ERSTATTUNGEN PER PROTOKOLL-UPGRADE (Hinweis des Nutzers: \"Erstattungen kommen von THORChain an alle zur
 // gleichen Zeit, auf die jeweilige Wallet\"). Recherche: Bond-Slashes werden per STORE-MIGRATION in einem
@@ -7164,6 +7171,48 @@ async function syncUpgradeErstattungen(env) {
       } catch (e) { /* Archiv gerade nicht erreichbar -> naechster Lauf */ }
     }
   }
+}
+// SCHNELL FUER DIE GERADE GEOEFFNETE WALLET (gemeldet: "das dauert zu lange"): Ruft die App die
+// Reward-Historie einer Adresse ab und die Pruefung ist nicht fertig, erledigt der Worker sie fuer DIESE
+// Adresse sofort im Hintergrund -- Upgrade-Guthaben und Bond je Churn parallel (je 8 gleichzeitig), danach
+// gleich die Slash-Nachrechnung. Hoechstens einmal je 2 Minuten je Adresse.
+async function beschleunigeAdresse(env, address) {
+  await sicherePushTabellen(env);
+  await sichereBondEvTabellen(env);
+  try { await env.DB.prepare('ALTER TABLE bond_history_rows ADD COLUMN bond_vor REAL').run(); } catch (e) {}
+  const adr = String(address);
+  const sperre = 'beschl:' + adr;
+  const zuletzt = Number(await pushState(env, sperre)) || 0;
+  if (Date.now() - zuletzt < 2 * 60e3) return;
+  await pushStateSet(env, sperre, String(Date.now()));
+  const parallel = async (liste, n, fn) => { for (let i = 0; i < liste.length; i += n) await Promise.all(liste.slice(i, i + n).map(fn)); };
+  let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+  const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
+  await parallel(ups, 4, async up => {
+    const key = `upErst:${up.hoehe}:${adr.toLowerCase()}`;
+    if (await pushState(env, key)) return;
+    try {
+      const [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1), runeGuthabenBei(adr, up.hoehe + 2)]);
+      if (nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(`upgrade|${up.hoehe}|${adr.toLowerCase()}`, adr.toLowerCase(), 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
+      await pushStateSet(env, key, '1');
+    } catch (e) {}
+  });
+  const t = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
+  let nodesA = []; try { nodesA = JSON.parse((t && t.node_addresses) || '[]'); } catch (e) {}
+  const offen = ((await env.DB.prepare('SELECT churn_height FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL ORDER BY churn_height DESC LIMIT 400').bind(adr).all().catch(() => ({ results: [] }))).results) || [];
+  const updates = [];
+  await parallel(offen, 8, async r => {
+    let summe = 0;
+    try {
+      const nodes = await Promise.all(nodesA.map(na => fetchNodeAtHeight(na, r.churn_height - 1)));
+      for (const n of nodes) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
+      updates.push(env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(summe, adr, r.churn_height));
+    } catch (e) {}
+  });
+  for (let i = 0; i < updates.length; i += 80) { try { await env.DB.batch(updates.slice(i, i + 80)); } catch (e) {} }
+  const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(adr).first().catch(() => null);
+  if (rest && rest.n === 0) { try { await bondNachrechnenAdresse(env, adr); } catch (e) {} }
 }
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
