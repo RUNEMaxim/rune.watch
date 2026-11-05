@@ -705,6 +705,14 @@ async function handleBondHistory(request, env, ctx) {
     ledgerError: existing?.ledger_error ?? null,
     total,
     entries,
+    // Slashes und Erstattungen (seit Einfuehrung der Erkennung), fuer die Rewards-Historie
+    events: await (async () => {
+      try {
+        await sichereBondEvTabellen(env);
+        const r = await env.DB.prepare('SELECT node, art, amount, ts FROM bond_events WHERE address = ? ORDER BY ts ASC').bind(String(address).toLowerCase()).all();
+        return (r.results || []).map(x => ({ node: x.node, art: x.art, amount: x.amount, dateMs: x.ts }));
+      } catch (e) { return []; }
+    })(),
   }, env);
 }
 
@@ -4820,6 +4828,7 @@ export default {
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
+        try { await syncBondEreignisse(env); } catch (e) { console.warn('[bondEv]', e?.message || e); }
         // Danach alle 6 Sekunden (feste Zeitpunkte ab Minutenbeginn), bis kurz vor dem naechsten Lauf.
         for (let k = 1; k < 10; k++) {
           const ziel = t0 + k * 6000;
@@ -6898,6 +6907,249 @@ async function runebondEmpfehlungen(env) {
   runebondRefCache = { at: Date.now(), data };
   return data;
 }
+// SLASHES UND ERSTATTUNGEN IN DER REWARDS-HISTORIE (gewuenscht von einem Bond Provider: \"+ Bond Rewards,
+// - Slashes, + Refunds, in RUNE\"). Die Reward-Historie kommt aus dem Award je Churn -- Bond-Aenderungen
+// zwischen den Churns tauchen dort nicht auf. Deshalb vergleicht dieser Lauf jede Minute den Bond jeder
+// verfolgten Adresse je Node mit dem letzten Stand:
+//  - SLASH: Bond sinkt, Node vorher und jetzt aktiv (Bond Provider koennen bei aktiver Node nicht
+//    unbonden), kein Churn dazwischen, Gesamt-Bond der Node sank mit; erst nach Bestaetigung im
+//    naechsten Lauf (THORNode-Server liefern nicht immer denselben Stand).
+//  - ERSTATTUNG: Bond steigt ohne Churn und OHNE eigene BOND-Transaktion der Adresse (eigenes
+//    Nachbonden wird ueber Midgard erkannt und nicht gezaehlt); ebenfalls mit Bestaetigung.
+// Gespeichert in bond_events; die Reward-Historie liefert sie mit aus.
+let bondEvTabellenOk = false;
+async function sichereBondEvTabellen(env) {
+  if (bondEvTabellenOk) return;
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS bond_events (id TEXT PRIMARY KEY, address TEXT, node TEXT, art TEXT, amount REAL, ts INTEGER, height INTEGER)`),
+    env.DB.prepare(`CREATE INDEX IF NOT EXISTS bond_events_addr ON bond_events (address)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS bond_snap (address TEXT, node TEXT, bond REAL, tb REAL, status TEXT, churn INTEGER, pend TEXT, ts INTEGER, PRIMARY KEY (address, node))`),
+  ]);
+  // Alte Bond-basierte "Erstattungen" entfernen (Erstattungen nur noch aus Upgrades)
+  try { await env.DB.prepare("DELETE FROM bond_events WHERE art = 'refund' AND (node IS NULL OR node NOT LIKE 'upgrade:%')").run(); } catch (e) {}
+  bondEvTabellenOk = true;
+}
+async function eigeneBondTx(adresse, seitMs) {
+  // Hat die Adresse selbst gebondet? Midgard-Aktionen der letzten Zeit nach einem BOND-Memo durchsuchen.
+  try {
+    // Typ "bond" (Midgard kennt bond/unbond/leave als eigene Aktionstypen) -- das Memo allein reicht
+    // nicht, es steht nicht in jeder Midgard-Antwort.
+    const j = await fetchFromBases(getMidgardBases(), `/actions?address=${adresse}&type=bond&limit=10`);
+    for (const a of (j && j.actions) || []) {
+      const t = a.date ? Number(a.date) / 1e6 : 0;
+      if (!t || t >= seitMs - 30 * 60e3) return true;
+    }
+  } catch (e) { return null; }
+  return false;
+}
+async function syncBondEreignisse(env) {
+  await sicherePushTabellen(env);
+  await sichereBondEvTabellen(env);
+  const merk = await pushState(env, 'bondEvLauf');
+  if (merk && Date.now() - Number(merk) < 50e3) return;
+  await pushStateSet(env, 'bondEvLauf', String(Date.now()));
+  let adressen = [];
+  try { const r = await env.DB.prepare('SELECT bond_address FROM tracked_addresses LIMIT 2000').all(); adressen = (r.results || []).map(x => String(x.bond_address).toLowerCase()); } catch (e) { return; }
+  if (!adressen.length) return;
+  const setA = new Set(adressen);
+  const nodes = await fetchNodes();
+  if (!Array.isArray(nodes) || !nodes.length) return;
+  const churn = nodes.filter(n => n.status === 'Active').reduce((m, n) => Math.max(m, Number(n.status_since) || 0), 0);
+  const jetzt = {};
+  for (const n of nodes) {
+    for (const p of ((n.bond_providers && n.bond_providers.providers) || [])) {
+      const a = String(p.bond_address || '').toLowerCase();
+      if (!setA.has(a)) continue;
+      jetzt[a + '|' + n.node_address] = { address: a, node: n.node_address, bond: Number(p.bond || 0) / 1e8, tb: Number(n.total_bond || 0) / 1e8, status: n.status };
+    }
+  }
+  const alt = {};
+  try {
+    const r = await env.DB.prepare('SELECT * FROM bond_snap').all();
+    for (const x of r.results || []) alt[x.address + '|' + x.node] = x;
+  } catch (e) {}
+  const schreiben = [], events = [];
+  for (const [k, v] of Object.entries(jetzt)) {
+    const a = alt[k];
+    let pend = null;
+    let basis = v;
+    if (a && a.churn === churn && a.status === 'Active' && v.status === 'Active') {
+      const delta = v.bond - a.bond;
+      const vorher = a.pend ? (() => { try { return JSON.parse(a.pend); } catch (e) { return null; } })() : null;
+      if (delta < -0.5 && (a.tb - v.tb) >= Math.max(0.5, -delta * 0.9)) {
+        if (vorher && vorher.art === 'slash' && Math.abs(vorher.bond - v.bond) < 0.5) events.push({ ...v, art: 'slash', amount: delta });
+        else { pend = { art: 'slash', bond: v.bond }; basis = { ...v, bond: a.bond, tb: a.tb }; }
+      }
+      // Kein Erstattungs-Zweig mehr: Erstattungen gehen per Upgrade auf die WALLET, nicht in den Bond
+      // (siehe syncUpgradeErstattungen). Ein Bond-Zuwachs ohne Churn ist eigenes Nachbonden.
+    }
+    schreiben.push(env.DB.prepare('INSERT OR REPLACE INTO bond_snap (address, node, bond, tb, status, churn, pend, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(basis.address, basis.node, basis.bond, basis.tb, basis.status, churn, pend ? JSON.stringify(pend) : null, pend && a ? a.ts : Date.now()));
+  }
+  for (const e of events) {
+    const id = `${e.address}|${e.node}|${e.art}|${Math.round(Date.now() / 60e3)}`;
+    schreiben.push(env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, e.address, e.node, e.art, Math.round(e.amount * 1e8) / 1e8, Date.now(), null));
+  }
+  for (let i = 0; i < schreiben.length; i += 80) { try { await env.DB.batch(schreiben.slice(i, i + 80)); } catch (e) { console.warn('[bondEv]', e?.message || e); } }
+}
+// SLASHES/ERSTATTUNGEN NACHRECHNEN (Vergangenheit). Je Churn kennen wir den Reward; neu auch den Bond
+// direkt vor dem Churn (bond_vor, fuer alte Zeilen hier nachgeholt -- archivierte THORNode-Abfragen,
+// gedrosselt). Zwischen zwei Churns gilt:
+//   Bond vor Churn k+1 = Bond vor Churn k + Reward k + eigene BONDs - eigene UNBONDs + Slash/Erstattung
+// Die eigenen Bewegungen kommen aus Midgard (bond/unbond, mit Blockhoehe). Was uebrig bleibt, ist ein
+// Slash (negativ) oder eine Erstattung (positiv). Vorsichtig: Epochen mit LEAVE, mit Bond nahe 0 oder
+// mit sehr grossen Sprungen werden ausgelassen; nur Reste ueber 0,5 RUNE zaehlen.
+const BONDVOR_ABFRAGEN_PRO_LAUF = 60;
+async function syncBondNachrechnung(env) {
+  await sicherePushTabellen(env);
+  await sichereBondEvTabellen(env);
+  try { await env.DB.prepare('ALTER TABLE bond_history_rows ADD COLUMN bond_vor REAL').run(); } catch (e) { /* gibt es schon */ }
+  // a) fehlende bond_vor nachholen
+  const offen = await env.DB.prepare(`SELECT r.bond_address, r.churn_height, t.node_addresses FROM bond_history_rows r JOIN tracked_addresses t ON t.bond_address = r.bond_address
+    WHERE r.bond_vor IS NULL AND r.reward_amount IS NOT NULL ORDER BY r.churn_height DESC LIMIT ?`).bind(Math.ceil(BONDVOR_ABFRAGEN_PRO_LAUF / 2)).all().catch(() => ({ results: [] }));
+  let abfragen = 0;
+  for (const r of offen.results || []) {
+    if (abfragen >= BONDVOR_ABFRAGEN_PRO_LAUF) break;
+    let nodesA = []; try { nodesA = JSON.parse(r.node_addresses || '[]'); } catch (e) {}
+    if (!nodesA.length) { await env.DB.prepare('UPDATE bond_history_rows SET bond_vor = 0 WHERE bond_address = ? AND churn_height = ?').bind(r.bond_address, r.churn_height).run(); continue; }
+    let summe = 0, ok = true;
+    for (const na of nodesA) {
+      abfragen++;
+      try {
+        const n = await fetchNodeAtHeight(na, r.churn_height - 1);
+        for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === r.bond_address) summe += (Number(pr.bond) || 0) / 1e8;
+      } catch (e) { ok = false; break; }
+    }
+    if (ok) await env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(summe, r.bond_address, r.churn_height).run();
+  }
+  // b) Adressen, deren Zeilen vollstaendig sind und die noch nicht (oder vor > 6 h) nachgerechnet wurden
+  const fertig = await env.DB.prepare(`SELECT bond_address FROM tracked_addresses t WHERE NOT EXISTS (SELECT 1 FROM bond_history_rows r WHERE r.bond_address = t.bond_address AND r.bond_vor IS NULL AND r.reward_amount IS NOT NULL) LIMIT 400`).all().catch(() => ({ results: [] }));
+  let gerechnet = 0;
+  for (const f of fertig.results || []) {
+    if (gerechnet >= 3) break;
+    const adr = f.bond_address;
+    const merkKey = 'bondNachgerechnet:' + adr;
+    const zuletzt = Number(await pushState(env, merkKey)) || 0;
+    if (Date.now() - zuletzt < 6 * 3600e3) continue;
+    gerechnet++;
+    const rows = ((await env.DB.prepare('SELECT churn_height, churn_timestamp, reward_amount, bond_vor FROM bond_history_rows WHERE bond_address = ? AND reward_amount IS NOT NULL ORDER BY churn_height ASC').bind(adr).all()).results) || [];
+    if (rows.length < 2) { await pushStateSet(env, merkKey, String(Date.now())); continue; }
+    let bonds = [], unbonds = [], leaves = [];
+    try {
+      const [b, u, l] = await Promise.all([fetchActionsForType(adr, 'bond'), fetchActionsForType(adr, 'unbond'), fetchActionsForType(adr, 'leave').catch(() => ({ items: [] }))]);
+      bonds = b.items || []; unbonds = u.items || []; leaves = l.items || [];
+    } catch (e) { continue; } // ohne eigene Bewegungen lieber nichts rechnen
+    // Schon live erkannte Ereignisse nicht doppelt zaehlen
+    const live = ((await env.DB.prepare("SELECT ts FROM bond_events WHERE address = ? AND id NOT LIKE 'hist|%'").bind(adr).all()).results || []).map(x => Number(x.ts));
+    const schreiben = [];
+    for (let i = 0; i + 1 < rows.length; i++) {
+      const a = rows[i], b2 = rows[i + 1];
+      if (live.some(t => t > Number(a.churn_timestamp) && t <= Number(b2.churn_timestamp) + 60e3)) continue;
+      const h0 = a.churn_height, h1 = b2.churn_height;
+      if (!(a.bond_vor > 1) || !(b2.bond_vor > 1)) continue;
+      const imFenster = x => x.height && x.height > h0 && x.height < h1;
+      if (leaves.some(imFenster)) continue;
+      const plus = bonds.filter(imFenster).reduce((q, x) => q + (x.amount || 0), 0);
+      const minus = unbonds.filter(imFenster).reduce((q, x) => q + (x.amount || 0), 0);
+      const rest = b2.bond_vor - a.bond_vor - (Number(a.reward_amount) || 0) - plus + minus;
+      // Toleranz: der Reward ist aus dem Award einen Block vor dem Churn berechnet und kann leicht vom
+      // tatsaechlich gutgeschriebenen Betrag abweichen -> mindestens 0,5 RUNE oder 2 % des Rewards
+      if (Math.abs(rest) < Math.max(0.5, (Number(a.reward_amount) || 0) * 0.02)) continue;
+      if (Math.abs(rest) > Math.max(5000, a.bond_vor * 0.5)) continue; // zu grosser Sprung -> unklar, auslassen
+      if (rest > 0) continue; // Zuwachs = eigenes Nachbonden o. Ae.; Erstattungen kommen per Upgrade auf die Wallet
+      const art = 'slash';
+      schreiben.push(env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .bind(`hist|${adr}|${h1}`, adr, null, art, Math.round(rest * 1e8) / 1e8, Number(b2.churn_timestamp) || null, h1));
+    }
+    for (let i = 0; i < schreiben.length; i += 80) await env.DB.batch(schreiben.slice(i, i + 80));
+    await pushStateSet(env, merkKey, String(Date.now()));
+  }
+}
+// ERSTATTUNGEN PER PROTOKOLL-UPGRADE (Hinweis des Nutzers: \"Erstattungen kommen von THORChain an alle zur
+// gleichen Zeit, auf die jeweilige Wallet\"). Recherche: Bond-Slashes werden per STORE-MIGRATION in einem
+// Upgrade erstattet -- aus der Reserve direkt auf die Wallet der Bond Provider, ohne Transaktion (daher
+// weder in Midgard noch als Bond-Aenderung sichtbar):
+//  - v3.16.0, Block 25.215.740 (05.03.2026): \"[Migrate] Bond slash refunds\" (!4482), Double-Spend-Vorfall
+//  - v3.21.0, Block 28.366.100 (23.10.2026): \"Bond slash reversal\" (!5175), 113.547 RUNE an 218 Bond Provider
+// Erkennung: RUNE-Guthaben der Wallet direkt vor und kurz nach dem Upgrade-Block (Archivabfrage). Ein Plus
+// in diesem Fenster ist die Erstattung. Weitere solche Upgrades hier ergaenzen.
+const RW_ERSTATTUNGS_UPGRADES = [
+  { name: 'v3.16.0', hoehe: 25215740, ts: Date.UTC(2026, 2, 5, 18, 0) },
+  { name: 'v3.21.0', hoehe: 28366100, ts: Date.UTC(2026, 9, 23, 14, 15) },
+];
+// AUTOMATISCH (gewuenscht: "kannst du das nicht automatisch machen?"): Jedes neue Protokoll-Upgrade wird
+// selbst erkannt -- der Lauf merkt sich die aktive Netzversion (/thorchain/version). Wechselt sie, sucht er
+// per Binaersuche (/thorchain/version?height=...) den exakten Block, ab dem die neue Version gilt, holt
+// dessen Zeitpunkt und nimmt das Upgrade in die Pruefliste auf. Danach prueft syncUpgradeErstattungen fuer
+// jede verfolgte Wallet das Guthaben vor und nach diesem Block -- wie bei v3.16.0 und v3.21.0.
+// Upgrades ohne Erstattung kosten nur die Abfragen; es entsteht kein Eintrag.
+async function versionBei(hoehe) {
+  const j = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/version?height=${hoehe}`);
+  return j && j.current ? String(j.current) : null;
+}
+async function syncUpgradeListe(env) {
+  await sicherePushTabellen(env);
+  const [ver, lb] = await Promise.all([
+    fetchFromBases(getThornodeBases(), '/thorchain/version'),
+    fetchFromBases(getThornodeBases(), '/thorchain/lastblock'),
+  ]);
+  const aktuell = ver && ver.current ? String(ver.current) : null;
+  const arr = Array.isArray(lb) ? lb : [lb];
+  const hoehe = parseInt((arr[0] && arr[0].thorchain) || '0', 10) || 0;
+  if (!aktuell || !hoehe) return;
+  let st = null; try { st = JSON.parse((await pushState(env, 'upgVer')) || 'null'); } catch (e) {}
+  if (!st) { await pushStateSet(env, 'upgVer', JSON.stringify({ ver: aktuell, h: hoehe })); return; }
+  if (st.ver === aktuell) { await pushStateSet(env, 'upgVer', JSON.stringify({ ver: aktuell, h: hoehe })); return; }
+  // Versionswechsel: ersten Block mit der neuen Version suchen
+  let lo = st.h, hi = hoehe;
+  for (let k = 0; k < 40 && hi - lo > 1; k++) {
+    const mid = Math.floor((lo + hi) / 2);
+    const v = await versionBei(mid);
+    if (v === aktuell) hi = mid; else lo = mid;
+  }
+  let ts = Date.now();
+  try {
+    const b = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/cosmos/base/tendermint/v1beta1/blocks/${hi}`);
+    const t = b && b.block && b.block.header && Date.parse(b.block.header.time);
+    if (t) ts = t;
+  } catch (e) {}
+  let liste = []; try { liste = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+  if (!liste.some(u => u.hoehe === hi) && !RW_ERSTATTUNGS_UPGRADES.some(u => u.hoehe === hi)) liste.push({ name: 'v' + aktuell, hoehe: hi, ts });
+  await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-50)));
+  await pushStateSet(env, 'upgVer', JSON.stringify({ ver: aktuell, h: hoehe }));
+}
+async function runeGuthabenBei(adresse, hoehe) {
+  const j = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe}`);
+  const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
+  return b ? Number(b.amount) / 1e8 : 0;
+}
+async function syncUpgradeErstattungen(env) {
+  await sicherePushTabellen(env);
+  await sichereBondEvTabellen(env);
+  let adressen = [];
+  try { adressen = ((await env.DB.prepare('SELECT bond_address FROM tracked_addresses LIMIT 3000').all()).results || []).map(x => String(x.bond_address).toLowerCase()); } catch (e) { return; }
+  let abfragen = 0;
+  let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+  for (const up of [...RW_ERSTATTUNGS_UPGRADES, ...dyn]) {
+    for (const adr of adressen) {
+      if (abfragen >= 60) return;
+      const key = `upErst:${up.hoehe}:${adr}`;
+      if (await pushState(env, key)) continue;
+      abfragen += 2;
+      try {
+        const vor = await runeGuthabenBei(adr, up.hoehe - 1);
+        const nach = await runeGuthabenBei(adr, up.hoehe + 2);
+        const plus = nach - vor;
+        if (plus > 0.01) {
+          await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+            .bind(`upgrade|${up.hoehe}|${adr}`, adr, 'upgrade:' + up.name, 'refund', Math.round(plus * 1e8) / 1e8, up.ts, up.hoehe).run();
+        }
+        await pushStateSet(env, key, '1');
+      } catch (e) { /* Archiv gerade nicht erreichbar -> naechster Lauf */ }
+    }
+  }
+}
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
   // vorher einer der ersten Schritte einen Fehler, liefen alle folgenden in diesem Durchgang gar
@@ -6921,6 +7173,9 @@ async function runRefreshCycle(env) {
   await schritt('Timeline', () => waermeTimeline(env));
   await schritt('Leave-Zeitpunkte', () => syncLeaveZeiten(env));
   await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
+  await schritt('Slash-Nachrechnung', () => syncBondNachrechnung(env));
+  await schritt('Upgrade-Liste', () => syncUpgradeListe(env));
+  await schritt('Upgrade-Erstattungen', () => syncUpgradeErstattungen(env));
 
   const now = Date.now();
 
@@ -7067,6 +7322,7 @@ async function refreshOneAddress(env, addressRow, now) {
     await Promise.all(batch.map(async (churn) => {
       const queryHeight = churn.height - 1;
       let rewardAmount = 0;
+      let bondVor = 0; // Bond der Adresse direkt vor dem Churn (fuer Slash-/Erstattungs-Nachrechnung)
       let hasProviderData = false;
       try {
         const nodeResults = await Promise.all(
@@ -7075,6 +7331,7 @@ async function refreshOneAddress(env, addressRow, now) {
         for (const node of nodeResults) {
           if (node && node.bond_providers && Array.isArray(node.bond_providers.providers)) {
             hasProviderData = true;
+            for (const pr of node.bond_providers.providers) if (pr && pr.bond_address === address) bondVor += (Number(pr.bond) || 0) / 1e8;
           }
           rewardAmount += computeAddressAwardFromNode(node, address);
         }
@@ -7102,6 +7359,7 @@ async function refreshOneAddress(env, addressRow, now) {
         )
         .bind(address, churn.height, churn.date_ms, rewardAmount, rewardAmount, now)
         .run();
+      try { await env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(bondVor, address, churn.height).run(); } catch (e) {}
     }));
     if (i + HEIGHT_BATCH_SIZE < missing.length) await sleep(150);
   }
