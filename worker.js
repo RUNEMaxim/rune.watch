@@ -7050,9 +7050,12 @@ async function syncBondNachrechnung(env) {
     for (const na of nodesA) {
       abfragen++;
       try {
-        const n = await fetchArchivNahe(h => `/thorchain/node/${na}?height=${h}`, r.churn_height - 1, [0, -1, -5]).catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; });
+        const n = await fetchArchivNahe(h => `/thorchain/node/${na}?height=${h}`, r.churn_height - 1, RW_NAHE_VOR).catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; });
         for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === r.bond_address) summe += (Number(pr.bond) || 0) / 1e8;
-      } catch (e) { ok = false; break; }
+      } catch (e) {
+        if (/failed to load state|no commit info|pruned|version does not exist/i.test(String(e && e.message || e))) { summe = -1; break; }
+        ok = false; break;
+      }
     }
     if (ok) await env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(summe, r.bond_address, r.churn_height).run();
   }
@@ -7399,8 +7402,14 @@ async function beschleunigeAdresse(env, address) {
   await parallel(offenJetzt, 4, async r => {
     try {
       // vor dem Churn: zurueck ausweichen; nach dem Churn (Reward gutgeschrieben): vor ausweichen
-      const vor = r.bond_vor != null ? r.bond_vor : await bondSummeBei(nodesA, adr, r.churn_height - 1, [0, -1, -5]);
-      const nach = r.bond_nach != null ? r.bond_nach : await bondSummeBei(nodesA, adr, r.churn_height + 1, [0, 1, 5, 20]);
+      // ARCHIV-LUECKEN (gemeldet: "failed to load state at height 27633999; no commit info found"): Fuer
+      // manche Bereiche -- etwa rund um einen Neustart der Chain -- hat das Archiv gar keine Zustaende. Dann
+      // weit ausweichen; fehlt es trotzdem, als -1 merken (= nicht verfuegbar), damit der Churn nicht ewig
+      // offen bleibt. Die Nachrechnung nutzt fuer diesen Abschnitt dann die Schaetzung bzw. laesst ihn aus.
+      const luecke = e => /failed to load state|no commit info|pruned|version does not exist/i.test(String(e && e.message || e));
+      const holen = async (h, schritte) => { try { return await bondSummeBei(nodesA, adr, h, schritte); } catch (e) { if (luecke(e)) return -1; throw e; } };
+      const vor = r.bond_vor != null ? r.bond_vor : await holen(r.churn_height - 1, RW_NAHE_VOR);
+      const nach = r.bond_nach != null ? r.bond_nach : await holen(r.churn_height + 1, RW_NAHE_NACH);
       updates.push(env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ?, bond_nach = ? WHERE bond_address = ? AND churn_height = ?').bind(vor, nach, adr, r.churn_height));
       info.ok++;
     } catch (e) { fehler(e); }
