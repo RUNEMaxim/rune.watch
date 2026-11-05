@@ -717,14 +717,14 @@ async function handleBondHistory(request, env, ctx) {
     // SCHNELLLAUF NICHT MEHR IM ABRUF (gemeldet: "die App laedt seitdem langsamer"): Die schwere Arbeit lief
     // im selben Aufruf wie die Antwort an die App und teilte sich dessen Verbindungen. Jetzt wird nur ein
     // Wunsch vermerkt; der Minuten-Takt erledigt ihn in einem eigenen Lauf.
-    _beschl: await (async () => { try { await sicherePushTabellen(env); await pushStateSet(env, 'beschlWunsch:' + address, String(Date.now())); } catch (e) {} return undefined; })(),
+    _beschl: await (async () => { try { await sicherePushTabellen(env); if (!(Number(await pushState(env, 'bondNachgerechnet:' + address)) > 0) || (Date.now() - (Number(await pushState(env, 'beschlFertig:' + address)) || 0) > 24 * 3600e3)) await pushStateSet(env, 'beschlWunsch:' + address, String(Date.now())); } catch (e) {} return undefined; })(),
     // Stand der Pruefung (damit die App "wird geprueft" statt nichts zeigen kann)
     eventsPruefung: await (async () => {
       try {
         await sicherePushTabellen(env);
         const adr = String(address).toLowerCase();
         let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
-        const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
+        const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn.filter(u => RW_ERSTATTUNGS_VERSIONEN.has(u.name))];
         let fertigUp = 0;
         try {
           const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM push_state WHERE k LIKE ? AND k LIKE ?").bind('upErst3:%', '%:' + adr).first();
@@ -735,7 +735,8 @@ async function handleBondHistory(request, env, ctx) {
         try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
         const nachgerechnet = !!(await pushState(env, 'bondNachgerechnet:' + address));
         let letzterLauf = null; try { letzterLauf = JSON.parse((await pushState(env, 'beschlInfo:' + address)) || 'null'); } catch (e) {}
-        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, upgradeSucheFertig: !!(suche && suche.fertig), churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet, letzterLauf };
+        const hatHist = !!(await env.DB.prepare("SELECT 1 AS x FROM bond_events WHERE address = ? AND id LIKE 'hist|%' LIMIT 1").bind(adr).first().catch(() => null));
+        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, upgradeSucheFertig: true, churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet || hatHist, letzterLauf };
       } catch (e) { return null; }
     })(),
   }, env);
@@ -7153,6 +7154,9 @@ async function bondNachrechnenAdresse(env, adr) {
 //  - v3.21.0, Block 28.366.100 (23.10.2026): \"Bond slash reversal\" (!5175), 113.547 RUNE an 218 Bond Provider
 // Erkennung: RUNE-Guthaben der Wallet direkt vor und kurz nach dem Upgrade-Block (Archivabfrage). Ein Plus
 // in diesem Fenster ist die Erstattung. Weitere solche Upgrades hier ergaenzen.
+// EINFACHER (gemeldet: "gibt es keinen einfacheren Weg? die App leidet"): Nur Upgrades pruefen, die laut
+// THORNode-Changelog eine "Bond Slash Refunds"-Migration enthielten -- nicht mehr jedes Upgrade.
+const RW_ERSTATTUNGS_VERSIONEN = new Set(['v3.5.0', 'v3.7.0', 'v3.16.0', 'v3.21.0']);
 const RW_ERSTATTUNGS_UPGRADES = [
   { name: 'v3.16.0', hoehe: 25215740, ts: Date.UTC(2026, 2, 5, 18, 0) },
   { name: 'v3.21.0', hoehe: 28366100, ts: Date.UTC(2026, 9, 23, 14, 15) },
@@ -7287,7 +7291,9 @@ async function syncUpgradeVorschlaege(env) {
   await pushStateSet(env, 'upgVorschlaegeInfo', JSON.stringify({ t: Date.now(), gesamt: vorschlaege.length, neu }));
 }
 async function syncUpgradeHistorie(env) {
+  // Die Erstattungs-Upgrades sind bekannt; die Suche bleibt nur, damit v3.5.0/v3.7.0 ihre Hoehen bekommen.
   await sicherePushTabellen(env);
+  try { const l = JSON.parse((await pushState(env, 'upgListe')) || '[]'); if (['v3.5.0', 'v3.7.0'].every(n => l.some(u => u.name === n))) { await pushStateSet(env, 'upgSuche', JSON.stringify({ stapel: [], fertig: true })); return; } } catch (e) {}
   let st = null; try { st = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
   if (st && st.fertig) return;
   if (!st) {
@@ -7351,10 +7357,11 @@ async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
   const a = String(adr).toLowerCase();
   let vor = null, nach = null;
   try { [vor, nach] = await Promise.all([runeGuthabenNah(adr, up.hoehe - 1, -1), runeGuthabenNah(adr, up.hoehe + 2, 1)]); }
-  catch (e) {
-    // Gedrosselt (429) -> spaeter nochmal; echte Archiv-Luecke -> nicht pruefbar, nicht endlos wiederholen
-    if (/429/.test(String(e && e.message || e))) throw e;
-    vor = nach = null;
+  catch (e0) {
+    if (/429/.test(String(e0 && e0.message || e0))) throw e0;   // gedrosselt -> spaeter nochmal
+    // Bekanntes Erstattungs-Upgrade: weiter ausweichen ist hier vertretbar (Archiv-Luecken wie bei v3.16.0)
+    try { [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1, -1), runeGuthabenBei(adr, up.hoehe + 2, 1)]); }
+    catch (e1) { if (/429/.test(String(e1 && e1.message || e1))) throw e1; vor = nach = null; }   // nicht pruefbar -> kein Eintrag, nicht endlos
   }
   if (vor != null && nach != null && nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(`upgrade|${up.hoehe}|${a}`, a, 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
@@ -7372,6 +7379,10 @@ async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
   }
 }
 async function upgradeEintraegeReparieren(env) {
+  if (!(await pushState(env, 'upgReparatur4'))) {
+    try { await env.DB.prepare("DELETE FROM push_state WHERE k LIKE 'upErst3:25215740:%'").run(); } catch (e) {}
+    await pushStateSet(env, 'upgReparatur4', '1');
+  }
   if (await pushState(env, 'upgReparatur3')) return;
   // alte Wallet-Erstattungen verwerfen (werden mit der genaueren Pruefung neu gesucht) und Daten der
   // Upgrade-Liste korrigieren, die faelschlich "jetzt" trugen
@@ -7389,7 +7400,7 @@ async function syncUpgradeErstattungen(env) {
   try { adressen = ((await env.DB.prepare('SELECT bond_address FROM tracked_addresses LIMIT 3000').all()).results || []).map(x => String(x.bond_address).toLowerCase()); } catch (e) { return; }
   let abfragen = 0;
   let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
-  for (const up of [...RW_ERSTATTUNGS_UPGRADES, ...dyn]) {
+  for (const up of [...RW_ERSTATTUNGS_UPGRADES, ...dyn.filter(u => RW_ERSTATTUNGS_VERSIONEN.has(u.name))]) {
     for (const adr of adressen) {
       if (abfragen >= 60) return;
       const key = `upErst3:${up.hoehe}:${adr}`;
@@ -7426,7 +7437,7 @@ async function beschleunigeAdresse(env, address) {
   try { await upgradeEintraegeReparieren(env); } catch (e) {}
   try { await syncUpgradeVorschlaege(env); } catch (e) {}
   let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
-  const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
+  const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn.filter(u => RW_ERSTATTUNGS_VERSIONEN.has(u.name))];
   const tUp = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
   let nodesUp = []; try { nodesUp = JSON.parse((tUp && tUp.node_addresses) || '[]'); } catch (e) {}
   // Nur offene Upgrades, hoechstens 8 je Aufruf -- damit der Hintergrundlauf die App nicht ausbremst
@@ -7465,7 +7476,14 @@ async function beschleunigeAdresse(env, address) {
   try { await pushStateSet(env, 'beschlInfo:' + adr, JSON.stringify({ ...info, nodes: nodesA.length, offen: offen.length, versucht: offenJetzt.length })); } catch (e) {}
   for (let i = 0; i < updates.length; i += 80) { try { await env.DB.batch(updates.slice(i, i + 80)); } catch (e) {} }
   const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(adr).first().catch(() => null);
-  if (rest && rest.n === 0) { try { await bondNachrechnenAdresse(env, adr); } catch (e) {} }
+  // Nachrechnen nur, wenn noch nicht (oder vor > 6 h) geschehen -- sonst lief sie jede Minute neu
+  const zuletztN = Number(await pushState(env, 'bondNachgerechnet:' + adr)) || 0;
+  if (rest && rest.n === 0 && Date.now() - zuletztN > 6 * 3600e3) { try { await bondNachrechnenAdresse(env, adr); } catch (e) {} }
+  // Alles erledigt -> Wunsch loeschen, damit der Minuten-Takt diese Wallet nicht weiter anfasst
+  try {
+    const nochUps = (await Promise.all(ups.map(u => pushState(env, `upErst3:${u.hoehe}:${adr.toLowerCase()}`)))).some(x => !x);
+    if (!nochUps && rest && rest.n === 0 && (Number(await pushState(env, 'bondNachgerechnet:' + adr)) || 0) > 0) { await env.DB.prepare('DELETE FROM push_state WHERE k = ?').bind('beschlWunsch:' + adr).run(); await pushStateSet(env, 'beschlFertig:' + adr, String(Date.now())); }
+  } catch (e) {}
 }
 async function bondWuenscheAbarbeiten(env) {
   await sicherePushTabellen(env);
