@@ -7192,6 +7192,11 @@ async function fetchArchiv(path) {
   }
   throw letzter || new Error('ARCHIV_NICHT_ERREICHBAR');
 }
+// Direkt nach einem Upgrade-Block fehlt im Archiv oft der Zustand einiger Bloecke (gemeldet: "failed to load
+// state at height 25215745; no commit info found"). Deshalb weiter ausweichen: vor dem Upgrade zurueck, danach
+// vor -- bis ~1000 Bloecke (rund 1,5 Stunden). Fuer den Bond aendert das nichts (kein Churn so kurz danach).
+const RW_NAHE_VOR = [0, -1, -3, -10, -50, -200];
+const RW_NAHE_NACH = [0, 1, 3, 10, 50, 200, 1000];
 async function fetchArchivNahe(pfadFn, hoehe, schritte) {
   let letzter = null;
   for (const d of schritte) {
@@ -7252,7 +7257,7 @@ async function syncUpgradeHistorie(env) {
 }
 async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
   // vor dem Upgrade weiter zurueck ausweichen, danach weiter vor -- nie ueber den Upgrade-Block hinweg
-  const j = await fetchArchivNahe(h => `/cosmos/bank/v1beta1/balances/${adresse}?height=${h}`, hoehe, richtung < 0 ? [0, -1, -3] : [0, 1, 3]);
+  const j = await fetchArchivNahe(h => `/cosmos/bank/v1beta1/balances/${adresse}?height=${h}`, hoehe, richtung < 0 ? RW_NAHE_VOR : RW_NAHE_NACH);
   const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
   return b ? Number(b.amount) / 1e8 : 0;
 }
@@ -7267,7 +7272,7 @@ async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
   if (Array.isArray(nodesA) && nodesA.length) {
     const bondBei = async (h, richtung) => {
       let summe = 0;
-      const ns = await Promise.all(nodesA.map(na => fetchArchivNahe(x => `/thorchain/node/${na}?height=${x}`, h, richtung < 0 ? [0, -1, -3] : [0, 1, 3])
+      const ns = await Promise.all(nodesA.map(na => fetchArchivNahe(x => `/thorchain/node/${na}?height=${x}`, h, richtung < 0 ? RW_NAHE_VOR : RW_NAHE_NACH)
         .catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
       for (const n of ns) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
       return summe;
