@@ -2104,6 +2104,7 @@ async function handleStats(request, env) {
     runebondClicksTotal: klickGesamtRow?.n ?? null,
     runebondClickDevices: klickGeraeteRow?.n ?? null,
     runebondClicksBySource30d: klickQuellenRows && Array.isArray(klickQuellenRows.results) ? klickQuellenRows.results : null,
+    runebondRef: await runebondEmpfehlungen(env).catch(() => null),
   };
   // Anteil in Prozent, eine Nachkommastelle. Nenner = alle Geraete im selben Zeitraum.
   const walletPct = (n, total) => (n == null || !total) ? null : Math.round((n / total) * 1000) / 10;
@@ -2374,6 +2375,8 @@ async function handleStats(request, env) {
           stats.visitorsWithWalletLast1d == null ? 'no data yet' : `${stats.visitorsWithWalletLast1d} of ${stats.visitorsLast1d} devices have a wallet entered`)}
         ${tile('rb1', 'RUNEBond clicks – 24h', stats.runebondClicksLast1d,
           stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
+        ${tile('rbref', 'Bonders via rune.watch', stats.runebondRef ? stats.runebondRef.gebondet : null,
+          stats.runebondRef ? `${stats.runebondRef.runeGebondet.toLocaleString('en-US')} RUNE bonded \u00b7 ${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} \u00b7 ${stats.runebondRef.wallets} wallet${stats.runebondRef.wallets === 1 ? '' : 's'}` : 'RUNEBond data not available')}
         ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
           stats.runebondClicksLast30d == null ? 'no data yet' : `${stats.runebondClicksLast30d} clicks in 30 days`)}
         ${(() => {
@@ -2470,6 +2473,7 @@ async function handleStats(request, env) {
     setText('v-rb1', latestStats.runebondClicksLast1d == null ? '—' : latestStats.runebondClicksLast1d);
     setText('h-rb1', latestStats.runebondClicksTotal == null ? 'no data yet' : latestStats.runebondClicksTotal + ' in total');
     setText('v-rbdev', latestStats.runebondClickDevices == null ? '—' : latestStats.runebondClickDevices);
+    if (latestStats.runebondRef) { setText('v-rbref', latestStats.runebondRef.gebondet); setText('h-rbref', latestStats.runebondRef.runeGebondet.toLocaleString('en-US') + ' RUNE bonded \u00b7 ' + latestStats.runebondRef.anfragen + ' whitelist requests \u00b7 ' + latestStats.runebondRef.wallets + ' wallets'); }
     setText('h-rbdev', latestStats.runebondClicksLast30d == null ? 'no data yet' : latestStats.runebondClicksLast30d + ' clicks in 30 days');
     setText('v-wshare1', latestStats.walletShareLast1d == null ? '—' : latestStats.walletShareLast1d + '%');
     setText('v-wshare30', latestStats.walletShareLast30d == null ? '—' : latestStats.walletShareLast30d + '%');
@@ -6848,6 +6852,51 @@ async function podcastFolgen(env, frisch) {
   const erg = { t: Date.now(), show: text(kanal, 'title') || 'THORChain Livestream Podcast', bild: showBild, folgen: folgen.map(f => ({ ...f, beschreibung: f.beschreibung.slice(0, 600) })) };
   try { await pushStateSet(env, 'podcastCache', JSON.stringify(erg)); } catch (e) {}
   return erg;
+}
+// RUNEBOND-EMPFEHLUNGEN (Hippo, RUNEBond: \"the affiliate address is now linked to the whitelist, so we can
+// track which bonds come from Runewatch\"). Whitelist-Anfragen laufen on-chain an die RUNEBond-Adresse mit
+//   TB:WHT:<node>:<wallet>:<RUNE-Menge>[:<affiliate>]
+// Kommt die Anfrage ueber einen rune.watch-Link, steht unsere Affiliate-Adresse am Ende. Wir zaehlen diese
+// Anfragen und pruefen in /thorchain/nodes, ob die Wallet bei der Node wirklich Bond haelt (= gebondet).
+// Affiliate: THOR-Adresse des THORNames \"runewatch\" (oder Variable RUNEBOND_AFFILIATE, Komma-Liste).
+let runebondRefCache = { at: 0, data: null };
+async function runebondEmpfehlungen(env) {
+  if (runebondRefCache.data && Date.now() - runebondRefCache.at < 10 * 60 * 1000) return runebondRefCache.data;
+  const unsere = new Set(String(env.RUNEBOND_AFFILIATE || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean));
+  unsere.add('runewatch');
+  try {
+    const tn = await fetchFromBases(getThornodeBases(), '/thorchain/thorname/runewatch');
+    const a = tn && Array.isArray(tn.aliases) ? tn.aliases.find(x => String(x.chain).toUpperCase() === 'THOR') : null;
+    if (a && a.address) unsere.add(String(a.address).toLowerCase());
+    if (tn && tn.owner) unsere.add(String(tn.owner).toLowerCase());
+  } catch (e) {}
+  if (!runebondMemos.liste.length) { try { await runebondVonDerChain(); } catch (e) {} }
+  const nodes = await fetchNodes().catch(() => []);
+  const nachAddr = new Map((Array.isArray(nodes) ? nodes : []).map(n => [String(n.node_address).toLowerCase(), n]));
+  const anfragen = [];
+  for (const a of runebondMemos.liste) {
+    const memo = String((a.metadata && a.metadata.send && a.metadata.send.memo) || a.memo || '').trim();
+    if (!/^TB:WHT:/i.test(memo)) continue;
+    const t = memo.split(':');
+    if (t.length < 6) continue;
+    const aff = t.slice(5).join(':').trim().toLowerCase();
+    if (!unsere.has(aff)) continue;
+    anfragen.push({ node: t[2].toLowerCase(), wallet: t[3].toLowerCase(), menge: Number(t[4]) >= 1e6 ? Number(t[4]) / 1e8 : Number(t[4]), zeit: a.date ? Math.round(Number(a.date) / 1e6) : null });
+  }
+  const paare = new Map();
+  for (const x of anfragen) paare.set(x.node + '|' + x.wallet, x);
+  let gebondet = 0, rune = 0;
+  const wallets = new Set();
+  for (const x of paare.values()) {
+    wallets.add(x.wallet);
+    const n = nachAddr.get(x.node);
+    const p = ((n && n.bond_providers && n.bond_providers.providers) || []).find(q => String(q.bond_address).toLowerCase() === x.wallet);
+    const b = p ? Number(p.bond) / 1e8 : 0;
+    if (b > 0) { gebondet++; rune += b; }
+  }
+  const data = { anfragen: anfragen.length, wallets: wallets.size, gebondet, runeGebondet: Math.round(rune), letzte: anfragen.reduce((m, x) => Math.max(m, x.zeit || 0), 0) || null, memosGelesen: runebondMemos.liste.length };
+  runebondRefCache = { at: Date.now(), data };
+  return data;
 }
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
