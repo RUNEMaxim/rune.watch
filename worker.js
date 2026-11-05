@@ -726,7 +726,7 @@ async function handleBondHistory(request, env, ctx) {
         for (const u of ups) if (await pushState(env, `upErst2:${u.hoehe}:${adr}`)) fertigUp++;
         let suche = null; try { suche = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
         let offenRows = null;
-        try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
+        try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
         const nachgerechnet = !!(await pushState(env, 'bondNachgerechnet:' + address));
         let letzterLauf = null; try { letzterLauf = JSON.parse((await pushState(env, 'beschlInfo:' + address)) || 'null'); } catch (e) {}
         return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, upgradeSucheFertig: !!(suche && suche.fertig), churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet, letzterLauf };
@@ -7019,11 +7019,25 @@ async function syncBondEreignisse(env) {
 // Die eigenen Bewegungen kommen aus Midgard (bond/unbond, mit Blockhoehe). Was uebrig bleibt, ist ein
 // Slash (negativ) oder eine Erstattung (positiv). Vorsichtig: Epochen mit LEAVE, mit Bond nahe 0 oder
 // mit sehr grossen Sprungen werden ausgelassen; nur Reste ueber 0,5 RUNE zaehlen.
+// GENAUER (gemeldet: \"ich glaube, ich wurde oefter geslashed\"): Bisher wurde der Reward je Churn aus dem
+// Award EINEN Block vor dem Churn geschaetzt -- deshalb brauchte es eine Toleranz (0,5 RUNE oder 2 % des
+// Rewards), und kleinere Slashes fielen darunter durch (z. B. der ZEC-Slash im Oktober: ~140 RUNE auf 18
+// Nodes verteilt). Jetzt wird zusaetzlich der Bond direkt NACH jedem Churn gelesen (bond_nach). Damit ist
+// der Abschnitt zwischen zwei Churns exakt: Bond nach Churn k -> Bond vor Churn k+1, ohne Schaetzung.
+// Toleranz nur noch 0,01 RUNE (Rundung).
+async function bondSummeBei(nodesA, adr, h, schritte) {
+  let summe = 0;
+  const ns = await Promise.all(nodesA.map(na => fetchArchivNahe(x => `/thorchain/node/${na}?height=${x}`, h, schritte)
+    .catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
+  for (const n of ns) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
+  return summe;
+}
 const BONDVOR_ABFRAGEN_PRO_LAUF = 60;
 async function syncBondNachrechnung(env) {
   await sicherePushTabellen(env);
   await sichereBondEvTabellen(env);
   try { await env.DB.prepare('ALTER TABLE bond_history_rows ADD COLUMN bond_vor REAL').run(); } catch (e) { /* gibt es schon */ }
+  try { await env.DB.prepare('ALTER TABLE bond_history_rows ADD COLUMN bond_nach REAL').run(); } catch (e) { /* gibt es schon */ }
   // a) fehlende bond_vor nachholen
   const offen = await env.DB.prepare(`SELECT r.bond_address, r.churn_height, t.node_addresses FROM bond_history_rows r JOIN tracked_addresses t ON t.bond_address = r.bond_address
     WHERE r.bond_vor IS NULL AND r.reward_amount IS NOT NULL ORDER BY r.churn_height DESC LIMIT ?`).bind(Math.ceil(BONDVOR_ABFRAGEN_PRO_LAUF / 2)).all().catch(() => ({ results: [] }));
@@ -7057,7 +7071,7 @@ async function syncBondNachrechnung(env) {
 }
 async function bondNachrechnenAdresse(env, adr) {
     const merkKey = 'bondNachgerechnet:' + adr;
-    const rows = ((await env.DB.prepare('SELECT churn_height, churn_timestamp, reward_amount, bond_vor FROM bond_history_rows WHERE bond_address = ? AND reward_amount IS NOT NULL ORDER BY churn_height ASC').bind(adr).all()).results) || [];
+    const rows = ((await env.DB.prepare('SELECT churn_height, churn_timestamp, reward_amount, bond_vor, bond_nach FROM bond_history_rows WHERE bond_address = ? AND reward_amount IS NOT NULL ORDER BY churn_height ASC').bind(adr).all()).results) || [];
     if (rows.length < 2) { await pushStateSet(env, merkKey, String(Date.now())); return true; }
     let bonds = [], unbonds = [], leaves = [], ohneMidgard = false;
     // MIDGARD BREMST (HTTP 429, gemeldet: Nachrechnung blieb auf "nicht fertig" stehen): die drei Abrufe
@@ -7086,7 +7100,11 @@ async function bondNachrechnenAdresse(env, adr) {
     }
     // Schon live erkannte Ereignisse nicht doppelt zaehlen
     const live = ((await env.DB.prepare("SELECT ts FROM bond_events WHERE address = ? AND id NOT LIKE 'hist|%'").bind(adr).all()).results || []).map(x => Number(x.ts));
-    const schreiben = [];
+    // ERSTATTUNGEN KOMMEN NUR MIT UPGRADES (Hinweis des Nutzers): Ging eine Erstattung in den BOND, steckt
+    // sie im Abschnitt zwischen zwei Churns und wuerde einen Slash im selben Abschnitt verdecken. Die
+    // Upgrade-Erstattungen sind getrennt erkannt (mit Blockhoehe) -- hier wieder herausrechnen.
+    const bondErst = ((await env.DB.prepare("SELECT amount, height FROM bond_events WHERE address = ? AND node LIKE 'upgrade-bond:%'").bind(String(adr).toLowerCase()).all().catch(() => ({ results: [] }))).results) || [];
+    const schreiben = [env.DB.prepare("DELETE FROM bond_events WHERE address = ? AND id LIKE 'hist|%'").bind(adr)];
     for (let i = 0; i + 1 < rows.length; i++) {
       const a = rows[i], b2 = rows[i + 1];
       if (live.some(t => t > Number(a.churn_timestamp) && t <= Number(b2.churn_timestamp) + 60e3)) continue;
@@ -7100,10 +7118,13 @@ async function bondNachrechnenAdresse(env, adr) {
       if (ohneMidgard && !aktivImAbschnitt) continue;
       const plus = bonds.filter(imFenster).reduce((q, x) => q + (x.amount || 0), 0);
       const minus = unbonds.filter(imFenster).reduce((q, x) => q + (x.amount || 0), 0);
-      const rest = b2.bond_vor - a.bond_vor - (Number(a.reward_amount) || 0) - plus + minus;
+      // exakt, wenn der Bond nach dem Churn bekannt ist; sonst wie bisher mit geschaetztem Reward
+      const exakt = a.bond_nach != null && a.bond_nach > 0;
+      const erstImFenster = bondErst.filter(x => x.height && x.height > h0 && x.height < h1).reduce((q, x) => q + (Number(x.amount) || 0), 0);
+      const rest = (exakt ? (b2.bond_vor - a.bond_nach - plus + minus) : (b2.bond_vor - a.bond_vor - (Number(a.reward_amount) || 0) - plus + minus)) - erstImFenster;
       // Toleranz: der Reward ist aus dem Award einen Block vor dem Churn berechnet und kann leicht vom
       // tatsaechlich gutgeschriebenen Betrag abweichen -> mindestens 0,5 RUNE oder 2 % des Rewards
-      if (Math.abs(rest) < Math.max(0.5, (Number(a.reward_amount) || 0) * 0.02)) continue;
+      if (Math.abs(rest) < (exakt ? 0.01 : Math.max(0.5, (Number(a.reward_amount) || 0) * 0.02))) continue;
       if (Math.abs(rest) > Math.max(5000, a.bond_vor * 0.5)) continue; // zu grosser Sprung -> unklar, auslassen
       if (rest > 0) continue; // Zuwachs = eigenes Nachbonden o. Ae.; Erstattungen kommen per Upgrade auf die Wallet
       const art = 'slash';
@@ -7312,6 +7333,7 @@ async function beschleunigeAdresse(env, address) {
   await sicherePushTabellen(env);
   await sichereBondEvTabellen(env);
   try { await env.DB.prepare('ALTER TABLE bond_history_rows ADD COLUMN bond_vor REAL').run(); } catch (e) {}
+  try { await env.DB.prepare('ALTER TABLE bond_history_rows ADD COLUMN bond_nach REAL').run(); } catch (e) {}
   const adr = String(address);
   const sperre = 'beschl:' + adr;
   const zuletzt = Number(await pushState(env, sperre)) || 0;
@@ -7337,26 +7359,23 @@ async function beschleunigeAdresse(env, address) {
   });
   const t = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
   let nodesA = []; try { nodesA = JSON.parse((t && t.node_addresses) || '[]'); } catch (e) {}
-  const offen = ((await env.DB.prepare('SELECT churn_height FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL ORDER BY churn_height DESC LIMIT 400').bind(adr).all().catch(() => ({ results: [] }))).results) || [];
+  const offen = ((await env.DB.prepare('SELECT churn_height, bond_vor, bond_nach FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL ORDER BY churn_height DESC LIMIT 400').bind(adr).all().catch(() => ({ results: [] }))).results) || [];
   const updates = [];
   // Budget je Aufruf (Cloudflare zaehlt Unteranfragen): hoechstens ~150 Archiv-Abfragen, in 4er-Gruppen
-  const proChurn = Math.max(1, nodesA.length);
+  const proChurn = Math.max(1, nodesA.length) * 2;
   const offenJetzt = offen.slice(0, Math.max(1, Math.floor(150 / proChurn)));
   await parallel(offenJetzt, 4, async r => {
-    let summe = 0;
     try {
-      // Gab es eine Node zu dieser Hoehe noch nicht (HTTP 4xx ausser 429), zaehlt sie mit 0 -- sonst bliebe
-      // der Churn fuer immer offen und die Nachrechnung liefe nie.
-      const nodes = await Promise.all(nodesA.map(na => fetchArchivNahe(h => `/thorchain/node/${na}?height=${h}`, r.churn_height - 1, [0, -1, -5])
-        .catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
-      for (const n of nodes) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
-      updates.push(env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ? WHERE bond_address = ? AND churn_height = ?').bind(summe, adr, r.churn_height));
+      // vor dem Churn: zurueck ausweichen; nach dem Churn (Reward gutgeschrieben): vor ausweichen
+      const vor = r.bond_vor != null ? r.bond_vor : await bondSummeBei(nodesA, adr, r.churn_height - 1, [0, -1, -5]);
+      const nach = r.bond_nach != null ? r.bond_nach : await bondSummeBei(nodesA, adr, r.churn_height + 1, [0, 1, 5, 20]);
+      updates.push(env.DB.prepare('UPDATE bond_history_rows SET bond_vor = ?, bond_nach = ? WHERE bond_address = ? AND churn_height = ?').bind(vor, nach, adr, r.churn_height));
       info.ok++;
     } catch (e) { fehler(e); }
   });
   try { await pushStateSet(env, 'beschlInfo:' + adr, JSON.stringify({ ...info, nodes: nodesA.length, offen: offen.length, versucht: offenJetzt.length })); } catch (e) {}
   for (let i = 0; i < updates.length; i += 80) { try { await env.DB.batch(updates.slice(i, i + 80)); } catch (e) {} }
-  const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(adr).first().catch(() => null);
+  const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(adr).first().catch(() => null);
   if (rest && rest.n === 0) { try { await bondNachrechnenAdresse(env, adr); } catch (e) {} }
 }
 async function runRefreshCycle(env) {
@@ -7382,10 +7401,11 @@ async function runRefreshCycle(env) {
   await schritt('Timeline', () => waermeTimeline(env));
   await schritt('Leave-Zeitpunkte', () => syncLeaveZeiten(env));
   await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
-  await schritt('Slash-Nachrechnung', () => syncBondNachrechnung(env));
+  // Erst die Upgrades (Erstattungen), dann die Slash-Nachrechnung -- sie rechnet Bond-Erstattungen heraus
   await schritt('Upgrade-Liste', () => syncUpgradeListe(env));
   await schritt('Upgrade-Historie', () => syncUpgradeHistorie(env));
   await schritt('Upgrade-Erstattungen', () => syncUpgradeErstattungen(env));
+  await schritt('Slash-Nachrechnung', () => syncBondNachrechnung(env));
 
   const now = Date.now();
 
