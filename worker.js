@@ -714,7 +714,10 @@ async function handleBondHistory(request, env, ctx) {
       } catch (e) { return []; }
     })(),
     // Laeuft die Pruefung noch, fuer diese Adresse sofort im Hintergrund beschleunigen
-    _beschl: (ctx && ctx.waitUntil ? (ctx.waitUntil(beschleunigeAdresse(env, address).catch(e => console.warn('[beschl]', e?.message || e))), undefined) : undefined),
+    // SCHNELLLAUF NICHT MEHR IM ABRUF (gemeldet: "die App laedt seitdem langsamer"): Die schwere Arbeit lief
+    // im selben Aufruf wie die Antwort an die App und teilte sich dessen Verbindungen. Jetzt wird nur ein
+    // Wunsch vermerkt; der Minuten-Takt erledigt ihn in einem eigenen Lauf.
+    _beschl: await (async () => { try { await sicherePushTabellen(env); await pushStateSet(env, 'beschlWunsch:' + address, String(Date.now())); } catch (e) {} return undefined; })(),
     // Stand der Pruefung (damit die App "wird geprueft" statt nichts zeigen kann)
     eventsPruefung: await (async () => {
       try {
@@ -4847,6 +4850,7 @@ export default {
     // grossen Durchgang. Mit einem zweiten Cron "* * * * *" in wrangler.toml laeuft er jede Minute
     // allein (schnell, kein Dune/Swap-Paare davor); der grosse Durchgang bleibt wie er ist.
     if (event && event.cron === '* * * * *') {
+      ctx.waitUntil(bondWuenscheAbarbeiten(env).catch(e => console.warn('[beschl-cron]', e?.message || e)));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -7462,6 +7466,15 @@ async function beschleunigeAdresse(env, address) {
   for (let i = 0; i < updates.length; i += 80) { try { await env.DB.batch(updates.slice(i, i + 80)); } catch (e) {} }
   const rest = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(adr).first().catch(() => null);
   if (rest && rest.n === 0) { try { await bondNachrechnenAdresse(env, adr); } catch (e) {} }
+}
+async function bondWuenscheAbarbeiten(env) {
+  await sicherePushTabellen(env);
+  const r = await env.DB.prepare("SELECT k, v FROM push_state WHERE k LIKE 'beschlWunsch:%'").all().catch(() => ({ results: [] }));
+  const offen = (r.results || []).map(x => ({ adr: String(x.k).slice('beschlWunsch:'.length), t: Number(x.v) || 0 }))
+    .filter(x => Date.now() - x.t < 6 * 3600e3).sort((a, b) => b.t - a.t).slice(0, 2);
+  for (const x of offen) { try { await beschleunigeAdresse(env, x.adr); } catch (e) { console.warn('[beschl]', e?.message || e); } }
+  // alte Wuensche aufraeumen
+  try { await env.DB.prepare("DELETE FROM push_state WHERE k LIKE 'beschlWunsch:%' AND CAST(v AS INTEGER) < ?").bind(Date.now() - 6 * 3600e3).run(); } catch (e) {}
 }
 async function runRefreshCycle(env) {
   // Jeder Schritt einzeln abgesichert (gemeldet: "bei NEAR steht immer noch DefiLlama"): Warf
