@@ -713,6 +713,21 @@ async function handleBondHistory(request, env, ctx) {
         return (r.results || []).map(x => ({ node: x.node, art: x.art, amount: x.amount, dateMs: x.ts }));
       } catch (e) { return []; }
     })(),
+    // Stand der Pruefung (damit die App "wird geprueft" statt nichts zeigen kann)
+    eventsPruefung: await (async () => {
+      try {
+        await sicherePushTabellen(env);
+        const adr = String(address).toLowerCase();
+        let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+        const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
+        let fertigUp = 0;
+        for (const u of ups) if (await pushState(env, `upErst:${u.hoehe}:${adr}`)) fertigUp++;
+        let offenRows = null;
+        try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
+        const nachgerechnet = !!(await pushState(env, 'bondNachgerechnet:' + address));
+        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet };
+      } catch (e) { return null; }
+    })(),
   }, env);
 }
 
