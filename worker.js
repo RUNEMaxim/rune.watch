@@ -723,12 +723,13 @@ async function handleBondHistory(request, env, ctx) {
         let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
         const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
         let fertigUp = 0;
-        for (const u of ups) if (await pushState(env, `upErst:${u.hoehe}:${adr}`)) fertigUp++;
+        for (const u of ups) if (await pushState(env, `upErst2:${u.hoehe}:${adr}`)) fertigUp++;
+        let suche = null; try { suche = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
         let offenRows = null;
         try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND bond_vor IS NULL AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
         const nachgerechnet = !!(await pushState(env, 'bondNachgerechnet:' + address));
         let letzterLauf = null; try { letzterLauf = JSON.parse((await pushState(env, 'beschlInfo:' + address)) || 'null'); } catch (e) {}
-        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet, letzterLauf };
+        return { upgradesGeprueft: fertigUp, upgradesGesamt: ups.length, upgradeSucheFertig: !!(suche && suche.fertig), churnsOhneBond: offenRows, slashNachrechnungFertig: nachgerechnet, letzterLauf };
       } catch (e) { return null; }
     })(),
   }, env);
@@ -7255,6 +7256,27 @@ async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
   const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
   return b ? Number(b.amount) / 1e8 : 0;
 }
+// JE ADRESSE UND UPGRADE: Guthaben UND Bond vor/nach dem Upgrade-Block. Aeltere Erstattungs-Migrationen
+// (z. B. v3.5.0 / v3.7.0) koennen den Bond wiederhergestellt haben statt auf die Wallet zu zahlen -- ein
+// Bond-Plus GENAU im Upgrade-Block (kein Churn, keine Transaktion) ist dann die Erstattung.
+async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
+  const a = String(adr).toLowerCase();
+  const [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1, -1), runeGuthabenBei(adr, up.hoehe + 2, 1)]);
+  if (nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .bind(`upgrade|${up.hoehe}|${a}`, a, 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
+  if (Array.isArray(nodesA) && nodesA.length) {
+    const bondBei = async (h, richtung) => {
+      let summe = 0;
+      const ns = await Promise.all(nodesA.map(na => fetchArchivNahe(x => `/thorchain/node/${na}?height=${x}`, h, richtung < 0 ? [0, -1, -3] : [0, 1, 3])
+        .catch(e => { if ((e && e.fehltZurHoehe) || /HTTP_4(?!29)\d\d/.test(String(e && e.message))) return null; throw e; })));
+      for (const n of ns) for (const pr of ((n && n.bond_providers && n.bond_providers.providers) || [])) if (pr.bond_address === adr) summe += (Number(pr.bond) || 0) / 1e8;
+      return summe;
+    };
+    const [b0, b1] = await Promise.all([bondBei(up.hoehe - 1, -1), bondBei(up.hoehe + 2, 1)]);
+    if (b1 - b0 > 0.01 && b0 > 0) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(`upgrade-bond|${up.hoehe}|${a}`, a, 'upgrade-bond:' + up.name, 'refund', Math.round((b1 - b0) * 1e8) / 1e8, up.ts, up.hoehe).run();
+  }
+}
 async function syncUpgradeErstattungen(env) {
   await sicherePushTabellen(env);
   await sichereBondEvTabellen(env);
@@ -7265,17 +7287,13 @@ async function syncUpgradeErstattungen(env) {
   for (const up of [...RW_ERSTATTUNGS_UPGRADES, ...dyn]) {
     for (const adr of adressen) {
       if (abfragen >= 60) return;
-      const key = `upErst:${up.hoehe}:${adr}`;
+      const key = `upErst2:${up.hoehe}:${adr}`;
       if (await pushState(env, key)) continue;
-      abfragen += 2;
+      abfragen += 6;
       try {
-        const vor = await runeGuthabenBei(adr, up.hoehe - 1, -1);
-        const nach = await runeGuthabenBei(adr, up.hoehe + 2, 1);
-        const plus = nach - vor;
-        if (plus > 0.01) {
-          await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
-            .bind(`upgrade|${up.hoehe}|${adr}`, adr, 'upgrade:' + up.name, 'refund', Math.round(plus * 1e8) / 1e8, up.ts, up.hoehe).run();
-        }
+        const t = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE LOWER(bond_address) = ?').bind(adr).first().catch(() => null);
+        let nodesA = []; try { nodesA = JSON.parse((t && t.node_addresses) || '[]'); } catch (e) {}
+        await pruefeUpgradeFuerAdresse(env, adr, up, nodesA);
         await pushStateSet(env, key, '1');
       } catch (e) { /* Archiv gerade nicht erreichbar -> naechster Lauf */ }
     }
@@ -7301,13 +7319,13 @@ async function beschleunigeAdresse(env, address) {
   const fehler = e => { info.fehler++; if (!info.text) info.text = String(e && e.message || e).slice(0, 140); };
   let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
   const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
+  const tUp = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
+  let nodesUp = []; try { nodesUp = JSON.parse((tUp && tUp.node_addresses) || '[]'); } catch (e) {}
   await parallel(ups, 4, async up => {
-    const key = `upErst:${up.hoehe}:${adr.toLowerCase()}`;
+    const key = `upErst2:${up.hoehe}:${adr.toLowerCase()}`;
     if (await pushState(env, key)) return;
     try {
-      const [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1, -1), runeGuthabenBei(adr, up.hoehe + 2, 1)]);
-      if (nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .bind(`upgrade|${up.hoehe}|${adr.toLowerCase()}`, adr.toLowerCase(), 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
+      await pruefeUpgradeFuerAdresse(env, adr, up, nodesUp);
       await pushStateSet(env, key, '1');
       info.ok++;
     } catch (e) { fehler(e); }
