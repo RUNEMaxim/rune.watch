@@ -723,7 +723,10 @@ async function handleBondHistory(request, env, ctx) {
         let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
         const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
         let fertigUp = 0;
-        for (const u of ups) if (await pushState(env, `upErst3:${u.hoehe}:${adr}`)) fertigUp++;
+        try {
+          const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM push_state WHERE k LIKE ? AND k LIKE ?").bind('upErst3:%', '%:' + adr).first();
+          fertigUp = Math.min(ups.length, r ? Number(r.n) || 0 : 0);
+        } catch (e) {}
         let suche = null; try { suche = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
         let offenRows = null;
         try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
@@ -7322,12 +7325,12 @@ async function syncUpgradeHistorie(env) {
 async function runeGuthabenNah(adresse, hoehe, richtung) {
   const schritte = richtung < 0 ? [0, -1, -3, -10] : [0, 1, 3, 10];
   let letzter = null;
+  const pfad = d => `/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe + d}`;
+  const wert = j => { const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune'); return b ? Number(b.amount) / 1e8 : 0; };
   for (const d of schritte) {
-    try {
-      const j = await fetchArchiv(`/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe + d}`);
-      const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
-      return b ? Number(b.amount) / 1e8 : 0;
-    } catch (e) { letzter = e; }
+    try { return wert(await fetchArchiv(pfad(d))); } catch (e) { letzter = e; }
+    // Rueckfall: andere THORNode-Quellen (halten teils Staende, die Liquify fehlen)
+    try { return wert(await fetchFromBases(getThornodeBases({ needsHeight: true }), pfad(d))); } catch (e) {}
   }
   throw letzter || new Error('ARCHIV_LUECKE');
 }
@@ -7343,7 +7346,12 @@ async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
 async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
   const a = String(adr).toLowerCase();
   let vor = null, nach = null;
-  try { [vor, nach] = await Promise.all([runeGuthabenNah(adr, up.hoehe - 1, -1), runeGuthabenNah(adr, up.hoehe + 2, 1)]); } catch (e) { vor = nach = null; }
+  try { [vor, nach] = await Promise.all([runeGuthabenNah(adr, up.hoehe - 1, -1), runeGuthabenNah(adr, up.hoehe + 2, 1)]); }
+  catch (e) {
+    // Gedrosselt (429) -> spaeter nochmal; echte Archiv-Luecke -> nicht pruefbar, nicht endlos wiederholen
+    if (/429/.test(String(e && e.message || e))) throw e;
+    vor = nach = null;
+  }
   if (vor != null && nach != null && nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(`upgrade|${up.hoehe}|${a}`, a, 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
   if (Array.isArray(nodesA) && nodesA.length) {
@@ -7417,9 +7425,11 @@ async function beschleunigeAdresse(env, address) {
   const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
   const tUp = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
   let nodesUp = []; try { nodesUp = JSON.parse((tUp && tUp.node_addresses) || '[]'); } catch (e) {}
-  await parallel(ups, 4, async up => {
+  // Nur offene Upgrades, hoechstens 8 je Aufruf -- damit der Hintergrundlauf die App nicht ausbremst
+  const offenUps = [];
+  for (const up of ups) { if (offenUps.length >= 8) break; if (!(await pushState(env, `upErst3:${up.hoehe}:${adr.toLowerCase()}`))) offenUps.push(up); }
+  await parallel(offenUps, 4, async up => {
     const key = `upErst3:${up.hoehe}:${adr.toLowerCase()}`;
-    if (await pushState(env, key)) return;
     try {
       await pruefeUpgradeFuerAdresse(env, adr, up, nodesUp);
       await pushStateSet(env, key, '1');
