@@ -7058,11 +7058,31 @@ async function bondNachrechnenAdresse(env, adr) {
     const merkKey = 'bondNachgerechnet:' + adr;
     const rows = ((await env.DB.prepare('SELECT churn_height, churn_timestamp, reward_amount, bond_vor FROM bond_history_rows WHERE bond_address = ? AND reward_amount IS NOT NULL ORDER BY churn_height ASC').bind(adr).all()).results) || [];
     if (rows.length < 2) { await pushStateSet(env, merkKey, String(Date.now())); return true; }
-    let bonds = [], unbonds = [], leaves = [];
+    let bonds = [], unbonds = [], leaves = [], ohneMidgard = false;
+    // MIDGARD BREMST (HTTP 429, gemeldet: Nachrechnung blieb auf "nicht fertig" stehen): die drei Abrufe
+    // NACHEINANDER, bei 429 mit wachsender Pause bis zu viermal wiederholen. Scheitert es trotzdem, wird
+    // der Grund gespeichert -- die App zeigt ihn an.
+    const mitGeduld = async (fn) => {
+      let letzter = null;
+      for (let v = 0; v < 2; v++) {
+        try { return await fn(); }
+        catch (e) { letzter = e; if (!/429/.test(String(e && e.message || e))) break; await new Promise(r => setTimeout(r, 1500)); }
+      }
+      throw letzter;
+    };
     try {
-      const [b, u, l] = await Promise.all([fetchActionsForType(adr, 'bond'), fetchActionsForType(adr, 'unbond'), fetchActionsForType(adr, 'leave').catch(() => ({ items: [] }))]);
+      const b = await mitGeduld(() => fetchActionsForType(adr, 'bond'));
+      const u = await mitGeduld(() => fetchActionsForType(adr, 'unbond'));
+      const l = await mitGeduld(() => fetchActionsForType(adr, 'leave')).catch(() => ({ items: [] }));
       bonds = b.items || []; unbonds = u.items || []; leaves = l.items || [];
-    } catch (e) { return false; } // ohne eigene Bewegungen lieber nichts rechnen
+    } catch (e) {
+      // OHNE MIDGARD WEITER (Hinweis: "man kann in der App doch schon nach Slashes suchen -- warum nicht das
+      // als Grundlage?"): Der Slash-Check braucht Midgard nicht. Er nutzt, dass man bei AKTIVER Node nicht
+      // unbonden kann -- sinkt der Bond waehrend die Node aktiv ist, ist es ein Slash. Genau so hier: Ohne
+      // Midgard zaehlt ein Rueckgang nur, wenn die Node im ganzen Abschnitt aktiv war (sie hat dafuer einen
+      // Reward bekommen). Eigenes Nachbonden bleibt so ausgeschlossen, weil nur Rueckgaenge zaehlen.
+      ohneMidgard = true;
+    }
     // Schon live erkannte Ereignisse nicht doppelt zaehlen
     const live = ((await env.DB.prepare("SELECT ts FROM bond_events WHERE address = ? AND id NOT LIKE 'hist|%'").bind(adr).all()).results || []).map(x => Number(x.ts));
     const schreiben = [];
@@ -7073,6 +7093,10 @@ async function bondNachrechnenAdresse(env, adr) {
       if (!(a.bond_vor > 1) || !(b2.bond_vor > 1)) continue;
       const imFenster = x => x.height && x.height > h0 && x.height < h1;
       if (leaves.some(imFenster)) continue;
+      // Node im ganzen Abschnitt aktiv? (Reward des naechsten Churns > 0) -- dann ist Unbonden unmoeglich,
+      // ein Rueckgang also sicher ein Slash. Ohne Midgard-Daten ist das die Bedingung.
+      const aktivImAbschnitt = (Number(b2.reward_amount) || 0) > 0;
+      if (ohneMidgard && !aktivImAbschnitt) continue;
       const plus = bonds.filter(imFenster).reduce((q, x) => q + (x.amount || 0), 0);
       const minus = unbonds.filter(imFenster).reduce((q, x) => q + (x.amount || 0), 0);
       const rest = b2.bond_vor - a.bond_vor - (Number(a.reward_amount) || 0) - plus + minus;
