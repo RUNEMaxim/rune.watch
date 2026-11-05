@@ -7238,6 +7238,37 @@ async function versionArchiv(h) {
   const j = await fetchArchivNahe(x => `/thorchain/version?height=${x}`, h, [0, 1, 3]);
   return j && j.current ? String(j.current) : null;
 }
+// UPGRADE-LISTE DIREKT VON THORNODE (gewuenscht: schneller als die Suche): /thorchain/upgrade_proposals
+// liefert die Upgrade-Vorschlaege mit geplanter Blockhoehe. Alle mit Hoehe in der Vergangenheit kommen sofort
+// in die Pruefliste (Zeitpunkt aus dem Block). Ob THORNode auch alte, schon ausgefuehrte Vorschlaege
+// zurueckgibt, ist nicht dokumentiert -- deshalb laeuft die Suche per Intervallhalbierung als Rueckfall weiter.
+async function syncUpgradeVorschlaege(env) {
+  await sicherePushTabellen(env);
+  const merk = Number(await pushState(env, 'upgVorschlaegeT')) || 0;
+  if (Date.now() - merk < 6 * 3600e3) return;
+  let j = null;
+  try { j = await fetchFromBases(getThornodeBases(), '/thorchain/upgrade_proposals'); } catch (e) { return; }
+  const vorschlaege = Array.isArray(j) ? j : (j && Array.isArray(j.proposals) ? j.proposals : (j && Array.isArray(j.upgrade_proposals) ? j.upgrade_proposals : []));
+  const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
+  const arr = Array.isArray(lb) ? lb : [lb];
+  const jetzt = parseInt((arr[0] && arr[0].thorchain) || '0', 10) || 0;
+  let liste = []; try { liste = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+  let neu = 0;
+  for (const v of vorschlaege) {
+    const h = parseInt(v && (v.height || (v.plan && v.plan.height)) || '0', 10);
+    const name = String((v && (v.name || (v.plan && v.plan.name))) || '').replace(/^v?/, 'v');
+    if (!h || !jetzt || h >= jetzt || name === 'v') continue;
+    if (liste.some(u => Math.abs(u.hoehe - h) <= 3) || RW_ERSTATTUNGS_UPGRADES.some(u => Math.abs(u.hoehe - h) <= 3)) continue;
+    let ts = null;
+    try { const b = await fetchArchiv(`/cosmos/base/tendermint/v1beta1/blocks/${h}`); ts = Date.parse(b && b.block && b.block.header && b.block.header.time) || null; } catch (e) {}
+    liste.push({ name, hoehe: h, ts: ts || Date.now(), quelle: 'vorschlag' });
+    neu++;
+  }
+  liste.sort((a, b) => a.hoehe - b.hoehe);
+  await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-200)));
+  await pushStateSet(env, 'upgVorschlaegeT', String(Date.now()));
+  await pushStateSet(env, 'upgVorschlaegeInfo', JSON.stringify({ t: Date.now(), gesamt: vorschlaege.length, neu }));
+}
 async function syncUpgradeHistorie(env) {
   await sicherePushTabellen(env);
   let st = null; try { st = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
@@ -7344,6 +7375,7 @@ async function beschleunigeAdresse(env, address) {
   // ersten Fehlertext merken -- die App zeigt ihn an, damit sichtbar ist, WARUM es haengt.
   const info = { t: Date.now(), ok: 0, fehler: 0, text: null };
   const fehler = e => { info.fehler++; if (!info.text) info.text = String(e && e.message || e).slice(0, 140); };
+  try { await syncUpgradeVorschlaege(env); } catch (e) {}
   let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
   const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
   const tUp = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
@@ -7403,6 +7435,7 @@ async function runRefreshCycle(env) {
   await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
   // Erst die Upgrades (Erstattungen), dann die Slash-Nachrechnung -- sie rechnet Bond-Erstattungen heraus
   await schritt('Upgrade-Liste', () => syncUpgradeListe(env));
+  await schritt('Upgrade-Vorschlaege', () => syncUpgradeVorschlaege(env));
   await schritt('Upgrade-Historie', () => syncUpgradeHistorie(env));
   await schritt('Upgrade-Erstattungen', () => syncUpgradeErstattungen(env));
   await schritt('Slash-Nachrechnung', () => syncBondNachrechnung(env));
