@@ -7163,7 +7163,7 @@ async function syncUpgradeListe(env) {
   } catch (e) {}
   let liste = []; try { liste = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
   if (!liste.some(u => u.hoehe === hi) && !RW_ERSTATTUNGS_UPGRADES.some(u => u.hoehe === hi)) liste.push({ name: 'v' + aktuell, hoehe: hi, ts });
-  await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-50)));
+  await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-200)));
   await pushStateSet(env, 'upgVer', JSON.stringify({ ver: aktuell, h: hoehe }));
 }
 // ARCHIV-ABRUF SPARSAM: nacheinander statt parallel an alle Quellen (jede parallele Anfrage zaehlt bei
@@ -7200,6 +7200,54 @@ async function fetchArchivNahe(pfadFn, hoehe, schritte) {
   // Letzter Versuch ueber alle THORNode-Quellen (wie beim Aufbau der Reward-Historie, der so funktioniert hat)
   try { return await fetchFromBases(getThornodeBases({ needsHeight: true }), pfadFn(hoehe)); } catch (e) {}
   throw letzter;
+}
+// ALLE FRUEHEREN UPGRADES SELBST FINDEN (gefragt: \"alle Refunds schon rausgesucht?\"): Neben v3.16.0 und
+// v3.21.0 gab es weitere Erstattungs-Migrationen, z. B. \"[migration] Bond Slash Refunds\" in v3.5.0 und
+// v3.7.0. Statt jede von Hand einzutragen, sucht der Worker EINMALIG jeden Versionswechsel seit Beginn der
+// Reward-Historien: Intervallhalbierung ueber /thorchain/version?height=... (Versionen steigen nur, gleiche
+// Version an beiden Enden heisst: kein Upgrade dazwischen). Je Lauf ~40 Abfragen, Stand wird gespeichert.
+// Jedes gefundene Upgrade landet in der Pruefliste; die Guthaben-Pruefung macht den Rest.
+async function versionArchiv(h) {
+  const j = await fetchArchivNahe(x => `/thorchain/version?height=${x}`, h, [0, 1, 3]);
+  return j && j.current ? String(j.current) : null;
+}
+async function syncUpgradeHistorie(env) {
+  await sicherePushTabellen(env);
+  let st = null; try { st = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
+  if (st && st.fertig) return;
+  if (!st) {
+    let lo = 18000000;
+    try { const r = await env.DB.prepare('SELECT MIN(churn_height) AS h FROM bond_history_rows').first(); if (r && r.h) lo = Math.max(1, Number(r.h) - 1000); } catch (e) {}
+    const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+    const arr = Array.isArray(lb) ? lb : [lb];
+    const hi = parseInt((arr[0] && arr[0].thorchain) || '0', 10) || 0;
+    if (!hi) return;
+    const [vlo, vhi] = await Promise.all([versionArchiv(lo), versionArchiv(hi)]);
+    if (!vlo || !vhi) return;
+    st = { stapel: [[lo, vlo, hi, vhi]], fertig: false };
+  }
+  let budget = 40;
+  let liste = []; try { liste = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+  while (st.stapel.length && budget > 0) {
+    const [lo, vlo, hi, vhi] = st.stapel.pop();
+    if (vlo === vhi) continue;
+    if (hi - lo <= 1) {
+      let ts = null;
+      try { budget--; const b = await fetchArchiv(`/cosmos/base/tendermint/v1beta1/blocks/${hi}`); ts = Date.parse(b && b.block && b.block.header && b.block.header.time) || null; } catch (e) {}
+      if (!liste.some(u => u.hoehe === hi) && !RW_ERSTATTUNGS_UPGRADES.some(u => Math.abs(u.hoehe - hi) <= 3)) liste.push({ name: 'v' + vhi, hoehe: hi, ts: ts || Date.now() });
+      continue;
+    }
+    const mid = Math.floor((lo + hi) / 2);
+    let vmid = null;
+    try { budget--; vmid = await versionArchiv(mid); } catch (e) { st.stapel.push([lo, vlo, hi, vhi]); break; }
+    if (!vmid) { st.stapel.push([lo, vlo, hi, vhi]); break; }
+    st.stapel.push([mid, vmid, hi, vhi]);
+    st.stapel.push([lo, vlo, mid, vmid]);
+  }
+  if (!st.stapel.length) st.fertig = true;
+  liste.sort((a, b) => a.hoehe - b.hoehe);
+  await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-200)));
+  await pushStateSet(env, 'upgSuche', JSON.stringify(st));
 }
 async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
   // vor dem Upgrade weiter zurueck ausweichen, danach weiter vor -- nie ueber den Upgrade-Block hinweg
@@ -7313,6 +7361,7 @@ async function runRefreshCycle(env) {
   await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
   await schritt('Slash-Nachrechnung', () => syncBondNachrechnung(env));
   await schritt('Upgrade-Liste', () => syncUpgradeListe(env));
+  await schritt('Upgrade-Historie', () => syncUpgradeHistorie(env));
   await schritt('Upgrade-Erstattungen', () => syncUpgradeErstattungen(env));
 
   const now = Date.now();
