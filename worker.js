@@ -723,7 +723,7 @@ async function handleBondHistory(request, env, ctx) {
         let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
         const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
         let fertigUp = 0;
-        for (const u of ups) if (await pushState(env, `upErst2:${u.hoehe}:${adr}`)) fertigUp++;
+        for (const u of ups) if (await pushState(env, `upErst3:${u.hoehe}:${adr}`)) fertigUp++;
         let suche = null; try { suche = JSON.parse((await pushState(env, 'upgSuche')) || 'null'); } catch (e) {}
         let offenRows = null;
         try { const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address = ? AND (bond_vor IS NULL OR bond_nach IS NULL) AND reward_amount IS NOT NULL').bind(address).first(); offenRows = r ? r.n : null; } catch (e) {}
@@ -7221,6 +7221,14 @@ async function fetchArchiv(path) {
 // vor -- bis ~1000 Bloecke (rund 1,5 Stunden). Fuer den Bond aendert das nichts (kein Churn so kurz danach).
 const RW_NAHE_VOR = [0, -1, -3, -10, -50, -200];
 const RW_NAHE_NACH = [0, 1, 3, 10, 50, 200, 1000];
+// ZEIT EINES BLOCKS SCHAETZEN (gemeldet: "Erstattung v3.5.0 am 05.11.26 -- es gab heute kein Upgrade"):
+// Fehlte die Blockzeit im Archiv, stand bisher "jetzt" als Datum. Jetzt wird sie aus der Hoehe geschaetzt
+// (Bezug: v3.21.0, Block 28.366.100 am 23.10.2026; ~5,9 s je Block).
+function rwZeitAusHoehe(h) { return Date.UTC(2026, 9, 23, 14, 15) - (28366100 - Number(h)) * 5900; }
+async function blockZeit(h) {
+  try { const b = await fetchArchivNahe(x => `/cosmos/base/tendermint/v1beta1/blocks/${x}`, h, [0, 1, 3, 10, 50]); const t = Date.parse(b && b.block && b.block.header && b.block.header.time); if (t) return t; } catch (e) {}
+  return rwZeitAusHoehe(h);
+}
 async function fetchArchivNahe(pfadFn, hoehe, schritte) {
   let letzter = null;
   for (const d of schritte) {
@@ -7262,9 +7270,8 @@ async function syncUpgradeVorschlaege(env) {
     const name = String((v && (v.name || (v.plan && v.plan.name))) || '').replace(/^v?/, 'v');
     if (!h || !jetzt || h >= jetzt || name === 'v') continue;
     if (liste.some(u => Math.abs(u.hoehe - h) <= 3) || RW_ERSTATTUNGS_UPGRADES.some(u => Math.abs(u.hoehe - h) <= 3)) continue;
-    let ts = null;
-    try { const b = await fetchArchiv(`/cosmos/base/tendermint/v1beta1/blocks/${h}`); ts = Date.parse(b && b.block && b.block.header && b.block.header.time) || null; } catch (e) {}
-    liste.push({ name, hoehe: h, ts: ts || Date.now(), quelle: 'vorschlag' });
+    const ts = await blockZeit(h);
+    liste.push({ name, hoehe: h, ts, quelle: 'vorschlag' });
     neu++;
   }
   liste.sort((a, b) => a.hoehe - b.hoehe);
@@ -7293,9 +7300,8 @@ async function syncUpgradeHistorie(env) {
     const [lo, vlo, hi, vhi] = st.stapel.pop();
     if (vlo === vhi) continue;
     if (hi - lo <= 1) {
-      let ts = null;
-      try { budget--; const b = await fetchArchiv(`/cosmos/base/tendermint/v1beta1/blocks/${hi}`); ts = Date.parse(b && b.block && b.block.header && b.block.header.time) || null; } catch (e) {}
-      if (!liste.some(u => u.hoehe === hi) && !RW_ERSTATTUNGS_UPGRADES.some(u => Math.abs(u.hoehe - hi) <= 3)) liste.push({ name: 'v' + vhi, hoehe: hi, ts: ts || Date.now() });
+      budget--; const ts = await blockZeit(hi);
+      if (!liste.some(u => u.hoehe === hi) && !RW_ERSTATTUNGS_UPGRADES.some(u => Math.abs(u.hoehe - hi) <= 3)) liste.push({ name: 'v' + vhi, hoehe: hi, ts });
       continue;
     }
     const mid = Math.floor((lo + hi) / 2);
@@ -7310,6 +7316,21 @@ async function syncUpgradeHistorie(env) {
   await pushStateSet(env, 'upgListe', JSON.stringify(liste.slice(-200)));
   await pushStateSet(env, 'upgSuche', JSON.stringify(st));
 }
+// GENAUIGKEIT (gemeldet: unplausible "Erstattung" +38,19): Das Wallet-Guthaben zaehlt nur, wenn es GANZ
+// nah am Upgrade-Block gelesen wurde (hoechstens 10 Bloecke daneben). Weiter weg koennte eine normale
+// Ueberweisung mitgezaehlt werden -- dann lieber keinen Eintrag.
+async function runeGuthabenNah(adresse, hoehe, richtung) {
+  const schritte = richtung < 0 ? [0, -1, -3, -10] : [0, 1, 3, 10];
+  let letzter = null;
+  for (const d of schritte) {
+    try {
+      const j = await fetchArchiv(`/cosmos/bank/v1beta1/balances/${adresse}?height=${hoehe + d}`);
+      const b = ((j && j.balances) || []).find(x => String(x.denom).toLowerCase() === 'rune');
+      return b ? Number(b.amount) / 1e8 : 0;
+    } catch (e) { letzter = e; }
+  }
+  throw letzter || new Error('ARCHIV_LUECKE');
+}
 async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
   // vor dem Upgrade weiter zurueck ausweichen, danach weiter vor -- nie ueber den Upgrade-Block hinweg
   const j = await fetchArchivNahe(h => `/cosmos/bank/v1beta1/balances/${adresse}?height=${h}`, hoehe, richtung < 0 ? RW_NAHE_VOR : RW_NAHE_NACH);
@@ -7321,8 +7342,9 @@ async function runeGuthabenBei(adresse, hoehe, richtung = 1) {
 // Bond-Plus GENAU im Upgrade-Block (kein Churn, keine Transaktion) ist dann die Erstattung.
 async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
   const a = String(adr).toLowerCase();
-  const [vor, nach] = await Promise.all([runeGuthabenBei(adr, up.hoehe - 1, -1), runeGuthabenBei(adr, up.hoehe + 2, 1)]);
-  if (nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  let vor = null, nach = null;
+  try { [vor, nach] = await Promise.all([runeGuthabenNah(adr, up.hoehe - 1, -1), runeGuthabenNah(adr, up.hoehe + 2, 1)]); } catch (e) { vor = nach = null; }
+  if (vor != null && nach != null && nach - vor > 0.01) await env.DB.prepare('INSERT OR IGNORE INTO bond_events (id, address, node, art, amount, ts, height) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(`upgrade|${up.hoehe}|${a}`, a, 'upgrade:' + up.name, 'refund', Math.round((nach - vor) * 1e8) / 1e8, up.ts, up.hoehe).run();
   if (Array.isArray(nodesA) && nodesA.length) {
     const bondBei = async (h, richtung) => {
@@ -7337,9 +7359,20 @@ async function pruefeUpgradeFuerAdresse(env, adr, up, nodesA) {
       .bind(`upgrade-bond|${up.hoehe}|${a}`, a, 'upgrade-bond:' + up.name, 'refund', Math.round((b1 - b0) * 1e8) / 1e8, up.ts, up.hoehe).run();
   }
 }
+async function upgradeEintraegeReparieren(env) {
+  if (await pushState(env, 'upgReparatur3')) return;
+  // alte Wallet-Erstattungen verwerfen (werden mit der genaueren Pruefung neu gesucht) und Daten der
+  // Upgrade-Liste korrigieren, die faelschlich "jetzt" trugen
+  try { await env.DB.prepare("DELETE FROM bond_events WHERE id LIKE 'upgrade|%' OR id LIKE 'upgrade-bond|%'").run(); } catch (e) {}
+  let liste = []; try { liste = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
+  for (const u of liste) if (!u.ts || Math.abs(u.ts - rwZeitAusHoehe(u.hoehe)) > 5 * 864e5) u.ts = await blockZeit(u.hoehe);
+  await pushStateSet(env, 'upgListe', JSON.stringify(liste));
+  await pushStateSet(env, 'upgReparatur3', '1');
+}
 async function syncUpgradeErstattungen(env) {
   await sicherePushTabellen(env);
   await sichereBondEvTabellen(env);
+  await upgradeEintraegeReparieren(env);
   let adressen = [];
   try { adressen = ((await env.DB.prepare('SELECT bond_address FROM tracked_addresses LIMIT 3000').all()).results || []).map(x => String(x.bond_address).toLowerCase()); } catch (e) { return; }
   let abfragen = 0;
@@ -7347,7 +7380,7 @@ async function syncUpgradeErstattungen(env) {
   for (const up of [...RW_ERSTATTUNGS_UPGRADES, ...dyn]) {
     for (const adr of adressen) {
       if (abfragen >= 60) return;
-      const key = `upErst2:${up.hoehe}:${adr}`;
+      const key = `upErst3:${up.hoehe}:${adr}`;
       if (await pushState(env, key)) continue;
       abfragen += 6;
       try {
@@ -7378,13 +7411,14 @@ async function beschleunigeAdresse(env, address) {
   // ersten Fehlertext merken -- die App zeigt ihn an, damit sichtbar ist, WARUM es haengt.
   const info = { t: Date.now(), ok: 0, fehler: 0, text: null };
   const fehler = e => { info.fehler++; if (!info.text) info.text = String(e && e.message || e).slice(0, 140); };
+  try { await upgradeEintraegeReparieren(env); } catch (e) {}
   try { await syncUpgradeVorschlaege(env); } catch (e) {}
   let dyn = []; try { dyn = JSON.parse((await pushState(env, 'upgListe')) || '[]'); } catch (e) {}
   const ups = [...RW_ERSTATTUNGS_UPGRADES, ...dyn];
   const tUp = await env.DB.prepare('SELECT node_addresses FROM tracked_addresses WHERE bond_address = ?').bind(adr).first().catch(() => null);
   let nodesUp = []; try { nodesUp = JSON.parse((tUp && tUp.node_addresses) || '[]'); } catch (e) {}
   await parallel(ups, 4, async up => {
-    const key = `upErst2:${up.hoehe}:${adr.toLowerCase()}`;
+    const key = `upErst3:${up.hoehe}:${adr.toLowerCase()}`;
     if (await pushState(env, key)) return;
     try {
       await pruefeUpgradeFuerAdresse(env, adr, up, nodesUp);
