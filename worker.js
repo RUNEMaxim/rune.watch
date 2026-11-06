@@ -5930,7 +5930,8 @@ async function pushAnThema(env, thema, baue) {
   let n = 0;
   for (const row of r.results || []) {
     let p = {}; try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
-    if (!p[thema]) continue;
+    // Neue Podcast-Folge: AUTOMATISCH fuer alle (gewuenscht) -- nur wer es ausdruecklich abgeschaltet hat, nicht
+    if (thema === 'podcast' ? p.podcast === false : !p[thema]) continue;
     const nachricht = baue(row.lang === 'de', p, row);
     if (!nachricht) continue;
     try { if ((await pushSenden(env, row, nachricht)) === 'ok') n++; } catch (e) {}
@@ -6898,6 +6899,24 @@ async function runebondEmpfehlungen(env) {
   runebondRefCache = { at: Date.now(), data };
   return data;
 }
+// NEUE PODCAST-FOLGE MELDEN (gewuenscht): Alle 30 Minuten den Feed frisch lesen; ist die neueste Folge eine
+// andere als zuletzt gemerkt, Push an alle, die das Thema \"Neue Podcast-Folge\" eingeschaltet haben.
+// Antippen oeffnet rune.watch mit der Folgenliste (#podcast).
+async function syncPodcastMeldung(env) {
+  await sicherePushTabellen(env);
+  const zuletzt = Number(await pushState(env, 'podcastPruefT')) || 0;
+  if (Date.now() - zuletzt < 30 * 60e3) return;
+  await pushStateSet(env, 'podcastPruefT', String(Date.now()));
+  const d = await podcastFolgen(env, true).catch(() => null);
+  const f = d && Array.isArray(d.folgen) ? d.folgen[0] : null;
+  if (!f || !f.audio) return;
+  const alt = await pushState(env, 'podcastNeueste');
+  if (alt === f.audio) return;
+  await pushStateSet(env, 'podcastNeueste', f.audio);
+  if (!alt) return; // erster Lauf: nur merken, nichts melden
+  if (f.datum && Date.now() - f.datum > 3 * 864e5) return; // keine alten Folgen nachmelden
+  await pushAnThema(env, 'podcast', de => ({ titel: de ? 'Neue Podcast-Folge' : 'New podcast episode', text: String(f.titel || '').slice(0, 140), tag: 'rw-podcast', url: '/#podcast' }));
+}
 async function runRefreshCycle(env) {
   // Slash-/Erstattungs-Erkennung entfernt (gewuenscht): einmalig ihre Tabellen und Zwischenstaende loeschen
   try {
@@ -6932,6 +6951,7 @@ async function runRefreshCycle(env) {
   await schritt('Timeline', () => waermeTimeline(env));
   await schritt('Leave-Zeitpunkte', () => syncLeaveZeiten(env));
   await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
+  await schritt('Podcast-Meldung', () => syncPodcastMeldung(env));
 
   const now = Date.now();
 
