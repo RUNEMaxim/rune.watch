@@ -1801,7 +1801,7 @@ async function handleIsOwner(request, env) {
 // wirklich live ist.
 const WORKER_VERSION = '2026-10-28-1700';
 const CLICK_TARGETS = new Set(['runebond']);
-const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte']);
+const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
 
 async function handleClick(request, env, ctx) {
@@ -2230,7 +2230,7 @@ async function handleStats(request, env) {
   .tile-hint { line-height: 1.4; }
   .version { font-size: 10.5px; color: #6a6a6a; margin-top: 6px; }
   /* Abschnitte mit drei Kacheln: die dritte ueber die volle Breite, statt allein halb leer */
-  .tile:has(#v-avgreq), .tile:has(#v-rate) { grid-column: 1 / -1; }
+  .tile:has(#v-avgreq), .tile:has(#v-rate), .tile:has(#v-rbconv) { grid-column: 1 / -1; }
   .tile-head {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
   }
@@ -2401,6 +2401,8 @@ async function handleStats(request, env) {
         ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
           stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
         <div class="sec">RUNEBond</div>
+        ${stats.runebondRef && stats.runebondClicksTotal > 0 ? tile('rbconv', 'Clicks that became a request', Math.round(stats.runebondRef.anfragen / stats.runebondClicksTotal * 1000) / 10 + ' %',
+          `${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} from ${stats.runebondClicksTotal} clicks \u00b7 ${stats.runebondRef.gebondet} bonded`) : ''}
         ${tile('rbref', 'Bonders via rune.watch', stats.runebondRef ? stats.runebondRef.gebondet : null,
           stats.runebondRef ? `${stats.runebondRef.runeGebondet.toLocaleString('en-US')} RUNE bonded \u00b7 ${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} \u00b7 ${stats.runebondRef.wallets} wallet${stats.runebondRef.wallets === 1 ? '' : 's'}` : 'RUNEBond data not available')}
         ${tile('rb1', 'RUNEBond clicks', stats.runebondClicksTotal,
@@ -2411,7 +2413,7 @@ async function handleStats(request, env) {
           // Aufteilung nach Herkunft: gross die Summe (30 Tage), darunter je Quelle eine Zeile.
           // Vorher stand die ganze Aufzaehlung als "Zahl" in der grossen Schrift der Kachel.
           const rows = stats.runebondClicksBySource30d;
-          const namen = { banner: 'Banner (top of the app)', node: 'Node card (node window)', liste: 'RUNEBond × RUNE.WATCH list', karte: 'Bond card', '-': 'before sources were recorded' };
+          const namen = { banner: 'Banner (top of the app)', node: 'Node window – button below', 'node-oben': 'Node window – open slot bar', liste: 'RUNEBond × RUNE.WATCH list', 'liste-fenster': 'List – "All nodes on RUNEBond"', karte: 'Bond card', frei: 'Hint: unbonded RUNE (bonders)', '-': 'before sources were recorded' };
           if (!rows || !rows.length) return tile('rbsrc', 'Clicks by source', null, 'no data yet');
           const summe = rows.reduce((a, r) => a + (Number(r.n) || 0), 0);
           const zeilen = rows.map(r => `${namen[r.q] || r.q}: <b>${Number(r.n) || 0}</b>`).join('<br>');
