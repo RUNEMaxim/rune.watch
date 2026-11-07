@@ -2190,43 +2190,44 @@ async function handleStats(request, env) {
 <meta name="robots" content="noindex, nofollow">
 <title>rune.watch — Stats</title>
 <style>
+  @font-face { font-family: Figtree; src: url('https://runewatch.org/fonts/figtree.woff2') format('woff2'); font-weight: 300 900; font-display: swap; }
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 24px 16px 48px;
-    background: #0b0f14; color: #e7ecf0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+    background: #121212; color: #ffffff;
+    font-family: Figtree, -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
   }
   h1 {
-    font-size: 15px; font-weight: 600; letter-spacing: 0.02em;
-    color: #8fa3b0; text-transform: uppercase; margin: 0 0 4px;
+    font-size: 22px; font-weight: 800; letter-spacing: -0.01em;
+    color: #ffffff; margin: 0 0 4px;
   }
-  .subtitle { font-size: 12.5px; color: #5f7480; margin-bottom: 22px; }
+  .subtitle { font-size: 12.5px; color: #8a8a8a; margin-bottom: 22px; }
   .grid {
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
     max-width: 480px;
   }
   .tile {
-    background: linear-gradient(165deg, #131a22 0%, #0e141b 100%);
-    border: 1px solid #1f2b35; border-radius: 14px; padding: 16px 14px;
+    background: #181818;
+    border: none; border-radius: 8px; padding: 16px 14px;
   }
   .tile-value {
-    font-size: 28px; font-weight: 700; font-family: 'Space Grotesk', -apple-system, sans-serif;
-    color: #2dd4bf; line-height: 1.1;
+    font-size: 28px; font-weight: 800; font-family: Figtree, -apple-system, sans-serif;
+    color: #ffffff; line-height: 1.1;
     transition: opacity 0.15s ease;
   }
-  .tile-label { font-size: 12px; color: #93a5b1; margin-top: 6px; }
-  .tile-hint { font-size: 10.5px; color: #52646f; margin-top: 3px; }
+  .tile-label { font-size: 12px; color: #b3b3b3; margin-top: 6px; }
+  .tile-hint { font-size: 10.5px; color: #7a7a7a; margin-top: 3px; }
   .tile.wide { grid-column: 1 / -1; }
   /* UEBERSICHTLICHER (gewuenscht): Abschnitte mit kleiner Ueberschrift statt einer langen Kachel-Wand */
   .sec { grid-column: 1 / -1; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-    color: #5f7480; margin: 14px 0 -2px; display: flex; align-items: center; gap: 8px; }
+    color: #8a8a8a; margin: 14px 0 -2px; display: flex; align-items: center; gap: 8px; }
   .sec:first-child { margin-top: 0; }
-  .sec::after { content: ''; flex: 1; height: 1px; background: #1f2b35; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: #2a2a2a; }
   .tile { padding: 14px 13px; }
   .tile-value { font-size: 26px; }
   .tile-hint { line-height: 1.4; }
-  .version { font-size: 10.5px; color: #3f4f59; margin-top: 6px; }
+  .version { font-size: 10.5px; color: #6a6a6a; margin-top: 6px; }
   /* Abschnitte mit drei Kacheln: die dritte ueber die volle Breite, statt allein halb leer */
   .tile:has(#v-avgreq), .tile:has(#v-rate) { grid-column: 1 / -1; }
   .tile-head {
@@ -2235,15 +2236,15 @@ async function handleStats(request, env) {
   /* Festes Zeitraum-Etikett -- sieht aus wie ein Auswahlfeld, ist aber bewusst nicht
      bedienbar: Aktive Adressen und Requests zeigen beide 24h. */
   .tile-period {
-    background: #0e141b; color: #93a5b1; border: 1px solid #1f2b35; border-radius: 6px;
+    background: #242424; color: #b3b3b3; border: 1px solid #2a2a2a; border-radius: 6px;
     font-size: 10.5px; font-weight: 600; padding: 3px 6px;
   }
   .refresh {
-    margin-top: 22px; font-size: 11.5px; color: #4c5c66;
+    margin-top: 22px; font-size: 11.5px; color: #7a7a7a;
     display: flex; align-items: center; gap: 6px;
   }
   .dot {
-    width: 6px; height: 6px; border-radius: 50%; background: #2dd4bf; flex-shrink: 0;
+    width: 6px; height: 6px; border-radius: 50%; background: #1ed760; flex-shrink: 0;
     animation: pulse 1.6s ease-in-out infinite;
   }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -2251,16 +2252,16 @@ async function handleStats(request, env) {
     display: grid; grid-template-columns: 56px 1fr 42px 40px; align-items: center; gap: 8px;
     margin-bottom: 8px; font-size: 12px;
   }
-  .depth-label { color: #93a5b1; }
+  .depth-label { color: #b3b3b3; }
   .depth-bar-track {
-    height: 8px; border-radius: 4px; background: #1a232c; overflow: hidden;
+    height: 8px; border-radius: 4px; background: #2a2a2a; overflow: hidden;
   }
   .depth-bar-fill {
-    height: 100%; border-radius: 4px; background: #2dd4bf;
+    height: 100%; border-radius: 4px; background: #1ed760;
     transition: width 0.2s ease;
   }
-  .depth-pct { color: #e7ecf0; font-weight: 600; text-align: right; }
-  .depth-count { color: #52646f; font-size: 10.5px; }
+  .depth-pct { color: #ffffff; font-weight: 600; text-align: right; }
+  .depth-count { color: #7a7a7a; font-size: 10.5px; }
   /* Zwei Seiten nebeneinander, horizontal wischbar (Snap). Am Handy ein Karussell, am PC
      funktionieren die Punkte unten als Navigation. */
   .pager {
@@ -2270,31 +2271,31 @@ async function handleStats(request, env) {
   .pager::-webkit-scrollbar { display: none; }
   .page { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; padding-right: 2px; }
   .page-title {
-    font-size: 11px; color: #5f7480; margin: 0 0 10px; letter-spacing: 0.06em;
+    font-size: 11px; color: #8a8a8a; margin: 0 0 10px; letter-spacing: 0.06em;
     text-transform: uppercase;
   }
   .dots { display: flex; gap: 7px; justify-content: center; margin: 20px 0 0; }
   .dot-nav {
-    width: 7px; height: 7px; border-radius: 50%; background: #1f2b35; border: none;
+    width: 7px; height: 7px; border-radius: 50%; background: #2a2a2a; border: none;
     padding: 0; cursor: pointer; transition: background 0.15s ease;
   }
-  .dot-nav.active { background: #2dd4bf; }
+  .dot-nav.active { background: #1ed760; }
   .note {
-    font-size: 11.5px; color: #6b7c87; line-height: 1.55; margin-top: 14px;
-    border-left: 2px solid #1f2b35; padding-left: 11px; max-width: 480px;
+    font-size: 11.5px; color: #8a8a8a; line-height: 1.55; margin-top: 14px;
+    border-left: 2px solid #2a2a2a; padding-left: 11px; max-width: 480px;
   }
-  .swipe-hint { font-size: 10.5px; color: #3f4f59; text-align: center; margin-top: 8px; }
+  .swipe-hint { font-size: 10.5px; color: #6a6a6a; text-align: center; margin-top: 8px; }
   /* REITER OBEN (gemeldet: auf der ersten Seite sah man nicht, dass man wischen kann). Bleibt
      beim Scrollen oben stehen und zeigt, welche Seite gerade offen ist. */
-  .tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 4px; padding: 4px; margin: 0 0 14px;
-    background: #0b1117; border: 1px solid #1f2b35; border-radius: 999px; }
-  .tab-nav { flex: 1; height: 34px; border: none; border-radius: 999px; background: transparent; color: #6b7c87;
-    font: 600 13px/1 Inter, system-ui, sans-serif; cursor: pointer; transition: background .15s, color .15s; }
-  .tab-nav.active { background: #2dd4bf; color: #04201c; }
+  .tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; padding: 8px 0; margin: 0 0 14px; background: #121212; }
+  .tab-nav { flex: 0 0 auto; height: 32px; padding: 0 14px; border: none; border-radius: 999px; background: #2a2a2a; color: #ffffff;
+    font: 700 13px/1 Figtree, Inter, system-ui, sans-serif; cursor: pointer; transition: background .15s, color .15s; }
+  .tab-nav.active { background: #ffffff; color: #000000; }
+  .tab-nav:hover:not(.active) { color: #ffffff; }
 </style>
 </head>
 <body>
-  <h1>rune.watch — sync activity</h1>
+  <h1>rune.watch stats</h1>
   <div class="subtitle">Address based, across devices (not Cloudflare "visits") · recording <span id="v-since">${trackingHint}</span></div>
 
   <div class="tabs" role="tablist">
@@ -2364,7 +2365,7 @@ async function handleStats(request, env) {
           const k = stats.kohorten;
           if (!k || !k.length) return '';
           const maxW = Math.max(...k.map(x => x.anteile.length));
-          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:4px 2px; border-radius:5px; background:rgba(45,212,191,${Math.max(0.06, v / 100 * 0.85)}); color:${v > 45 ? '#04201c' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
+          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:4px 2px; border-radius:5px; background:rgba(30,215,96,${Math.max(0.06, v / 100 * 0.85)}); color:${v > 45 ? '#000000' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
           return `<div class="tile wide">
             <div class="tile-label" style="margin-top:0; margin-bottom:10px;">Cohorts by first week</div>
             <div style="overflow-x:auto;"><table style="border-collapse:separate; border-spacing:2px; width:100%; font-size:11px;">
