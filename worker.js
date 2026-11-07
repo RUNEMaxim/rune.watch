@@ -2265,7 +2265,7 @@ async function handleStats(request, env) {
   /* Zwei Seiten nebeneinander, horizontal wischbar (Snap). Am Handy ein Karussell, am PC
      funktionieren die Punkte unten als Navigation. */
   .pager {
-    display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+    display: flex; align-items: flex-start; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; transition: height 0.2s ease;
     scrollbar-width: none; -webkit-overflow-scrolling: touch;
   }
   .pager::-webkit-scrollbar { display: none; }
@@ -2530,11 +2530,26 @@ async function handleStats(request, env) {
     pager.scrollTo({ left: pager.clientWidth * Number(d.dataset.page), behavior: 'smooth' });
     if (d.classList.contains('tab-nav')) window.scrollTo({ top: 0, behavior: 'smooth' });
   }));
+  // HOEHE JE SEITE (gemeldet: "auf der zweiten Seite ist alles leer"): Der Bereich war so hoch wie die
+  // laengste Seite -- kuerzere Seiten hatten darunter eine leere Flaeche, und wer auf Seite 1 weit unten
+  // war, sah nach dem Wechsel nur Leere. Jetzt passt sich die Hoehe der offenen Seite an, und liegt man
+  // nach dem Wechsel unterhalb ihres Endes, springt die Ansicht an den Anfang.
+  const seiten = [...pager.querySelectorAll('.page')];
+  let aktiv = -1;
+  const hoehe = i => {
+    const sp = seiten[i]; if (!sp) return;
+    pager.style.height = sp.scrollHeight + 'px';
+    const ende = pager.getBoundingClientRect().top + window.scrollY + sp.scrollHeight;
+    if (window.scrollY + 40 > ende - window.innerHeight * 0.3) window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
   pager.addEventListener('scroll', () => {
     const i = Math.round(pager.scrollLeft / Math.max(1, pager.clientWidth));
     dots.forEach((d, j) => d.classList.toggle('active', j === i));
     tabs.forEach((d, j) => d.classList.toggle('active', j === i));
+    if (i !== aktiv) { aktiv = i; hoehe(i); }
   }, { passive: true });
+  hoehe(0); aktiv = 0;
+  window.addEventListener('resize', () => hoehe(Math.max(0, aktiv)));
 
   setInterval(refreshStats, REFRESH_MS);
 </script>
