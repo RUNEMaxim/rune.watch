@@ -2218,6 +2218,17 @@ async function handleStats(request, env) {
   .tile-label { font-size: 12px; color: #93a5b1; margin-top: 6px; }
   .tile-hint { font-size: 10.5px; color: #52646f; margin-top: 3px; }
   .tile.wide { grid-column: 1 / -1; }
+  /* UEBERSICHTLICHER (gewuenscht): Abschnitte mit kleiner Ueberschrift statt einer langen Kachel-Wand */
+  .sec { grid-column: 1 / -1; font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #5f7480; margin: 14px 0 -2px; display: flex; align-items: center; gap: 8px; }
+  .sec:first-child { margin-top: 0; }
+  .sec::after { content: ''; flex: 1; height: 1px; background: #1f2b35; }
+  .tile { padding: 14px 13px; }
+  .tile-value { font-size: 26px; }
+  .tile-hint { line-height: 1.4; }
+  .version { font-size: 10.5px; color: #3f4f59; margin-top: 6px; }
+  /* Abschnitte mit drei Kacheln: die dritte ueber die volle Breite, statt allein halb leer */
+  .tile:has(#v-avgreq), .tile:has(#v-rate) { grid-column: 1 / -1; }
   .tile-head {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
   }
@@ -2296,6 +2307,7 @@ async function handleStats(request, env) {
     <section class="page">
       <div class="page-title">1 · Addresses (wallet entered)</div>
       <div class="grid">
+        <div class="sec">Last 24 hours</div>
         <div class="tile">
           <div class="tile-head">
             <div class="tile-label" style="margin-top:0">Active addresses</div>
@@ -2312,10 +2324,12 @@ async function handleStats(request, env) {
           <div class="tile-value" id="v-requests">${stats.totalRequestsLast1d}</div>
           <div class="tile-hint">all sync calls in the last 24h, not deduplicated per day</div>
         </div>
+        ${tile('avgreq', 'Ø requests per active address', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'last 24h, per address active in those 24h')}
+        <div class="sec">All time</div>
         ${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint)}
         ${tile('returning', 'Returning – all time', stats.returningAllTime, 'synced on ≥2 separate days since recording began')}
         ${tile('rate', 'Retention rate', stats.retentionRateAllTime == null ? '—' : stats.retentionRateAllTime + '%', 'share of returning addresses among all addresses')}
-        ${tile('avgreq', 'Ø requests per active address', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'last 24h, per address active in those 24h')}
+        <div class="sec">Engagement</div>
         <div class="tile wide">
           <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Usage depth (all time)</div>
           ${stats.engagementDepth.map(row => `
@@ -2367,16 +2381,21 @@ async function handleStats(request, env) {
     <section class="page">
       <div class="page-title">2 · Visitors (anonymous, all devices)</div>
       <div class="grid">
+        <div class="sec">Devices</div>
         ${tile('vis1', 'Devices – 24h', stats.visitorsLast1d, 'distinct devices in the last 24h')}
         ${tile('vis7', 'Devices – 7 days', stats.visitorsLast7d)}
         ${tile('vis30', 'Devices – 30 days', stats.visitorsLast30d)}
         ${tile('vistotal', 'Devices total', stats.visitorsTotal, visitorHint)}
+        <div class="sec">Wallet entered</div>
         ${tile('wshare1', 'With wallet – 24h', stats.walletShareLast1d == null ? null : stats.walletShareLast1d + '%',
           stats.visitorsWithWalletLast1d == null ? 'no data yet' : `${stats.visitorsWithWalletLast1d} of ${stats.visitorsLast1d} devices have a wallet entered`)}
-        ${tile('rb1', 'RUNEBond clicks – 24h', stats.runebondClicksLast1d,
-          stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
+        ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
+          stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
+        <div class="sec">RUNEBond</div>
         ${tile('rbref', 'Bonders via rune.watch', stats.runebondRef ? stats.runebondRef.gebondet : null,
           stats.runebondRef ? `${stats.runebondRef.runeGebondet.toLocaleString('en-US')} RUNE bonded \u00b7 ${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} \u00b7 ${stats.runebondRef.wallets} wallet${stats.runebondRef.wallets === 1 ? '' : 's'}` : 'RUNEBond data not available')}
+        ${tile('rb1', 'RUNEBond clicks – 24h', stats.runebondClicksLast1d,
+          stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
         ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
           stats.runebondClicksLast30d == null ? 'no data yet' : `${stats.runebondClicksLast30d} clicks in 30 days`)}
         ${(() => {
@@ -2389,9 +2408,6 @@ async function handleStats(request, env) {
           const zeilen = rows.map(r => `${namen[r.q] || r.q}: <b>${Number(r.n) || 0}</b>`).join('<br>');
           return tile('rbsrc', 'RUNEBond clicks by source – 30 days', summe, zeilen);
         })()}
-        <div class="tile"><div class="tile-label">Worker version</div><div class="tile-hint">${WORKER_VERSION}</div></div>
-        ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
-          stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
       </div>
     </section>
     <section class="page">
@@ -2402,6 +2418,7 @@ async function handleStats(request, env) {
         const maxK = Math.max(1, ...Object.values(g));
         const zeile = (l, n) => `<div class="depth-row"><div class="depth-label">${l}</div><div class="depth-bar-track"><div class="depth-bar-fill" style="width:${Math.round((n || 0) / maxK * 100)}%"></div></div><div style="text-align:right;">${f(n)}</div><div></div></div>`;
         return `<div class="grid">
+          <div class="sec">Bonding</div>
           ${tile('m-bonder', 'Bonders', f(b.adressen), 'bond provider addresses, all nodes')}
           ${tile('m-rw', 'rune.watch bonders', f(rw.davonBonder), (rw.anteilAnBondern != null ? rw.anteilAnBondern + ' % of all bonders' : ''))}
           ${tile('m-bond', 'Share of total bond', rw.anteilAmBond != null ? rw.anteilAmBond + ' %' : '\u2014', f(rw.bondRUNE) + ' of ' + f(b.bondRUNE) + ' RUNE')}
@@ -2409,6 +2426,7 @@ async function handleStats(request, env) {
           <div class="tile wide"><div class="tile-label" style="margin-top:0; margin-bottom:10px;">Bonders by size (RUNE)</div>
             ${zeile('< 1k', g['unter 1.000'])}${zeile('1k\u201310k', g['1.000-10.000'])}${zeile('10k\u2013100k', g['10.000-100.000'])}${zeile('> 100k', g['ueber 100.000'])}
           </div>
+          <div class="sec">Holders</div>
           ${tile('m-tcys', 'TCY stakers', f(markt.tcyGestakt && markt.tcyGestakt.adressen), 'staked TCY, native')}
           ${tile('m-tcyw', 'TCY in wallets', f(markt.tcyHalter && markt.tcyHalter.adressenGesamt), f(markt.tcyHalter && markt.tcyHalter.abMindestmenge) + ' with \u2265 1 TCY')}
           ${tile('m-brune', 'bRUNE / ybRUNE', f(markt.bruneHalter && markt.bruneHalter.adressenGesamt) + ' / ' + f(markt.ybruneHalter && markt.ybruneHalter.adressenGesamt), 'holder addresses')}
@@ -2428,6 +2446,7 @@ async function handleStats(request, env) {
   </div>
 
   <div class="refresh"><span class="dot"></span><span id="stamp">As of ${new Date().toLocaleString('en-GB', { timeZone: 'UTC' })} UTC · updating live</span></div>
+  <div class="version">Worker ${WORKER_VERSION}</div>
 <script>
   const REFRESH_MS = 1000;
   let latestStats = null;
