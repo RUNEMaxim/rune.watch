@@ -2043,7 +2043,8 @@ async function handleStats(request, env) {
     env.DB.prepare("SELECT COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond'").first().catch(() => ({ n: null })),
     env.DB.prepare("SELECT COUNT(DISTINCT token) AS n FROM outbound_clicks WHERE target = 'runebond' AND token IS NOT NULL").first().catch(() => ({ n: null })),
     // Aufteilung nach Herkunft (30 Tage); alte Klicks ohne Quelle erscheinen als "–".
-    env.DB.prepare("SELECT COALESCE(quelle, '-') AS q, COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond' AND day >= ? GROUP BY q ORDER BY n DESC").bind(day30).all().catch(() => ({ results: null })),
+    // ALLES GESAMT (gewuenscht: "81 total, aber 41 Klicks -- es sollte alles in total sein")
+    env.DB.prepare("SELECT COALESCE(quelle, '-') AS q, COUNT(*) AS n FROM outbound_clicks WHERE target = 'runebond' GROUP BY q ORDER BY n DESC").all().catch(() => ({ results: null })),
   ]);
 
   const active1 = active1Row?.n || 0;
@@ -2402,19 +2403,19 @@ async function handleStats(request, env) {
         <div class="sec">RUNEBond</div>
         ${tile('rbref', 'Bonders via rune.watch', stats.runebondRef ? stats.runebondRef.gebondet : null,
           stats.runebondRef ? `${stats.runebondRef.runeGebondet.toLocaleString('en-US')} RUNE bonded \u00b7 ${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} \u00b7 ${stats.runebondRef.wallets} wallet${stats.runebondRef.wallets === 1 ? '' : 's'}` : 'RUNEBond data not available')}
-        ${tile('rb1', 'RUNEBond clicks – 24h', stats.runebondClicksLast1d,
-          stats.runebondClicksTotal == null ? 'no data yet' : `${stats.runebondClicksTotal} in total`)}
+        ${tile('rb1', 'RUNEBond clicks', stats.runebondClicksTotal,
+          stats.runebondClicksLast1d == null ? 'no data yet' : `${stats.runebondClicksLast1d} in the last 24h`)}
         ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
-          stats.runebondClicksLast30d == null ? 'no data yet' : `${stats.runebondClicksLast30d} clicks in 30 days`)}
+          stats.runebondClicksTotal == null ? 'no data yet' : `the ${stats.runebondClicksTotal} clicks came from these devices`)}
         ${(() => {
           // Aufteilung nach Herkunft: gross die Summe (30 Tage), darunter je Quelle eine Zeile.
           // Vorher stand die ganze Aufzaehlung als "Zahl" in der grossen Schrift der Kachel.
           const rows = stats.runebondClicksBySource30d;
           const namen = { banner: 'Banner (top of the app)', node: 'Node card (node window)', liste: 'RUNEBond × RUNE.WATCH list', karte: 'Bond card', '-': 'before sources were recorded' };
-          if (!rows || !rows.length) return tile('rbsrc', 'RUNEBond clicks by source – 30 days', null, 'no data yet');
+          if (!rows || !rows.length) return tile('rbsrc', 'Clicks by source', null, 'no data yet');
           const summe = rows.reduce((a, r) => a + (Number(r.n) || 0), 0);
           const zeilen = rows.map(r => `${namen[r.q] || r.q}: <b>${Number(r.n) || 0}</b>`).join('<br>');
-          return tile('rbsrc', 'RUNEBond clicks by source – 30 days', summe, zeilen);
+          return tile('rbsrc', 'Clicks by source', summe, zeilen);
         })()}
       </div>
     </section>
@@ -2497,11 +2498,11 @@ async function handleStats(request, env) {
     setText('v-vis30', latestStats.visitorsLast30d);
     setText('v-vistotal', latestStats.visitorsTotal);
     setText('h-vistotal', latestStats.visitorsSince ? 'since ' + deDate(latestStats.visitorsSince) : 'not recording yet');
-    setText('v-rb1', latestStats.runebondClicksLast1d == null ? '—' : latestStats.runebondClicksLast1d);
-    setText('h-rb1', latestStats.runebondClicksTotal == null ? 'no data yet' : latestStats.runebondClicksTotal + ' in total');
+    setText('v-rb1', latestStats.runebondClicksTotal == null ? '—' : latestStats.runebondClicksTotal);
+    setText('h-rb1', latestStats.runebondClicksLast1d == null ? 'no data yet' : latestStats.runebondClicksLast1d + ' in the last 24h');
     setText('v-rbdev', latestStats.runebondClickDevices == null ? '—' : latestStats.runebondClickDevices);
-    if (latestStats.runebondRef) { setText('v-rbref', latestStats.runebondRef.gebondet); setText('h-rbref', latestStats.runebondRef.runeGebondet.toLocaleString('en-US') + ' RUNE bonded \u00b7 ' + latestStats.runebondRef.anfragen + ' whitelist requests \u00b7 ' + latestStats.runebondRef.wallets + ' wallets'); }
-    setText('h-rbdev', latestStats.runebondClicksLast30d == null ? 'no data yet' : latestStats.runebondClicksLast30d + ' clicks in 30 days');
+    if (latestStats.runebondRef) { setText('v-rbref', latestStats.runebondRef.gebondet); setText('h-rbref', latestStats.runebondRef.runeGebondet.toLocaleString('en-US') + ' RUNE bonded \u00b7 ' + latestStats.runebondRef.anfragen + ' whitelist request' + (latestStats.runebondRef.anfragen === 1 ? '' : 's') + ' \u00b7 ' + latestStats.runebondRef.wallets + ' wallet' + (latestStats.runebondRef.wallets === 1 ? '' : 's')); }
+    setText('h-rbdev', latestStats.runebondClicksTotal == null ? 'no data yet' : 'the ' + latestStats.runebondClicksTotal + ' clicks came from these devices');
     setText('v-wshare1', latestStats.walletShareLast1d == null ? '—' : latestStats.walletShareLast1d + '%');
     setText('v-wshare30', latestStats.walletShareLast30d == null ? '—' : latestStats.walletShareLast30d + '%');
     setText('h-wshare1', latestStats.visitorsWithWalletLast1d == null ? 'no data yet'
