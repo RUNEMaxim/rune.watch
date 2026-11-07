@@ -2264,12 +2264,19 @@ async function handleStats(request, env) {
   .depth-count { color: #7a7a7a; font-size: 10.5px; }
   /* Zwei Seiten nebeneinander, horizontal wischbar (Snap). Am Handy ein Karussell, am PC
      funktionieren die Punkte unten als Navigation. */
+  /* WIE IN DER APP (gewuenscht): Reiter bzw. Wischen wechseln die Seite mit kurzer Gleit-Animation --
+     kein freies horizontales Scrollen mehr, bei dem halbe Seiten nebeneinander standen. */
   .pager {
-    display: flex; align-items: flex-start; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; transition: height 0.2s ease;
+    display: block; overflow: hidden; touch-action: pan-y;
     scrollbar-width: none; -webkit-overflow-scrolling: touch;
   }
   .pager::-webkit-scrollbar { display: none; }
-  .page { flex: 0 0 100%; min-width: 100%; scroll-snap-align: start; padding-right: 2px; }
+  .page { display: none; }
+  .page.aktiv { display: block; animation: seiteRein 0.24s ease-out; }
+  .page.aktiv.von-links { animation-name: seiteReinL; }
+  @keyframes seiteRein { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+  @keyframes seiteReinL { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .page.aktiv { animation: none; } }
   .page-title {
     font-size: 11px; color: #8a8a8a; margin: 0 0 10px; letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -2526,30 +2533,28 @@ async function handleStats(request, env) {
   const pager = document.getElementById('pager');
   const dots = [...document.querySelectorAll('.dot-nav')];
   const tabs = [...document.querySelectorAll('.tab-nav')];
-  [...dots, ...tabs].forEach(d => d.addEventListener('click', () => {
-    pager.scrollTo({ left: pager.clientWidth * Number(d.dataset.page), behavior: 'smooth' });
-    if (d.classList.contains('tab-nav')) window.scrollTo({ top: 0, behavior: 'smooth' });
-  }));
-  // HOEHE JE SEITE (gemeldet: "auf der zweiten Seite ist alles leer"): Der Bereich war so hoch wie die
-  // laengste Seite -- kuerzere Seiten hatten darunter eine leere Flaeche, und wer auf Seite 1 weit unten
-  // war, sah nach dem Wechsel nur Leere. Jetzt passt sich die Hoehe der offenen Seite an, und liegt man
-  // nach dem Wechsel unterhalb ihres Endes, springt die Ansicht an den Anfang.
   const seiten = [...pager.querySelectorAll('.page')];
-  let aktiv = -1;
-  const hoehe = i => {
-    const sp = seiten[i]; if (!sp) return;
-    pager.style.height = sp.scrollHeight + 'px';
-    const ende = pager.getBoundingClientRect().top + window.scrollY + sp.scrollHeight;
-    if (window.scrollY + 40 > ende - window.innerHeight * 0.3) window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-  pager.addEventListener('scroll', () => {
-    const i = Math.round(pager.scrollLeft / Math.max(1, pager.clientWidth));
+  let aktiv = 0;
+  function zeige(i) {
+    if (i < 0 || i >= seiten.length || i === aktiv && seiten[i].classList.contains('aktiv')) return;
+    const vonLinks = i < aktiv;
+    seiten.forEach((sp, j) => { sp.classList.toggle('aktiv', j === i); sp.classList.toggle('von-links', j === i && vonLinks); });
     dots.forEach((d, j) => d.classList.toggle('active', j === i));
     tabs.forEach((d, j) => d.classList.toggle('active', j === i));
-    if (i !== aktiv) { aktiv = i; hoehe(i); }
+    aktiv = i;
+    const oben = pager.getBoundingClientRect().top + window.scrollY - 70;
+    if (window.scrollY > oben) window.scrollTo({ top: Math.max(0, oben), behavior: 'smooth' });
+  }
+  [...dots, ...tabs].forEach(d => d.addEventListener('click', () => zeige(Number(d.dataset.page))));
+  // Wischen wie in der App: deutlich waagerecht (> 50 px und mehr als senkrecht) -> naechste/vorige Seite
+  let sx = 0, sy = 0, wisch = false;
+  pager.addEventListener('touchstart', e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; wisch = true; }, { passive: true });
+  pager.addEventListener('touchend', e => {
+    if (!wisch) return; wisch = false;
+    const t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.4) zeige(aktiv + (dx < 0 ? 1 : -1));
   }, { passive: true });
-  hoehe(0); aktiv = 0;
-  window.addEventListener('resize', () => hoehe(Math.max(0, aktiv)));
+  seiten.forEach((sp, j) => sp.classList.toggle('aktiv', j === 0));
 
   setInterval(refreshStats, REFRESH_MS);
 </script>
