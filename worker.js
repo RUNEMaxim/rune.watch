@@ -360,8 +360,7 @@ async function fetchVolumeBundle(env, ctx) {
 async function handleVolume(request, env, ctx) {
   
   try {
-    const _u = new URL(request.url);
-    recordVisitor(env, ctx, _u.searchParams.get('v'), _u.searchParams.get('w') === '1');
+    recordVisitor(env, ctx, request);
   } catch (e) {  }
   const result = await fetchVolumeBundle(env, ctx);
   // Der rollierende 24h-Wert ist eine Momentaufnahme -- er wird bei jeder Anfrage frisch
@@ -1080,44 +1079,56 @@ function getStatsExcludedAddresses(env) {
 // eingetragener Wallet -- nur die rufen /purchases, /wallets, /drawings, /swap-history
 // ueberhaupt auf. Wer nur Chart, Node-Karte oder Swap benutzt, taucht dort nie auf.
 //
-// /volume ruft dagegen jeder Besucher auf. Die App haengt dort ein Token an, das ihr Browser
-// selbst erzeugt hat -- eine Zufallszahl im localStorage. Keine IP, kein Fingerprint, keine
-// Verknuepfung mit einer Wallet, kein Cookie. Fuer niemanden ausser dem Browser selbst deutbar.
+// /volume ruft dagegen jeder Besucher auf. Wie dort gezaehlt wird, steht direkt darunter.
 //
 // Kosten: EIN Schreibvorgang je Geraet und Tag (INSERT OR IGNORE). Auch bei einem Nutzer, der
 // die Seite hundertmal am Tag oeffnet, bleibt es bei genau einer Zeile.
-const VISITOR_TOKEN_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
-// ANTEIL GERAETE MIT WALLET: zusaetzlich ein Ja/Nein (has_wallet), ob auf dem Geraet eine
-// Wallet eingetragen ist -- nie welche. Die Spalte wird nur von 0 auf 1 gehoben (einmal je
-// Geraet und Tag), es bleibt also bei hoechstens zwei Schreibvorgaengen je Geraet und Tag.
-// Fehlt die Spalte noch (Migration nicht ausgefuehrt), faellt es auf die alte Zaehlung zurueck.
-function recordVisitor(env, ctx, token, hasWallet) {
-  if (!env.DB || !ctx || typeof ctx.waitUntil !== 'function') return;
-  if (!token || !VISITOR_TOKEN_RE.test(token)) return;
+// ZAEHLUNG OHNE GERAETESPEICHER (§ 25 TDDDG, gewuenscht: "mach 1"). Frueher schickte die App eine
+// Zufallskennung aus ihrem localStorage mit (?v=...) und ein Ja/Nein "Wallet auf dem Geraet" (?w=1).
+// Beides braucht in Deutschland eine Einwilligung, weil es auf dem Geraet gespeichert bzw. ausgelesen
+// wird. Jetzt bildet der Worker den Code allein aus dem, was jede Anfrage ohnehin mitbringt:
+//   SHA-256( Tagesgeheimnis | IP | User-Agent ), gekuerzt auf 32 Hex-Zeichen.
+// Das Tagesgeheimnis ist eine Zufallszahl, die nur fuer den laufenden UTC-Tag in D1 liegt und danach
+// geloescht wird -- ein alter Code laesst sich dann nicht mehr auf eine IP zurueckrechnen. IP und
+// User-Agent werden nie gespeichert. Alte App-Fassungen, die noch v/w schicken, werden ignoriert.
+// GRENZE: Der Code wechselt jeden Tag. "Geraete pro Tag" bleibt genau; Zaehlungen ueber mehrere Tage
+// (7 Tage, 30 Tage, gesamt) zaehlen ein Geraet dagegen einmal JE TAG. Das Ja/Nein "mit Wallet" entfaellt.
+const VISITOR_TOKEN_RE = /^[0-9a-f]{32}$/;
+let tagesSalzCache = null; // { day, salz } -- spart den D1-Zugriff innerhalb einer Worker-Instanz
+async function tagesSalz(env, day) {
+  if (tagesSalzCache && tagesSalzCache.day === day) return tagesSalzCache.salz;
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS visitor_salz (day TEXT PRIMARY KEY, salz TEXT NOT NULL)').run();
+  const zufall = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  await env.DB.prepare('INSERT OR IGNORE INTO visitor_salz (day, salz) VALUES (?, ?)').bind(day, zufall).run();
+  const row = await env.DB.prepare('SELECT salz FROM visitor_salz WHERE day = ?').bind(day).first();
+  await env.DB.prepare('DELETE FROM visitor_salz WHERE day <> ?').bind(day).run(); // Vortage vergessen
+  tagesSalzCache = { day, salz: row && row.salz };
+  return tagesSalzCache.salz;
+}
+async function tagesZaehlcode(env, request, day) {
+  const ip = request.headers.get('CF-Connecting-IP') || '';
+  if (!ip) return null;
+  const ua = request.headers.get('User-Agent') || '';
+  const salz = await tagesSalz(env, day);
+  if (!salz) return null;
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(salz + '|' + ip + '|' + ua));
+  return [...new Uint8Array(hash)].slice(0, 16).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+function recordVisitor(env, ctx, request) {
+  if (!env.DB || !ctx || typeof ctx.waitUntil !== 'function' || !request) return;
   const now = Date.now();
   const day = utcDayString(now);
-  const alt = () => env.DB
-    .prepare('INSERT OR IGNORE INTO visitor_days (token, day, first_seen_at) VALUES (?, ?, ?)')
-    .bind(token, day, now)
-    .run();
-  ctx.waitUntil(
-    env.DB
-      .prepare(
-        `INSERT INTO visitor_days (token, day, first_seen_at, has_wallet) VALUES (?, ?, ?, ?)
-         ON CONFLICT(token, day) DO UPDATE SET has_wallet = 1
-         WHERE excluded.has_wallet = 1 AND visitor_days.has_wallet = 0`
-      )
-      .bind(token, day, now, hasWallet ? 1 : 0)
-      .run()
-      .catch((e) => {
-        console.warn('[rune-rewards-backend] recordVisitor: has_wallet fehlt (Migration 2?), alte Zaehlung:', e?.message || String(e));
-        return alt();
-      })
-      .catch((e) => {
-        console.warn('[rune-rewards-backend] recordVisitor fehlgeschlagen (Migration ausgeführt?):', e?.message || String(e));
-      })
-  );
+  ctx.waitUntil((async () => {
+    try {
+      const token = await tagesZaehlcode(env, request, day);
+      if (!token || !VISITOR_TOKEN_RE.test(token)) return;
+      await env.DB.prepare('INSERT OR IGNORE INTO visitor_days (token, day, first_seen_at) VALUES (?, ?, ?)')
+        .bind(token, day, now).run();
+    } catch (e) {
+      console.warn('[rune-rewards-backend] recordVisitor fehlgeschlagen:', e?.message || String(e));
+    }
+  })());
 }
 
 // AKTIV/PASSIV: Die App haengt ?a=1 (Nutzer hat in den letzten 5 Minuten bei sichtbarer Seite
@@ -1290,6 +1301,55 @@ async function handlePurchases(request, env, ctx) {
 
 const MAX_WALLETS_PAYLOAD_BYTES = 200_000;
 
+// WALLET-NAMEN UND PROFILBILDER GERAETEUEBERGREIFEND (gemeldet: "die Wallet-Namen und Profilbilder
+// sind auf anderen Geraeten nicht zu sehen"). Bisher lagen beide nur im localStorage des Geraets;
+// /wallets glich nur die Adressliste ab. Jetzt pro (Anker, Wallet) eine Zeile mit Name und Bild,
+// jeweils mit dem Zeitpunkt der letzten Aenderung auf dem Geraet: der NEUERE Stand gewinnt, je Feld
+// getrennt. Leerer Wert mit Zeitstempel = entfernt (damit "Bild entfernen" auch anderswo greift).
+// Die Tabelle legt sich selbst an -- keine Migration noetig. Aeltere App-Fassungen schicken kein
+// "profiles" mit und lassen die Profile damit unberuehrt.
+const MAX_PROFIL_NAME = 40;
+const MAX_PROFIL_BILD = 60_000;   // 128-px-JPEG als data:-URL, real meist 5-15 kB
+const MAX_PROFILE_JE_ANFRAGE = 50;
+async function walletProfileTabelle(env) {
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS user_wallet_profiles (address TEXT NOT NULL, wallet TEXT NOT NULL, label TEXT NOT NULL DEFAULT \'\', label_at INTEGER NOT NULL DEFAULT 0, bild TEXT NOT NULL DEFAULT \'\', bild_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (address, wallet))').run();
+}
+async function walletProfileLesen(env, address) {
+  await walletProfileTabelle(env);
+  const rows = ((await env.DB.prepare('SELECT wallet, label, label_at, bild, bild_at FROM user_wallet_profiles WHERE address = ?').bind(address).all()).results) || [];
+  const out = {};
+  for (const r of rows) out[r.wallet] = { label: r.label || '', labelAt: Number(r.label_at) || 0, bild: r.bild || '', bildAt: Number(r.bild_at) || 0 };
+  return out;
+}
+async function walletProfileSchreiben(env, address, profiles, erlaubt) {
+  if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) return;
+  const jetzt = Date.now() + 5 * 60 * 1000; // Zeitstempel aus der Zukunft (falsche Geraeteuhr) kappen
+  const zeilen = [];
+  for (const [wallet, p] of Object.entries(profiles).slice(0, MAX_PROFILE_JE_ANFRAGE)) {
+    if (typeof wallet !== 'string' || !wallet.trim() || wallet.length > 128 || !p || typeof p !== 'object') continue;
+    if (erlaubt && !erlaubt.has(wallet)) continue; // nur Wallets, die (noch) in der Liste stehen
+    let label = typeof p.label === 'string' ? p.label.trim().slice(0, MAX_PROFIL_NAME) : '';
+    let labelAt = Math.min(Number(p.labelAt) || 0, jetzt);
+    let bild = typeof p.bild === 'string' ? p.bild : '';
+    let bildAt = Math.min(Number(p.bildAt) || 0, jetzt);
+    // Nur echte Bilder als data:-URL annehmen; zu grosse/fremde Werte verwerfen (Feld bleibt unveraendert).
+    if (bild && (bild.length > MAX_PROFIL_BILD || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(bild))) { bild = ''; bildAt = 0; }
+    if (labelAt <= 0 && bildAt <= 0) continue;
+    zeilen.push([wallet, label, Math.max(0, labelAt), bild, Math.max(0, bildAt)]);
+  }
+  if (!zeilen.length) return;
+  await walletProfileTabelle(env);
+  const stmt = env.DB.prepare(
+    `INSERT INTO user_wallet_profiles (address, wallet, label, label_at, bild, bild_at) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(address, wallet) DO UPDATE SET
+       label    = CASE WHEN excluded.label_at > user_wallet_profiles.label_at THEN excluded.label ELSE user_wallet_profiles.label END,
+       label_at = MAX(user_wallet_profiles.label_at, excluded.label_at),
+       bild     = CASE WHEN excluded.bild_at > user_wallet_profiles.bild_at THEN excluded.bild ELSE user_wallet_profiles.bild END,
+       bild_at  = MAX(user_wallet_profiles.bild_at, excluded.bild_at)`
+  );
+  await env.DB.batch(zeilen.map((z) => stmt.bind(address, ...z)));
+}
+
 async function handleWallets(request, env, ctx) {
   const url = new URL(request.url);
   const address = url.searchParams.get('address');
@@ -1313,10 +1373,13 @@ async function handleWallets(request, env, ctx) {
       .all();
     const deletedAddrs = new Set((deletedRows.results || []).map((r) => r.deleted_wallet));
     if (deletedAddrs.size) wallets = wallets.filter((w) => !deletedAddrs.has(w));
+    let profiles = {};
+    try { profiles = await walletProfileLesen(env, address); } catch (e) { profiles = {}; }
     return json({
       address,
       wallets,
       deletedAddrs: [...deletedAddrs],
+      profiles,
       updatedAt: row ? row.updated_at : null,
     }, env);
   }
@@ -1366,6 +1429,12 @@ async function handleWallets(request, env, ctx) {
     }
 
     if (newlyDeletedOhne.length) {
+      // Name und Bild einer entfernten Wallet gleich mit vom Server nehmen.
+      try {
+        await walletProfileTabelle(env);
+        const delP = env.DB.prepare('DELETE FROM user_wallet_profiles WHERE address = ? AND wallet = ?');
+        await env.DB.batch(newlyDeletedOhne.map((w) => delP.bind(address, w)));
+      } catch (e) {}
       const now0 = Date.now();
       const stmt = env.DB.prepare(
         'INSERT OR IGNORE INTO user_wallet_lists_deleted (address, deleted_wallet, deleted_at) VALUES (?, ?, ?)'
@@ -1404,10 +1473,52 @@ async function handleWallets(request, env, ctx) {
       )
       .bind(address, serialized, now)
       .run();
-    return json({ address, updatedAt: now, wallets: merged, deletedAddrs: [...deletedAddrs] }, env);
+    // Profile (Name/Bild) nach der Liste schreiben; ein Fehler hier darf den Listen-Sync nicht kippen.
+    let profiles;
+    try {
+      if (body.profiles) await walletProfileSchreiben(env, address, body.profiles, new Set(merged));
+      profiles = await walletProfileLesen(env, address);
+    } catch (e) { profiles = undefined; }
+    return json({ address, updatedAt: now, wallets: merged, deletedAddrs: [...deletedAddrs], profiles }, env);
   }
 
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
+}
+
+// DATEN LOESCHEN (gewuenscht: "ich will, dass man seine Wallet loeschen kann"). Entfernt ALLES, was
+// rune.watch zu den angegebenen Adressen als Sync-Schluessel gespeichert hat: Wallet-Liste samt
+// Loesch-/Wiederherstellungsmarken, Namen und Profilbilder, Kaufliste, Chart-Zeichnungen, Swap-Verlauf
+// und die Aktivitaetszaehler der Statistik. Dazu die Zwischenspeicher, die der Server zu diesen Adressen
+// aus oeffentlichen Chain-Daten anlegt (Bond-Verlauf, Kontostand) -- sie sind zwar oeffentlich ableitbar,
+// haengen aber an der Adresse und werden bei einem erneuten Aufruf einfach neu berechnet.
+// Bewusst kein recordSyncActivity hier: sonst entstuende sofort wieder ein Eintrag.
+const LOESCH_TABELLEN = [
+  'user_wallet_lists', 'user_wallet_lists_deleted', 'user_wallet_lists_restored', 'user_wallet_profiles',
+  'user_purchases', 'user_purchases_deleted', 'user_chart_drawings', 'user_chart_drawings_deleted',
+  'user_swap_history', 'sync_activity_days', 'sync_activity_counts', 'sync_activity_art',
+  'balance_cache',
+  ['tracked_addresses', 'bond_address'], ['bond_history_rows', 'bond_address'],
+];
+async function handleDatenLoeschen(request, env) {
+  if (request.method !== 'POST') return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
+  let body = {};
+  try { body = await request.json(); } catch (e) { return json({ error: 'INVALID_BODY' }, env, 400); }
+  const adressen = [...new Set((Array.isArray(body.adressen) ? body.adressen : []).map((a) => String(a || '').trim().toLowerCase()))]
+    .filter((a) => isValidThorAddress(a)).slice(0, 50);
+  if (!adressen.length) return json({ error: 'INVALID_ADDRESS' }, env, 400);
+  const geloescht = {};
+  for (const eintrag of LOESCH_TABELLEN) {
+    const [t, spalte] = Array.isArray(eintrag) ? eintrag : [eintrag, 'address'];
+    // Jede Tabelle einzeln: fehlt eine (noch nie benutzt), sollen die anderen trotzdem geloescht werden.
+    try {
+      const stmt = env.DB.prepare(`DELETE FROM ${t} WHERE ${spalte} = ?`);
+      const res = await env.DB.batch(adressen.map((a) => stmt.bind(a)));
+      geloescht[t] = (res || []).reduce((n, r) => n + ((r && r.meta && r.meta.changes) || 0), 0);
+    } catch (e) {
+      if (!/no such table/i.test(String(e && e.message || e))) return json({ error: 'DELETE_FAILED', tabelle: t }, env, 500);
+    }
+  }
+  return json({ ok: true, adressen, geloescht }, env);
 }
 
 const MAX_DRAWINGS_PAYLOAD_BYTES = 500_000;
@@ -1810,9 +1921,10 @@ async function handleClick(request, env, ctx) {
   // Antwort immer 204, auch bei unbekanntem Ziel: der Klick des Nutzers soll nie an einer
   // Fehlermeldung haengen bleiben, das Ziel oeffnet ja parallel.
   if (!CLICK_TARGETS.has(target) || !env.DB) return new Response(null, { status: 204 });
-  const token = url.searchParams.get('v');
   const now = Date.now();
-  const sauber = token && VISITOR_TOKEN_RE.test(token) ? token : null;
+  // Tages-Zaehlcode wie bei recordVisitor (keine Geraetekennung mehr, siehe dort).
+  let sauber = null;
+  try { sauber = await tagesZaehlcode(env, request, utcDayString(now)); } catch (e) { sauber = null; }
   // HERKUNFT des Klicks (banner / node / liste / karte) -- nur feste Werte, alles andere leer.
   const qRoh = String(url.searchParams.get('q') || '').toLowerCase();
   const quelle = CLICK_QUELLEN.has(qRoh) ? qRoh : null;
@@ -4756,6 +4868,9 @@ export default {
       }
       if (url.pathname === '/wallets') {
         return await handleWallets(request, env, ctx);
+      }
+      if (url.pathname === '/daten-loeschen') {
+        return await handleDatenLoeschen(request, env);
       }
       if (url.pathname === '/drawings') {
         return await handleDrawings(request, env, ctx);
