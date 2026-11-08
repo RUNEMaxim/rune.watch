@@ -1773,7 +1773,6 @@ const RUNEBOND_API_BASES = [
   'https://api.runebond.com',
   'https://app.runebond.com',
   'https://runebond.com',
-  'https://integrators.runebond.com',
 ];
 const RUNEBOND_CACHE_MS = 10 * 60 * 1000;
 let runebondCache = { at: 0, data: null };
@@ -1859,17 +1858,75 @@ async function runebondVonDerChain() {
   return { listings, gelesen: aktionen.length };
 }
 
+// OFFIZIELLE INTEGRATORS-API (RUNEBond, Nov. 2026: "wir aendern die interne API wegen Junk-Traffic,
+// nutzt fuer Integrationen die Integrators-API"). GET /v1/runebond/listed-nodes mit Header x-api-key
+// (Pfade und Header laut @runebond/integrators-client 0.4.0). Liefert nur die Listing-Bedingungen;
+// Status und Bond Provider kommen wie vorgesehen von THORNode. Der Schluessel liegt als geheime
+// Worker-Variable RUNEBOND_API_KEY vor -- NIE im Code (das Repository ist oeffentlich).
+const RUNEBOND_INTEGRATORS_BASE = 'https://integrators.runebond.com';
+async function runebondVonIntegrators(env) {
+  const basis = String((env && env.RUNEBOND_INTEGRATORS_BASE) || RUNEBOND_INTEGRATORS_BASE).replace(/\/+$/, '');
+  const res = await fetchWithTimeout(basis + '/v1/runebond/listed-nodes', {
+    timeoutMs: 8000, headers: { accept: 'application/json', 'x-api-key': String(env.RUNEBOND_API_KEY).trim() },
+  });
+  if (!res.ok) throw new Error('integrators HTTP_' + res.status);
+  const j = await res.json();
+  const liste = Array.isArray(j && j.nodes) ? j.nodes : [];
+  if (!liste.length) throw new Error('integrators LEER');
+  let nachAddr = new Map();
+  try {
+    const nodes = await fetchNodes();
+    nachAddr = new Map((Array.isArray(nodes) ? nodes : []).map(n => [String(n.node_address).toLowerCase(), n]));
+  } catch (e) { /* ohne THORNode: Liste trotzdem ausliefern, nur ohne Status/Provider */ }
+  const basisEinheit = v => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x / 1e8 : null; };
+  const listings = liste.filter(e => e && e.nodeAddress).map(e => {
+    const addr = String(e.nodeAddress).toLowerCase();
+    const n = nachAddr.get(addr);
+    const prov = (n && n.bond_providers && n.bond_providers.providers) || [];
+    const ts = e.listedAt ? Date.parse(e.listedAt) : NaN;
+    return {
+      addr,
+      name: e.name || null,
+      minRune: basisEinheit(e.minBond),
+      maxRune: null,
+      fee: Number.isFinite(Number(e.feeBps)) ? Number(e.feeBps) / 100 : null, // 2000 bps = 20 %
+      providers: n ? prov.length : null,
+      target: basisEinheit(e.targetTotalBond),
+      status: n ? String(n.status || '') : null,
+      yieldGuard: false,
+      maxTimeToLeave: null,
+      listedAt: Number.isFinite(ts) ? ts : null,
+      logoUrl: e.logoUrl || null,
+      profileUrl: e.profileUrl || null,
+      source: 'integrators',
+    };
+  });
+  return { listings, base: basis };
+}
+
 async function handleRunebondNodes(request, env, ctx) {
   const jetzt = Date.now();
   if (runebondCache.data && jetzt - runebondCache.at < RUNEBOND_CACHE_MS) {
     return json(runebondCache.data, env);
+  }
+  // 1. Wahl: offizielle Integrators-API (mit Schluessel). Faellt sie aus, geht es wie bisher weiter
+  //    (alte oeffentliche API, dann die Listing-Memos direkt von der Chain).
+  let integratorsFehler = null;
+  if (env && env.RUNEBOND_API_KEY) {
+    try {
+      const r = await runebondVonIntegrators(env);
+      const daten = { listings: r.listings, fetchedAt: jetzt, base: r.base, error: null };
+      runebondCache = { at: jetzt, data: daten };
+      runebondLetzteGute = daten;
+      return json(daten, env);
+    } catch (e) { integratorsFehler = String(e && e.message || e); }
   }
   const kandidaten = (env && env.RUNEBOND_API_BASE)
     ? [String(env.RUNEBOND_API_BASE).replace(/\/+$/, '')]
     : RUNEBOND_API_BASES;
   const kopf = { accept: 'application/json' };
   // Optionaler Schluessel fuer die Integrators-API (integrators.runebond.com verlangt einen).
-  if (env && env.RUNEBOND_API_KEY) kopf['x-api-key'] = String(env.RUNEBOND_API_KEY);
+  // (Kein Schluessel mehr an die alte API -- der Integrators-Schluessel gehoert nur zu integrators.runebond.com.)
   try {
     let roh = null, letzterFehler = null, basisGenutzt = null;
     for (const basis of kandidaten) {
@@ -1886,7 +1943,7 @@ async function handleRunebondNodes(request, env, ctx) {
       // Ohne erreichbare API: dieselben Eintraege direkt aus den Listing-Memos auf der Chain.
       const c = await runebondVonDerChain();
       if (!c.listings.length) throw letzterFehler || new Error('KEINE_QUELLE');
-      const daten = { listings: c.listings, fetchedAt: jetzt, base: 'chain (' + c.gelesen + ' Memos)', error: null, apiFehler: letzterFehler ? String(letzterFehler.message || letzterFehler) : null };
+      const daten = { listings: c.listings, fetchedAt: jetzt, base: 'chain (' + c.gelesen + ' Memos)', error: null, apiFehler: letzterFehler ? String(letzterFehler.message || letzterFehler) : null, integratorsFehler };
       runebondCache = { at: jetzt, data: daten };
       runebondLetzteGute = daten;
       return json(daten, env);
