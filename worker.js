@@ -1131,6 +1131,57 @@ function recordVisitor(env, ctx, request) {
   })());
 }
 
+// ADRESSEN IN DER NUTZUNGSSTATISTIK PSEUDONYMISIERT (gewuenscht, "wie RUNEBond"). Statt der Wallet-
+// Adresse speichern sync_activity_days / _counts / _art einen Code: "h:" + HMAC-SHA256(Schluessel,
+// Adresse), gekuerzt auf 32 Hex-Zeichen. Der Schluessel liegt als geheime Worker-Variable
+// STATS_SCHLUESSEL vor und darf NIE geaendert werden -- dieselbe Adresse ergibt so immer denselben Code,
+// alle Zaehlungen (Tage, 7/30 Tage, Wiederkehr, Kohorten, aktiv/passiv, Marktanalyse) bleiben exakt.
+// Wer nur die Datenbank sieht, sieht keine Adresse mehr. Rechtlich ist das Pseudonymisierung: mit dem
+// Schluessel laesst sich zu einer BEKANNTEN Adresse der Code bilden (genau das tut die Marktanalyse).
+// Ohne Variable bleibt alles wie bisher (Klartext); sobald sie gesetzt ist, wandelt statsMigrieren die
+// vorhandenen Zeilen einmalig um.
+const STATS_TABELLEN = ['sync_activity_days', 'sync_activity_counts', 'sync_activity_art'];
+let statsSchluesselCache = null; // { roh, key }
+async function statsSchluessel(env) {
+  // trim(): ein beim Einfuegen mitkopierter Zeilenumbruch darf den Schluessel nicht veraendern.
+  const roh = env && env.STATS_SCHLUESSEL ? String(env.STATS_SCHLUESSEL).trim() : '';
+  if (!roh) return null;
+  if (statsSchluesselCache && statsSchluesselCache.roh === roh) return statsSchluesselCache.key;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(roh), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  statsSchluesselCache = { roh, key };
+  return key;
+}
+async function statsCode(env, adresse) {
+  const a = String(adresse || '').trim().toLowerCase();
+  if (!a || a.startsWith('h:')) return a;
+  const key = await statsSchluessel(env);
+  if (!key) return a;
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(a));
+  return 'h:' + [...new Uint8Array(sig)].slice(0, 16).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+const statsCodes = (env, liste) => Promise.all([...liste].map((a) => statsCode(env, a)));
+let statsMigriert = false;
+async function statsMigrieren(env) {
+  if (statsMigriert || !env.DB || !(await statsSchluessel(env))) return;
+  for (const t of STATS_TABELLEN) {
+    for (let runde = 0; runde < 200; runde++) {
+      let rows;
+      try { rows = ((await env.DB.prepare(`SELECT DISTINCT address FROM ${t} WHERE address LIKE 'thor1%' LIMIT 100`).all()).results) || []; }
+      catch (e) { break; } // Tabelle gibt es (noch) nicht
+      if (!rows.length) break;
+      const stmts = [];
+      for (const r of rows) {
+        const code = await statsCode(env, r.address);
+        // OR IGNORE + DELETE: falls fuer denselben Tag schon eine Zeile mit Code existiert, gewinnt diese.
+        stmts.push(env.DB.prepare(`UPDATE OR IGNORE ${t} SET address = ? WHERE address = ?`).bind(code, r.address));
+        stmts.push(env.DB.prepare(`DELETE FROM ${t} WHERE address = ?`).bind(r.address));
+      }
+      await env.DB.batch(stmts);
+    }
+  }
+  statsMigriert = true;
+}
+
 // AKTIV/PASSIV: Die App haengt ?a=1 (Nutzer hat in den letzten 5 Minuten bei sichtbarer Seite
 // etwas getan) bzw. ?a=0 (Tab offen im Hintergrund, Timer) an. Fehlt der Parameter (alte App),
 // wird nur wie bisher gezaehlt. Tabelle sync_activity_art: je Adresse und Tag aktive/passive
@@ -1143,37 +1194,28 @@ function recordSyncActivity(env, ctx, address, request = null) {
   const day = utcDayString(now);
   let art = null;
   try { const a = request ? new URL(request.url).searchParams.get('a') : null; if (a === '1') art = 'aktiv'; else if (a === '0') art = 'passiv'; } catch (e) {}
-  if (art) {
-    ctx.waitUntil((async () => {
+  ctx.waitUntil((async () => {
+    let code;
+    try { await statsMigrieren(env); code = await statsCode(env, address); }
+    catch (e) { console.warn('[rune-rewards-backend] Stats-Code:', e?.message || e); return; }
+    if (art) {
       try {
         if (!syncArtTabelleOk) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS sync_activity_art (address TEXT, day TEXT, aktiv INTEGER DEFAULT 0, passiv INTEGER DEFAULT 0, PRIMARY KEY (address, day))').run(); syncArtTabelleOk = true; }
         await env.DB.prepare(`INSERT INTO sync_activity_art (address, day, aktiv, passiv) VALUES (?, ?, ?, ?)
           ON CONFLICT(address, day) DO UPDATE SET aktiv = aktiv + excluded.aktiv, passiv = passiv + excluded.passiv`)
-          .bind(address, day, art === 'aktiv' ? 1 : 0, art === 'passiv' ? 1 : 0).run();
+          .bind(code, day, art === 'aktiv' ? 1 : 0, art === 'passiv' ? 1 : 0).run();
       } catch (e) { console.warn('[rune-rewards-backend] sync_activity_art:', e?.message || e); }
-    })());
-  }
-
-  const dedupTask = env.DB
-    .prepare('INSERT OR IGNORE INTO sync_activity_days (address, day, first_seen_at) VALUES (?, ?, ?)')
-    .bind(address, day, now)
-    .run()
-    .catch((e) => {
-      console.error('[rune-rewards-backend] recordSyncActivity (dedup) failed:', e && e.message || e);
-    });
-
-  const countTask = env.DB
-    .prepare(
-      `INSERT INTO sync_activity_counts (address, day, count) VALUES (?, ?, 1)
-       ON CONFLICT(address, day) DO UPDATE SET count = count + 1`
-    )
-    .bind(address, day)
-    .run()
-    .catch((e) => {
-      console.error('[rune-rewards-backend] recordSyncActivity (count) failed:', e && e.message || e);
-    });
-
-  ctx.waitUntil(Promise.all([dedupTask, countTask]));
+    }
+    await Promise.all([
+      env.DB.prepare('INSERT OR IGNORE INTO sync_activity_days (address, day, first_seen_at) VALUES (?, ?, ?)')
+        .bind(code, day, now).run()
+        .catch((e) => { console.error('[rune-rewards-backend] recordSyncActivity (dedup) failed:', e && e.message || e); }),
+      env.DB.prepare(`INSERT INTO sync_activity_counts (address, day, count) VALUES (?, ?, 1)
+         ON CONFLICT(address, day) DO UPDATE SET count = count + 1`)
+        .bind(code, day).run()
+        .catch((e) => { console.error('[rune-rewards-backend] recordSyncActivity (count) failed:', e && e.message || e); }),
+    ]);
+  })());
 }
 
 const MAX_PURCHASES_PAYLOAD_BYTES = 2_000_000;
@@ -1507,12 +1549,14 @@ async function handleDatenLoeschen(request, env) {
     .filter((a) => isValidThorAddress(a)).slice(0, 50);
   if (!adressen.length) return json({ error: 'INVALID_ADDRESS' }, env, 400);
   const geloescht = {};
+  const codes = await statsCodes(env, adressen); // Statistik speichert Codes statt Adressen
   for (const eintrag of LOESCH_TABELLEN) {
     const [t, spalte] = Array.isArray(eintrag) ? eintrag : [eintrag, 'address'];
+    const werte = STATS_TABELLEN.includes(t) ? [...new Set([...adressen, ...codes])] : adressen;
     // Jede Tabelle einzeln: fehlt eine (noch nie benutzt), sollen die anderen trotzdem geloescht werden.
     try {
       const stmt = env.DB.prepare(`DELETE FROM ${t} WHERE ${spalte} = ?`);
-      const res = await env.DB.batch(adressen.map((a) => stmt.bind(a)));
+      const res = await env.DB.batch(werte.map((a) => stmt.bind(a)));
       geloescht[t] = (res || []).reduce((n, r) => n + ((r && r.meta && r.meta.changes) || 0), 0);
     } catch (e) {
       if (!/no such table/i.test(String(e && e.message || e))) return json({ error: 'DELETE_FAILED', tabelle: t }, env, 500);
@@ -2024,14 +2068,20 @@ async function handleMarkt(request, env) {
       for (const x of w) { const a = String((x && (x.address || x)) || '').toLowerCase(); if (a.startsWith('thor1')) rw.add(a); }
     }
   } catch (e) {}
+  // Statistik-Adressen sind Codes (siehe statsCode): Abgleich deshalb ueber Codes -- Wallet-Listen und
+  // Bonder-Adressen werden mit demselben Schluessel umgerechnet. Ohne Schluessel ist Code = Adresse.
+  await statsMigrieren(env).catch(() => {});
+  const rwCodes = new Set(await statsCodes(env, rw));
   try {
     const rows = await env.DB.prepare('SELECT DISTINCT address FROM sync_activity_days').all();
-    for (const r of (rows.results || [])) { const a = String(r.address || '').toLowerCase(); if (a.startsWith('thor1')) rw.add(a); }
+    for (const r of (rows.results || [])) { const a = String(r.address || '').toLowerCase(); if (a.startsWith('thor1') || a.startsWith('h:')) rwCodes.add(await statsCode(env, a)); }
   } catch (e) {}
+  const bonderCodes = new Map();
+  for (const [a, v] of bonder) bonderCodes.set(await statsCode(env, a), v);
   let rwBonder = 0, rwBond = 0;
-  for (const a of rw) if (bonder.has(a)) { rwBonder++; rwBond += bonder.get(a); }
+  for (const c of rwCodes) if (bonderCodes.has(c)) { rwBonder++; rwBond += bonderCodes.get(c); }
   erg.runeWatch = {
-    adressen: rw.size,
+    adressen: rwCodes.size,
     davonBonder: rwBonder,
     anteilAnBondern: bonder.size ? Math.round(rwBonder / bonder.size * 1000) / 10 : null,
     bondRUNE: Math.round(rwBond),
@@ -2085,7 +2135,9 @@ async function handleStats(request, env) {
   const day7 = utcDayString(now - 7 * 24 * 60 * 60 * 1000);
   const day30 = utcDayString(now - 30 * 24 * 60 * 60 * 1000);
 
-  const excl = [...getStatsExcludedAddresses(env)];
+  await statsMigrieren(env).catch(() => {});
+  const exclRoh = [...getStatsExcludedAddresses(env)];
+  const excl = [...new Set([...exclRoh, ...(await statsCodes(env, exclRoh))])];
   const exclSql = excl.length ? ` AND LOWER(address) NOT IN (${excl.map(() => '?').join(',')})` : '';
 
   const [
