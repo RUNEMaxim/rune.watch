@@ -2250,8 +2250,12 @@ async function handleStats(request, env) {
       }),
     
     env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day1).first().catch(() => ({ n: null })),
-    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day7).first().catch(() => ({ n: null })),
-    env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days WHERE day >= ?').bind(day30).first().catch(() => ({ n: null })),
+    // SEIT DER ZAEHLUNG OHNE GERAETESPEICHER wechselt der Code taeglich -- "verschiedene Geraete in 7/30
+    // Tagen" waere nicht mehr aussagekraeftig. Stattdessen: Geraete-Tage der letzten 7 bzw. 30 VOLLEN
+    // Tage (ohne den laufenden). Geteilt durch die Tage ergibt das den Schnitt Geraete pro Tag -- das ist
+    // vor und nach der Umstellung gleich gezaehlt (je Geraet und Tag eine Zeile).
+    env.DB.prepare('SELECT COUNT(*) AS n, COUNT(DISTINCT day) AS t FROM visitor_days WHERE day >= ? AND day < ?').bind(day7, day1).first().catch(() => ({ n: null })),
+    env.DB.prepare('SELECT COUNT(*) AS n, COUNT(DISTINCT day) AS t FROM visitor_days WHERE day >= ? AND day < ?').bind(day30, day1).first().catch(() => ({ n: null })),
     env.DB.prepare('SELECT COUNT(DISTINCT token) AS n FROM visitor_days').first().catch(() => ({ n: null })),
     env.DB.prepare('SELECT MIN(day) AS d FROM visitor_days').first().catch(() => ({ d: null })),
     // Geraete mit eingetragener Wallet (has_wallet). Ohne Migration 2 -> null, Kachel zeigt "—".
@@ -2314,24 +2318,16 @@ async function handleStats(request, env) {
       : null,
     
     visitorsLast1d: vis1Row?.n ?? null,
-    visitorsLast7d: vis7Row?.n ?? null,
-    visitorsLast30d: vis30Row?.n ?? null,
-    visitorsTotal: visTotalRow?.n ?? null,
+    // Schnitt Geraete pro Tag (volle Tage); Tage ohne Aufzeichnung zaehlen nicht mit.
+    visitorsAvgDay7: vis7Row && vis7Row.t > 0 ? Math.round(vis7Row.n / vis7Row.t * 10) / 10 : null,
+    visitorsAvgDay30: vis30Row && vis30Row.t > 0 ? Math.round(vis30Row.n / vis30Row.t * 10) / 10 : null,
     visitorsSince: visSinceRow?.d ?? null,
-    visitorsWithWalletLast1d: visW1Row?.n ?? null,
-    visitorsWithWalletLast30d: visW30Row?.n ?? null,
-    visitorsWithWalletSince: visWSinceRow?.d ?? null,
     runebondClicksLast1d: klick1Row?.n ?? null,
     runebondClicksLast30d: klick30Row?.n ?? null,
     runebondClicksTotal: klickGesamtRow?.n ?? null,
-    runebondClickDevices: klickGeraeteRow?.n ?? null,
     runebondClicksBySource30d: klickQuellenRows && Array.isArray(klickQuellenRows.results) ? klickQuellenRows.results : null,
     runebondRef: await runebondEmpfehlungen(env).catch(() => null),
   };
-  // Anteil in Prozent, eine Nachkommastelle. Nenner = alle Geraete im selben Zeitraum.
-  const walletPct = (n, total) => (n == null || !total) ? null : Math.round((n / total) * 1000) / 10;
-  stats.walletShareLast1d = walletPct(stats.visitorsWithWalletLast1d, stats.visitorsLast1d);
-  stats.walletShareLast30d = walletPct(stats.visitorsWithWalletLast30d, stats.visitorsLast30d);
 
   // KOHORTEN: Adressen nach Woche ihres ersten Syncs; je Kohorte der Anteil, der in Woche
   // 0, 1, 2 ... danach wieder aktiv war. Zeigt, ob neue Nutzer bleiben.
@@ -2612,15 +2608,11 @@ async function handleStats(request, env) {
       <div class="page-title">2 · Visitors (anonymous, all devices)</div>
       <div class="grid">
         <div class="sec">Devices</div>
-        ${tile('vis1', 'Devices – 24h', stats.visitorsLast1d, 'distinct devices in the last 24h')}
-        ${tile('vis7', 'Devices – 7 days', stats.visitorsLast7d)}
-        ${tile('vis30', 'Devices – 30 days', stats.visitorsLast30d)}
-        ${tile('vistotal', 'Devices total', stats.visitorsTotal, visitorHint)}
-        <div class="sec">Wallet entered</div>
-        ${tile('wshare1', 'With wallet – 24h', stats.walletShareLast1d == null ? null : stats.walletShareLast1d + '%',
-          stats.visitorsWithWalletLast1d == null ? 'no data yet' : `${stats.visitorsWithWalletLast1d} of ${stats.visitorsLast1d} devices have a wallet entered`)}
-        ${tile('wshare30', 'With wallet – 30 days', stats.walletShareLast30d == null ? null : stats.walletShareLast30d + '%',
-          stats.visitorsWithWalletLast30d == null ? 'no data yet' : `${stats.visitorsWithWalletLast30d} of ${stats.visitorsLast30d} devices` + (stats.visitorsWithWalletSince ? ` · recorded since ${deDate(stats.visitorsWithWalletSince)}` : ''))}
+        ${tile('vis1', 'Devices – today', stats.visitorsLast1d, 'distinct devices today (UTC)')}
+        ${tile('vis7', '\u00d8 devices per day – 7 days', stats.visitorsAvgDay7, 'average of the last 7 full days')}
+        ${tile('vis30', '\u00d8 devices per day – 30 days', stats.visitorsAvgDay30, 'average of the last 30 full days')}
+        <div class="tile wide" style="font-size:12px;color:var(--muted,#888);line-height:1.5">Counted without storing anything on the device (daily changing code). Devices can be counted per day, but not across several days \u2013 multi-day totals, returning devices and \u201cwith wallet\u201d were removed. Returning users: see the Addresses tab.</div>
+        <!-- Wallet-Anteil entfernt: wird ohne Geraetespeicher nicht mehr erfasst. -->
         <div class="sec">RUNEBond</div>
         ${stats.runebondRef && stats.runebondClicksTotal > 0 ? tile('rbconv', 'Clicks that became a request', Math.round(stats.runebondRef.anfragen / stats.runebondClicksTotal * 1000) / 10 + ' %',
           `${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} from ${stats.runebondClicksTotal} clicks \u00b7 ${stats.runebondRef.gebondet} bonded`) : ''}
@@ -2628,8 +2620,6 @@ async function handleStats(request, env) {
           stats.runebondRef ? `${stats.runebondRef.runeGebondet.toLocaleString('en-US')} RUNE bonded \u00b7 ${stats.runebondRef.anfragen} whitelist request${stats.runebondRef.anfragen === 1 ? '' : 's'} \u00b7 ${stats.runebondRef.wallets} wallet${stats.runebondRef.wallets === 1 ? '' : 's'}` : 'RUNEBond data not available')}
         ${tile('rb1', 'RUNEBond clicks', stats.runebondClicksTotal,
           stats.runebondClicksLast1d == null ? 'no data yet' : `${stats.runebondClicksLast1d} in the last 24h`)}
-        ${tile('rbdev', 'Devices that clicked', stats.runebondClickDevices,
-          stats.runebondClicksTotal == null ? 'no data yet' : `the ${stats.runebondClicksTotal} clicks came from these devices`)}
         ${(() => {
           // Aufteilung nach Herkunft: gross die Summe (30 Tage), darunter je Quelle eine Zeile.
           // Vorher stand die ganze Aufzaehlung als "Zahl" in der grossen Schrift der Kachel.
@@ -2717,22 +2707,11 @@ async function handleStats(request, env) {
     setText('v-avgreq', avgVal == null ? '—' : avgVal);
     setText('v-depth-base', latestStats.depthBase);
     setText('v-vis1', latestStats.visitorsLast1d);
-    setText('v-vis7', latestStats.visitorsLast7d);
-    setText('v-vis30', latestStats.visitorsLast30d);
-    setText('v-vistotal', latestStats.visitorsTotal);
-    setText('h-vistotal', latestStats.visitorsSince ? 'since ' + deDate(latestStats.visitorsSince) : 'not recording yet');
+    setText('v-vis7', latestStats.visitorsAvgDay7 == null ? '\u2014' : latestStats.visitorsAvgDay7);
+    setText('v-vis30', latestStats.visitorsAvgDay30 == null ? '\u2014' : latestStats.visitorsAvgDay30);
     setText('v-rb1', latestStats.runebondClicksTotal == null ? '—' : latestStats.runebondClicksTotal);
     setText('h-rb1', latestStats.runebondClicksLast1d == null ? 'no data yet' : latestStats.runebondClicksLast1d + ' in the last 24h');
-    setText('v-rbdev', latestStats.runebondClickDevices == null ? '—' : latestStats.runebondClickDevices);
     if (latestStats.runebondRef) { setText('v-rbref', latestStats.runebondRef.gebondet); setText('h-rbref', latestStats.runebondRef.runeGebondet.toLocaleString('en-US') + ' RUNE bonded \u00b7 ' + latestStats.runebondRef.anfragen + ' whitelist request' + (latestStats.runebondRef.anfragen === 1 ? '' : 's') + ' \u00b7 ' + latestStats.runebondRef.wallets + ' wallet' + (latestStats.runebondRef.wallets === 1 ? '' : 's')); }
-    setText('h-rbdev', latestStats.runebondClicksTotal == null ? 'no data yet' : 'the ' + latestStats.runebondClicksTotal + ' clicks came from these devices');
-    setText('v-wshare1', latestStats.walletShareLast1d == null ? '—' : latestStats.walletShareLast1d + '%');
-    setText('v-wshare30', latestStats.walletShareLast30d == null ? '—' : latestStats.walletShareLast30d + '%');
-    setText('h-wshare1', latestStats.visitorsWithWalletLast1d == null ? 'no data yet'
-      : latestStats.visitorsWithWalletLast1d + ' of ' + latestStats.visitorsLast1d + ' devices have a wallet entered');
-    setText('h-wshare30', latestStats.visitorsWithWalletLast30d == null ? 'no data yet'
-      : latestStats.visitorsWithWalletLast30d + ' of ' + latestStats.visitorsLast30d + ' devices'
-        + (latestStats.visitorsWithWalletSince ? ' · recorded since ' + deDate(latestStats.visitorsWithWalletSince) : ''));
     (latestStats.engagementDepth || []).forEach(row => {
       const bar = document.getElementById('v-depth-bar-' + row.minDays);
       if (bar) bar.style.width = (row.pct == null ? 0 : row.pct) + '%';
@@ -6375,6 +6354,17 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   return erg;
 }
 const runeTxt = x => Number(x).toLocaleString('en-US', { maximumFractionDigits: Math.abs(x) >= 100 ? 1 : 2 });
+// VULTISIG-HINWEIS IN PUSH-NACHRICHTEN (gewuenscht: "wenn User Push-Nachrichten bekommen, soll auch drin
+// stehen, dass man mit Vultisig bonden kann"). Kurz, ans Ende -- iOS zeigt nur ein paar Zeilen.
+const vultisigHinweis = (de, art) => {
+  const T = {
+    bond: de ? 'Mehr bonden: mit Vultisig in rune.watch' : 'Bond more: with Vultisig on rune.watch',
+    neu: de ? 'Neu bonden: mit Vultisig in rune.watch' : 'Bond again: with Vultisig on rune.watch',
+    name: de ? 'Verl\u00e4ngern: mit Vultisig in rune.watch' : 'Renew: with Vultisig on rune.watch',
+    tcy: de ? 'Mehr staken: mit Vultisig in rune.watch' : 'Stake more: with Vultisig on rune.watch',
+  };
+  return ' \u00b7 ' + (T[art] || T.bond);
+};
 async function syncPushPersoenlich(env) {
   const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
   const subs = r.results || [];
@@ -6479,8 +6469,8 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       }
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
       // Nur melden, wenn die Adresse noch im Abo ist -- sonst wurde nur eine Wallet entfernt.
-      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1 && (!a.pa || Object.keys(a.pa).some(k => adr.includes(k)))) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)`, tag: 'rw-refund-' + na });
-      if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : ''), tag: 'rw-churn-' + churnH });
+      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1 && (!a.pa || Object.keys(a.pa).some(k => adr.includes(k)))) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` + vultisigHinweis(de, 'neu') : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)` + vultisigHinweis(de, 'neu'), tag: 'rw-refund-' + na });
+      if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : '') + vultisigHinweis(de, 'bond'), tag: 'rw-churn-' + churnH });
     }
     // WOCHEN-REVIEW (gewuenscht): Rewards der Woche mitzaehlen und montags um 8:00 UTC eine
     // Zusammenfassung schicken -- Rewards in RUNE und $, Zahl der Churns, aktueller Bond, RUNE-Kurs
@@ -6535,7 +6525,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
                                  : (de ? 'Keine neuen Rewards (kein Churn)' : 'No new rewards (no churn)'));
           teile.push((de ? 'Bond ' : 'Bond ') + runeTxt(bondJetzt) + ' RUNE');
           if (preis) teile.push('RUNE $' + preis.toFixed(3) + (pr != null ? ` (${pr >= 0 ? '+' : ''}${pr.toFixed(1)} %)` : ''));
-          meldungen.push({ titel: de ? 'Deine Woche bei THORChain' : 'Your week on THORChain', text: teile.join(' \u00b7 '), tag: 'rw-woche-' + w.key });
+          meldungen.push({ titel: de ? 'Deine Woche bei THORChain' : 'Your week on THORChain', text: teile.join(' \u00b7 ') + vultisigHinweis(de, 'bond'), tag: 'rw-woche-' + w.key });
         }
         z.woche = { key: wocheKey, rune: 0, churns: 0, preis0: preis || null };
       }
@@ -6582,7 +6572,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
           if (!erste && gestakt > 0 && rune >= 0.01) {
             const usd = preis ? ` ($${(rune * preis).toFixed(rune * preis < 10 ? 2 : 0)})` : '';
             meldungen.push({ titel: de ? 'TCY-Auszahlung' : 'TCY payout',
-              text: de ? `+${runeTxt(rune)} RUNE${usd} f\u00fcr ${runeTxt(gestakt)} gestakte TCY` : `+${runeTxt(rune)} RUNE${usd} for ${runeTxt(gestakt)} staked TCY`,
+              text: (de ? `+${runeTxt(rune)} RUNE${usd} f\u00fcr ${runeTxt(gestakt)} gestakte TCY` : `+${runeTxt(rune)} RUNE${usd} for ${runeTxt(gestakt)} staked TCY`) + vultisigHinweis(de, 'tcy'),
               tag: 'rw-tcy-' + ref.tag });
           }
         }
@@ -6601,7 +6591,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
             const ex = Number(info && info.expire_block_height);
             if (!ex || !h) continue;
             const tage = (ex - h) * 6 / 86400;
-            if (tage > 0 && tage < 30) meldungen.push({ titel: 'THORName', text: de ? `\u201e${nm}\u201c l\u00e4uft in etwa ${Math.ceil(tage)} Tagen ab` : `"${nm}" expires in about ${Math.ceil(tage)} days`, tag: 'rw-tn-' + nm });
+            if (tage > 0 && tage < 30) meldungen.push({ titel: 'THORName', text: (de ? `\u201e${nm}\u201c l\u00e4uft in etwa ${Math.ceil(tage)} Tagen ab` : `"${nm}" expires in about ${Math.ceil(tage)} days`) + vultisigHinweis(de, 'name'), tag: 'rw-tn-' + nm });
           }
         }
       } catch (e) {}
