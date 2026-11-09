@@ -1235,6 +1235,25 @@ function sanitizeSettings(raw) {
   return Object.keys(out).length ? out : null;
 }
 
+// KAEUFE MIT TRANSAKTION NUR EINMAL (gemeldet: "auf dem PC stimmt der Durchschnittspreis, auf dem
+// Handy nicht -- dort andere DEX-Kaeufe"): Jedes Geraet hat erkannte On-Chain-Kaeufe mit EIGENER,
+// zufaelliger ID angelegt. Derselbe Swap stand dadurch mehrfach in der Liste, und ein auf einem Geraet
+// geloeschter DEX-Kauf kam vom anderen mit neuer ID zurueck. Jetzt:
+//  - gleiche Transaktion (txId) = derselbe Kauf, nur der erste bleibt,
+//  - Loeschmarke "tx:<txId>" gilt fuer jede Kopie dieser Transaktion, egal mit welcher ID.
+function kaeufeBereinigen(liste, deletedIds) {
+  const gesehen = new Set();
+  return liste.filter((p) => {
+    if (!p) return false;
+    if (p.id && deletedIds.has(p.id)) return false;
+    const tx = p.txId ? String(p.txId).toLowerCase() : null;
+    if (tx) {
+      if (deletedIds.has('tx:' + tx) || gesehen.has(tx)) return false;
+      gesehen.add(tx);
+    }
+    return true;
+  });
+}
 async function handlePurchases(request, env, ctx) {
   const url = new URL(request.url);
   const address = url.searchParams.get('address');
@@ -1261,7 +1280,7 @@ async function handlePurchases(request, env, ctx) {
       .bind(address)
       .all();
     const deletedIds = new Set((deletedRows.results || []).map((r) => r.deleted_id));
-    if (deletedIds.size) purchases = purchases.filter((p) => !p.id || !deletedIds.has(p.id));
+    purchases = kaeufeBereinigen(purchases, deletedIds);
     return json({
       address,
       purchases,
@@ -1321,7 +1340,7 @@ async function handlePurchases(request, env, ctx) {
       const alreadyThere = row.id ? merged.some((p) => p.id === row.id) : false;
       if (!alreadyThere) merged.push(row);
     }
-    const finalList = deletedIds.size ? merged.filter((p) => !p.id || !deletedIds.has(p.id)) : merged;
+    const finalList = kaeufeBereinigen(merged, deletedIds);
 
     const serialized = JSON.stringify(finalList);
     if (serialized.length > MAX_PURCHASES_PAYLOAD_BYTES) {
