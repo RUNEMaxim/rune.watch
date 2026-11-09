@@ -6499,6 +6499,35 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       const sendeZeit = montag.getTime() + 8 * 3600e3;
       if (z.woche.key !== wocheKey && Date.now() >= sendeZeit) {
         const w = z.woche;
+        // REWARDS AUS DER REWARD-HISTORIE (gemeldet: "falsche Angaben an Rewards" -- +2.623 RUNE aus 1 Churn,
+        // obwohl der Bond in der Woche gleich blieb). Bisher zaehlte der Bericht jeden Bond-Anstieg bei einem
+        // Churn-Wechsel; lag die gespeicherte Basis zu alt oder zu niedrig, landeten Einzahlungen bzw. mehrere
+        // Wochen Zuwachs als "Reward" im Bericht. Jetzt dieselbe Quelle wie die Rewards-Historie der App
+        // (bond_history_rows: Reward je Adresse und Churn), nur Churns aus der berichteten Woche. Fehlt dort
+        // der letzte Churn, wird die Adresse vorher nachgeladen. Nur wenn es gar keine Historie gibt, bleibt
+        // die alte Zaehlung als Rueckfall.
+        try {
+          const von = Date.parse(w.key + 'T00:00:00Z'), bis = von + 7 * 86400e3;
+          const adrListe = adr.filter(a => isValidThorAddress(a)).slice(0, 20);
+          if (adrListe.length && Number.isFinite(von)) {
+            const letzter = await env.DB.prepare('SELECT MAX(height) AS h FROM churns_cache').first().catch(() => null);
+            for (const a of adrListe) {
+              const tr = await env.DB.prepare('SELECT * FROM tracked_addresses WHERE bond_address = ?').bind(a).first().catch(() => null);
+              if (!tr) continue;
+              const mx = await env.DB.prepare('SELECT MAX(churn_height) AS h FROM bond_history_rows WHERE bond_address = ?').bind(a).first().catch(() => null);
+              if (letzter && letzter.h && (!mx || !mx.h || letzter.h > mx.h)) { try { await refreshOneAddress(env, tr, Date.now()); } catch (e) {} }
+            }
+            const platz = adrListe.map(() => '?').join(',');
+            const rr = await env.DB.prepare(`SELECT churn_height, SUM(reward_amount) AS s FROM bond_history_rows WHERE bond_address IN (${platz}) AND reward_amount IS NOT NULL AND churn_timestamp >= ? AND churn_timestamp < ? GROUP BY churn_height`)
+              .bind(...adrListe, von, bis).all();
+            const zeilen = (rr && rr.results) || [];
+            const gibtHistorie = await env.DB.prepare(`SELECT COUNT(*) AS n FROM bond_history_rows WHERE bond_address IN (${platz})`).bind(...adrListe).first().catch(() => null);
+            if (gibtHistorie && gibtHistorie.n > 0) {
+              w.rune = zeilen.reduce((q, x) => q + (Number(x.s) || 0), 0);
+              w.churns = zeilen.filter(x => Number(x.s) > 0).length;
+            }
+          }
+        } catch (e) { console.warn('[push] Wochen-Rewards aus Historie:', e?.message || e); }
         if (p.woche !== false && bondJetzt > 0) {
           const pr = preis && w.preis0 ? ((preis / w.preis0 - 1) * 100) : null;
           const teile = [];
