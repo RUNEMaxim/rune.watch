@@ -1012,7 +1012,10 @@ async function handleDonationProgress(request, env, ctx) {
       }
       const receivedRune = seitBasis(row.last_balance_rune, row.baseline_rune);
       const receivedUsdc = seitBasis(row.last_balance_usdc, row.baseline_usdc);
-      return json({ receivedRune, receivedUsdc, receivedEthUsd: receivedEthUsdFrom(row), month: currentMonth }, env);
+      // receivedEth in ETH (nicht nur in $): Die App erkennt neue Spenden daran -- der $-Wert steigt auch,
+      // wenn nur der ETH-Kurs steigt, und loeste dann Konfetti ohne Spende aus.
+      const receivedEth = row.last_balance_eth == null ? 0 : seitBasis(row.last_balance_eth, row.baseline_eth);
+      return json({ receivedRune, receivedUsdc, receivedEthUsd: receivedEthUsdFrom(row), receivedEth, month: currentMonth }, env);
     }
 
     const [runeResult, usdcResult, ethResult, ethPriceResult] = await Promise.allSettled([
@@ -1032,7 +1035,7 @@ async function handleDonationProgress(request, env, ctx) {
         `INSERT INTO donation_tracking (id, month, baseline_rune, baseline_usdc, baseline_eth, last_balance_rune, last_balance_usdc, last_balance_eth, last_eth_usd_price, last_balance_at, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET month = excluded.month, baseline_rune = excluded.baseline_rune, baseline_usdc = excluded.baseline_usdc, baseline_eth = excluded.baseline_eth, last_balance_rune = excluded.last_balance_rune, last_balance_usdc = excluded.last_balance_usdc, last_balance_eth = excluded.last_balance_eth, last_eth_usd_price = excluded.last_eth_usd_price, last_balance_at = excluded.last_balance_at, updated_at = excluded.updated_at`
       ).bind(currentMonth, currentRune ?? -1, currentUsdc ?? -1, currentEth ?? -1, currentRune, currentUsdc, currentEth, ethUsdPrice, Date.now(), Date.now()).run();
-      return json({ receivedRune: 0, receivedUsdc: 0, receivedEthUsd: 0, month: currentMonth }, env);
+      return json({ receivedRune: 0, receivedUsdc: 0, receivedEthUsd: 0, receivedEth: 0, month: currentMonth }, env);
     }
 
     const gleich = (a, b) => (a == null && b == null) || (a != null && b != null && Math.abs(a - b) < 1e-8);
@@ -1055,7 +1058,7 @@ async function handleDonationProgress(request, env, ctx) {
     const receivedUsdc = seitBasis(currentUsdc, bUsdc);
     const receivedEth = seitBasis(currentEth, bEth);
     const receivedEthUsd = ethUsdPrice != null ? receivedEth * ethUsdPrice : 0;
-    return json({ receivedRune, receivedUsdc, receivedEthUsd, month: currentMonth }, env);
+    return json({ receivedRune, receivedUsdc, receivedEthUsd, receivedEth, month: currentMonth }, env);
   } catch (e) {
     console.warn('[rune-rewards-backend] /donation-progress fehlgeschlagen:', e?.message || String(e));
     return json({ receivedRune: null, receivedUsdc: null, receivedEthUsd: null, month: currentMonth }, env);
