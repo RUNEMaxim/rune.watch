@@ -1689,6 +1689,14 @@ async function handleDrawings(request, env, ctx) {
 
 const MAX_SWAP_HISTORY_PAYLOAD_BYTES = 200_000;
 
+// EMPFANGENE MENGE MITSPEICHERN (gewuenscht: "bitte auch die Menge anzeigen"): Spalte out_amount,
+// legt sich bei Bedarf selbst an (aeltere Datenbanken haben sie noch nicht).
+let swapOutSpalteOk = false;
+async function swapOutSpalte(env) {
+  if (swapOutSpalteOk) return;
+  try { await env.DB.prepare('ALTER TABLE user_swap_history ADD COLUMN out_amount TEXT').run(); } catch (e) { /* gibt es schon */ }
+  swapOutSpalteOk = true;
+}
 async function handleSwapHistory(request, env, ctx) {
   const url = new URL(request.url);
   const address = url.searchParams.get('address');
@@ -1697,9 +1705,10 @@ async function handleSwapHistory(request, env, ctx) {
   }
   recordSyncActivity(env, ctx, address, request);
 
+  await swapOutSpalte(env);
   if (request.method === 'GET') {
     const rows = await env.DB
-      .prepare('SELECT swap_id, from_asset, to_asset, amount, destination, track_status, in_tx_id, out_tx_id, resolved_at, registered_at FROM user_swap_history WHERE address = ? ORDER BY COALESCE(resolved_at, registered_at) DESC LIMIT 50')
+      .prepare('SELECT swap_id, from_asset, to_asset, amount, out_amount, destination, track_status, in_tx_id, out_tx_id, resolved_at, registered_at FROM user_swap_history WHERE address = ? ORDER BY COALESCE(resolved_at, registered_at) DESC LIMIT 50')
       .bind(address)
       .all();
     return json({
@@ -1709,6 +1718,7 @@ async function handleSwapHistory(request, env, ctx) {
         fromAsset: r.from_asset,
         toAsset: r.to_asset,
         amount: r.amount,
+        trackOutAmount: r.out_amount != null && r.out_amount !== '' ? Number(r.out_amount) : null,
         destination: r.destination,
         trackStatus: r.track_status,
         trackInTxId: r.in_tx_id,
@@ -1735,15 +1745,21 @@ async function handleSwapHistory(request, env, ctx) {
     if (valid.length) {
       const stmt = env.DB.prepare(
         `INSERT OR IGNORE INTO user_swap_history
-         (address, swap_id, from_asset, to_asset, amount, destination, track_status, in_tx_id, out_tx_id, resolved_at, registered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (address, swap_id, from_asset, to_asset, amount, out_amount, destination, track_status, in_tx_id, out_tx_id, resolved_at, registered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
+      const outTxt = s => (Number.isFinite(Number(s.trackOutAmount)) && Number(s.trackOutAmount) > 0 ? String(Number(s.trackOutAmount)) : null);
+      // Bestehende Zeilen ohne Menge nachtragen (INSERT OR IGNORE laesst sie sonst unveraendert).
+      const nach = env.DB.prepare('UPDATE user_swap_history SET out_amount = ? WHERE address = ? AND swap_id = ? AND (out_amount IS NULL OR out_amount = \'\')');
+      const mitMenge = valid.filter(s => outTxt(s));
+      if (mitMenge.length) { try { await env.DB.batch(mitMenge.map(s => nach.bind(outTxt(s), address, s.id))); } catch (e) {} }
       await env.DB.batch(valid.map((s) => stmt.bind(
         address,
         s.id,
         s.fromAsset || null,
         s.toAsset || null,
         s.amount != null ? String(s.amount) : null,
+        outTxt(s),
         s.destination || null,
         s.trackStatus,
         s.trackInTxId || null,
