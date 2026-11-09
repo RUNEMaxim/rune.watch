@@ -6400,6 +6400,14 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
     try { z = JSON.parse(row.zustand || '{}'); } catch (e) {}
     try { adr = JSON.parse(row.adressen || '[]'); } catch (e) {}
     if (!adr.length) return;
+    // VERALTETE SERVER-ANTWORT ERKENNEN (gemeldet: "+2.623,2 RUNE" kam zweimal, obwohl seither kein Churn
+    // war -- der Churn ist sogar angehalten): Die THORNode-Server antworten nicht alle vom selben Stand.
+    // Lieferte einer einen aelteren Stand (letzter Churn VOR dem bekannten), sah der naechste aktuelle Lauf
+    // wie ein neuer Churn aus, und der damalige Bond-Zuwachs wurde ein zweites Mal als Reward gemeldet.
+    // Jetzt: Die Churn-Hoehe darf nur steigen. Ein Stand mit niedrigerer Hoehe wird fuer dieses Abo
+    // komplett uebersprungen (keine Meldung, kein Speichern) -- der naechste Lauf holt sich frische Daten.
+    const churnMax = Number(z.churnMax || z.churn || 0);
+    if (churnH && churnMax && Number(churnH) < churnMax) return;
     const de = row.lang === 'de';
     const meldungen = [];
     const alt = z.nodes || null;            // { node: { s: status, b: bond des Providers, l: leave } }
@@ -6418,7 +6426,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
     }
     if (alt) {
       let rewardSumme = 0;
-      const churnNeu = churnH && z.churn && churnH !== z.churn;
+      const churnNeu = !!(churnH && churnMax && Number(churnH) > churnMax); // nur echte, NEUE Churns
       for (const [na, v] of Object.entries(neu)) {
         const a = alt[na];
         if (!a) continue;
@@ -6470,6 +6478,24 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
       // Nur melden, wenn die Adresse noch im Abo ist -- sonst wurde nur eine Wallet entfernt.
       if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1 && (!a.pa || Object.keys(a.pa).some(k => adr.includes(k)))) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` + vultisigHinweis(de, 'neu') : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)` + vultisigHinweis(de, 'neu'), tag: 'rw-refund-' + na });
+      // BETRAG AUS DER REWARD-HISTORIE (dieselbe Quelle wie die App): Fuer genau diesen Churn die Rewards
+      // deiner Adressen nachladen und summieren. Gibt es dort Zeilen fuer den Churn, gilt deren Summe
+      // (auch 0 -> keine Meldung); sonst bleibt der Bond-Zuwachs als Rueckfall.
+      if (p.churn && rewardSumme > 0.01 && churnNeu) {
+        try {
+          const adrListe = adr.filter(a => isValidThorAddress(a)).slice(0, 10);
+          for (const a of adrListe) {
+            const tr = await env.DB.prepare('SELECT * FROM tracked_addresses WHERE bond_address = ?').bind(a).first().catch(() => null);
+            if (tr) { try { await refreshOneAddress(env, tr, Date.now()); } catch (e) {} }
+          }
+          if (adrListe.length) {
+            const platz = adrListe.map(() => '?').join(',');
+            const r2 = await env.DB.prepare(`SELECT COUNT(*) AS n, SUM(reward_amount) AS s FROM bond_history_rows WHERE bond_address IN (${platz}) AND churn_height = ? AND reward_amount IS NOT NULL`)
+              .bind(...adrListe, Number(churnH)).first();
+            if (r2 && r2.n > 0) rewardSumme = Number(r2.s) || 0;
+          }
+        } catch (e) { console.warn('[push] Reward aus Historie:', e?.message || e); }
+      }
       if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : '') + vultisigHinweis(de, 'bond'), tag: 'rw-churn-' + churnH });
     }
     // WOCHEN-REVIEW (gewuenscht): Rewards der Woche mitzaehlen und montags um 8:00 UTC eine
@@ -6481,7 +6507,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       const wocheKey = montag.toISOString().slice(0, 10);
       const bondJetzt = Object.values(neu).reduce((q, v) => q + (Number(v.b) || 0), 0);
       if (!z.woche) z.woche = { key: wocheKey, rune: 0, churns: 0, preis0: preis || null };
-      if (alt && churnH && z.churn && churnH !== z.churn) {
+      if (alt && churnH && churnMax && Number(churnH) > churnMax) {
         let r2 = 0;
         for (const [na, v] of Object.entries(neu)) { const a = alt[na]; if (a && v.b - a.b > 0) r2 += v.b - a.b; }
         if (r2 > 0.01) { z.woche.rune = (Number(z.woche.rune) || 0) + r2; z.woche.churns = (Number(z.woche.churns) || 0) + 1; }
@@ -6531,7 +6557,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       }
     }
     z.nodes = neu;
-    if (churnH) z.churn = churnH;
+    if (churnH) { z.churn = churnH; z.churnMax = Math.max(churnMax, Number(churnH)); }
     // DEINE NODE HAT NOCH NICHT ABGESTIMMT (gewuenscht): Einmal je Abstimmung und Node. Bonder
     // haben den direkten Draht zum Betreiber -- genau sie sollen es erfahren.
     if (p.abst !== false && abst && Array.isArray(abst.liste)) {
