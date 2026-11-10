@@ -203,6 +203,7 @@ async function handleRwApy(request, env) {
 // Swap-Suche ueber /mg/actions: der Worker nutzt die Schluessel-Instanz zuerst, Zwischenspeicher 30 s.
 // Nur /actions mit den Parametern, die die App braucht.
 const MG_CACHE = new Map();
+let MG_PAUSE_BIS = 0; // nach 429 kurz Ruhe, statt Midgard weiter zu bedraengen
 async function handleMidgardActions(request, env) {
   const url = new URL(request.url);
   const erlaubt = ['address', 'type', 'txType', 'limit', 'offset', 'affiliate', 'txid'];
@@ -212,12 +213,13 @@ async function handleMidgardActions(request, env) {
   const lim = Math.min(50, Math.max(1, Number(q.get('limit')) || 50)); q.set('limit', String(lim));
   const schl = q.toString();
   const c = MG_CACHE.get(schl);
-  if (c && Date.now() - c.at < 30000) return json(c.v, env);
+  if (c && Date.now() - c.at < 90000) return json(c.v, env);
+  if (Date.now() < MG_PAUSE_BIS) return json(c ? c.v : { error: 'MIDGARD_UNAVAILABLE', detail: 'HTTP_429' }, env, c ? 200 : 503);
   let letzter = null;
   for (const basis of getMidgardBases()) {
     try {
       const r = await fetchWithTimeout(`${basis}/actions?${schl}`, { timeoutMs: 10000, headers: { 'x-client-id': 'rune-watch' } });
-      if (!r.ok) { letzter = 'HTTP_' + r.status; continue; }
+      if (!r.ok) { letzter = 'HTTP_' + r.status; if (r.status === 429) MG_PAUSE_BIS = Date.now() + 60000; continue; }
       const v = await r.json();
       MG_CACHE.set(schl, { at: Date.now(), v });
       if (MG_CACHE.size > 500) MG_CACHE.clear();
@@ -274,7 +276,9 @@ async function handleRwSwaps(request, env) {
     swapHistorieGeleert = true;
     try { await env.DB.prepare('DELETE FROM user_swap_history').run(); } catch (e) {}
   }
-  if (RW_SWAPS_CACHE.v && Date.now() - RW_SWAPS_CACHE.at < 45000) return json(RW_SWAPS_CACHE.v, env);
+  // 3 Min. Zwischenspeicher; nach "429" (gedrosselt) 2 Min. Pause -- solange der letzte Stand (gemeldet: 429)
+  if (RW_SWAPS_CACHE.v && Date.now() - RW_SWAPS_CACHE.at < 180000) return json(RW_SWAPS_CACHE.v, env);
+  if (Date.now() < (RW_SWAPS_CACHE.pauseBis || 0)) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler: 'HTTP_429', pause: true }, env);
   let actions = null, fehler = null;
   // RuneScan findet die Swaps ueber die Kennung (Screenshot: "runewatch uws"). Mehrere Abfrage-Varianten, die
   // erste mit Ergebnis gilt: mit/ohne Typ-Filter, Name und THOR-Adresse des THORNames.
@@ -288,7 +292,7 @@ async function handleRwSwaps(request, env) {
     for (const basis of getMidgardBases()) {
       try {
         const r = await fetchWithTimeout(`${basis}/actions?${q}&limit=50`, { timeoutMs: 9000, headers: { 'x-client-id': 'rune-watch' } });
-        if (!r.ok) { fehler = 'HTTP_' + r.status; continue; }
+        if (!r.ok) { fehler = 'HTTP_' + r.status; if (r.status === 429) RW_SWAPS_CACHE.pauseBis = Date.now() + 120000; continue; }
         const j = await r.json();
         const liste = Array.isArray(j && j.actions) ? j.actions.filter((a) => a && (a.type === 'swap' || !a.type)) : null;
         if (liste && liste.length) { actions = liste; break suche; }
@@ -297,7 +301,7 @@ async function handleRwSwaps(request, env) {
     }
   }
   const ausDb = []; // (keine gespeicherten Swaps mehr -- nur oeffentliche Blockchain-Daten)
-  if (!actions) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, RW_SWAPS_CACHE.v ? 200 : 502);
+  if (!actions) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, 200);
   actions = actions || [];
   const ohneAff = (g) => (Array.isArray(g) ? g : []).filter((x) => x && !x.affiliate);
   const swaps = actions.map((a) => {
@@ -328,7 +332,7 @@ async function handleRwSwaps(request, env) {
   }
   const alleSwaps = [...nachTx.values()].sort((a, b) => b.zeit - a.zeit).slice(0, 40);
   const v = { swaps: alleSwaps, at: Date.now() };
-  RW_SWAPS_CACHE = { at: Date.now(), v };
+  RW_SWAPS_CACHE = { at: Date.now(), v, pauseBis: 0 };
   return json(v, env);
 }
 
@@ -2413,7 +2417,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-12-0045'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-12-0100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
