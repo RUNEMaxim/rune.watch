@@ -88,7 +88,9 @@ function getMidgardBases() {
 //   ETH: oeffentliche RPC-Knoten -- natives ETH sowie USDC und USDT (balanceOf)
 // Hoechstens 12 Adressen je Aufruf, Zwischenspeicher 60 s je Adresse.
 const KETTEN_CACHE = new Map();
-const ETH_RPCS = ['https://ethereum-rpc.publicnode.com', 'https://eth.llamarpc.com', 'https://cloudflare-eth.com'];
+// Mehrere oeffentliche Knoten; manche lehnen Anfragen aus Rechenzentren (Cloudflare) ab oder sind
+// zeitweise weg -- deshalb eine laengere Liste und als letzte Rueckfallebene Blockscout (siehe unten).
+const ETH_RPCS = ['https://ethereum-rpc.publicnode.com', 'https://eth.drpc.org', 'https://1rpc.io/eth', 'https://eth.llamarpc.com', 'https://rpc.mevblocker.io', 'https://cloudflare-eth.com'];
 const ETH_TOKENS = [
   { sym: 'USDC', contract: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', dec: 6, asset: 'ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48' },
   { sym: 'USDT', contract: '0xdac17f958d2ee523a2206206994597c13d831ec7', dec: 6, asset: 'ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7' },
@@ -108,22 +110,48 @@ async function btcGuthaben(adr) {
   }
   throw new Error('BTC_NICHT_ERREICHBAR');
 }
-async function ethRpc(methode, params) {
-  for (const rpc of ETH_RPCS) {
+let ETH_RPC_GUT = null; // zuletzt funktionierender Knoten zuerst
+async function ethRpc(methode, params, spur) {
+  const reihe = ETH_RPC_GUT ? [ETH_RPC_GUT, ...ETH_RPCS.filter((x) => x !== ETH_RPC_GUT)] : ETH_RPCS;
+  for (const rpc of reihe) {
     try {
-      const r = await fetchWithTimeout(rpc, { timeoutMs: 7000, method: 'POST', headers: { 'content-type': 'application/json' },
+      const r = await fetchWithTimeout(rpc, { timeoutMs: 6000, method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json', 'user-agent': 'rune.watch/1.0 (+https://runewatch.org)' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: methode, params }) });
-      if (!r.ok) continue;
+      if (!r.ok) { if (spur) spur.push(rpc + ' HTTP_' + r.status); continue; }
       const j = await r.json();
-      if (j && typeof j.result === 'string') return j.result;
-    } catch (e) { /* naechster Knoten */ }
+      if (j && typeof j.result === 'string') { ETH_RPC_GUT = rpc; return j.result; }
+      if (spur) spur.push(rpc + ' ' + JSON.stringify(j && j.error || j).slice(0, 80));
+    } catch (e) { if (spur) spur.push(rpc + ' ' + String(e && e.message || e).slice(0, 60)); }
   }
-  throw new Error('ETH_NICHT_ERREICHBAR');
+  const f = new Error('ETH_NICHT_ERREICHBAR'); f.spur = spur; throw f;
+}
+// RUECKFALL: Blockscout (oeffentlicher Explorer, ohne Schluessel) -- ETH und Token in einem Abruf.
+async function ethUeberBlockscout(adr) {
+  const r = await fetchWithTimeout(`https://eth.blockscout.com/api/v2/addresses/${adr}`, { timeoutMs: 8000, headers: { accept: 'application/json' } });
+  if (!r.ok) throw new Error('BLOCKSCOUT_HTTP_' + r.status);
+  const j = await r.json();
+  const out = [{ asset: 'ETH.ETH', sym: 'ETH', menge: hexZuZahl('0x' + BigInt(j.coin_balance || '0').toString(16), 18) }];
+  try {
+    const t = await fetchWithTimeout(`https://eth.blockscout.com/api/v2/addresses/${adr}/token-balances`, { timeoutMs: 8000, headers: { accept: 'application/json' } });
+    const liste = t.ok ? await t.json() : [];
+    for (const tok of ETH_TOKENS) {
+      const e = (Array.isArray(liste) ? liste : []).find((x) => x && x.token && String(x.token.address || x.token.address_hash || '').toLowerCase() === tok.contract);
+      if (e && e.value) { const v = hexZuZahl('0x' + BigInt(e.value).toString(16), tok.dec); if (v > 0) out.push({ asset: tok.asset, sym: tok.sym, menge: v }); }
+    }
+  } catch (e) { /* Token auslassen */ }
+  return out;
 }
 const hexZuZahl = (hex, dec) => { try { const v = BigInt(hex === '0x' ? '0x0' : hex); const teiler = 10n ** BigInt(dec); return Number(v / teiler) + Number(v % teiler) / Number(teiler); } catch (e) { return 0; } };
 async function ethGuthaben(adr) {
   const a = adr.toLowerCase();
-  const nativ = hexZuZahl(await ethRpc('eth_getBalance', [a, 'latest']), 18);
+  const spur = [];
+  let nativ;
+  try { nativ = hexZuZahl(await ethRpc('eth_getBalance', [a, 'latest'], spur), 18); }
+  catch (e) {
+    try { return await ethUeberBlockscout(a); }
+    catch (e2) { const f = new Error('ETH_NICHT_ERREICHBAR'); f.spur = [...spur, String(e2 && e2.message || e2)]; throw f; }
+  }
   const out = [{ asset: 'ETH.ETH', sym: 'ETH', menge: nativ }];
   for (const t of ETH_TOKENS) {
     try {
@@ -200,7 +228,7 @@ async function handleChainBalances(request, env) {
       KETTEN_CACHE.set(k, { at: Date.now(), v });
       if (KETTEN_CACHE.size > 2000) KETTEN_CACHE.clear();
       ergebnis.push({ ...v, gebuehr: gebuehrFuer(kette, adr, saetze) });
-    } catch (e) { ergebnis.push({ adresse: adr, kette, fehler: String(e && e.message || e) }); }
+    } catch (e) { ergebnis.push({ adresse: adr, kette, fehler: String(e && e.message || e), details: e && e.spur ? e.spur.slice(0, 8) : undefined }); }
   }));
   return json({ adressen: ergebnis }, env);
 }
