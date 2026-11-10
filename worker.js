@@ -269,27 +269,35 @@ async function handleThorTx(request, env) {
 const RW_AFFILIATE = 'runewatch';
 let RW_SWAPS_CACHE = { at: 0, v: null };
 async function handleRwSwaps(request, env) {
+  // Altbestand der frueheren Swap-Historie auch hier einmal loeschen (falls /swap-history nie aufgerufen wird)
+  if (!swapHistorieGeleert) {
+    swapHistorieGeleert = true;
+    try { await env.DB.prepare('DELETE FROM user_swap_history').run(); } catch (e) {}
+  }
   if (RW_SWAPS_CACHE.v && Date.now() - RW_SWAPS_CACHE.at < 45000) return json(RW_SWAPS_CACHE.v, env);
   let actions = null, fehler = null;
-  for (const basis of getMidgardBases()) {
-    try {
-      const r = await fetchWithTimeout(`${basis}/actions?affiliate=${RW_AFFILIATE}&type=swap&limit=30`, { timeoutMs: 9000, headers: { 'x-client-id': 'rune-watch' } });
-      if (!r.ok) { fehler = 'HTTP_' + r.status; continue; }
-      const j = await r.json();
-      if (Array.isArray(j && j.actions)) { actions = j.actions; break; }
-    } catch (e) { fehler = String(e && e.message || e); }
-  }
-  // ZWEITE QUELLE (gemeldet: "ohne Wallet keine Swaps zu sehen"): Midgards Affiliate-Suche liefert oft nichts.
-  // Zusaetzlich die fertigen Swaps aus der Swap-Historie aller Nutzer (D1, user_swap_history) -- ohne Adressen,
-  // nur Paar, Mengen, Zeit und Eingangs-Transaktion.
-  let ausDb = [];
+  // RuneScan findet die Swaps ueber die Kennung (Screenshot: "runewatch uws"). Mehrere Abfrage-Varianten, die
+  // erste mit Ergebnis gilt: mit/ohne Typ-Filter, Name und THOR-Adresse des THORNames.
+  const varianten = [`affiliate=${RW_AFFILIATE}&type=swap`, `affiliate=${RW_AFFILIATE}`];
   try {
-    const rows = await env.DB.prepare(`SELECT from_asset, to_asset, amount, out_amount, in_tx_id, resolved_at, registered_at
-      FROM user_swap_history WHERE track_status = 'success' AND in_tx_id IS NOT NULL ORDER BY COALESCE(resolved_at, registered_at) DESC LIMIT 60`).all();
-    ausDb = (rows.results || []).map((r) => ({ tx: r.in_tx_id, von: r.from_asset, menge: Number(r.amount) || null, nach: r.to_asset,
-      erhalten: Number(r.out_amount) || null, zeit: Number(r.resolved_at || r.registered_at) || null, status: 'success' }));
-  } catch (e) { ausDb = []; }
-  if (!actions && !ausDb.length) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, RW_SWAPS_CACHE.v ? 200 : 502);
+    const tn = await fetchFromBases(getThornodeBases(), '/thorchain/thorname/' + RW_AFFILIATE);
+    const al = tn && Array.isArray(tn.aliases) ? tn.aliases.find((x) => String(x.chain).toUpperCase() === 'THOR') : null;
+    if (al && al.address) varianten.push(`affiliate=${al.address}`);
+  } catch (e) {}
+  suche: for (const q of varianten) {
+    for (const basis of getMidgardBases()) {
+      try {
+        const r = await fetchWithTimeout(`${basis}/actions?${q}&limit=50`, { timeoutMs: 9000, headers: { 'x-client-id': 'rune-watch' } });
+        if (!r.ok) { fehler = 'HTTP_' + r.status; continue; }
+        const j = await r.json();
+        const liste = Array.isArray(j && j.actions) ? j.actions.filter((a) => a && (a.type === 'swap' || !a.type)) : null;
+        if (liste && liste.length) { actions = liste; break suche; }
+        if (liste && !actions) actions = [];
+      } catch (e) { fehler = String(e && e.message || e); }
+    }
+  }
+  const ausDb = []; // (keine gespeicherten Swaps mehr -- nur oeffentliche Blockchain-Daten)
+  if (!actions) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, RW_SWAPS_CACHE.v ? 200 : 502);
   actions = actions || [];
   const ohneAff = (g) => (Array.isArray(g) ? g : []).filter((x) => x && !x.affiliate);
   const swaps = actions.map((a) => {
@@ -2051,7 +2059,21 @@ async function swapOutSpalte(env) {
   try { await env.DB.prepare('ALTER TABLE user_swap_history ADD COLUMN out_amount TEXT').run(); } catch (e) { /* gibt es schon */ }
   swapOutSpalteOk = true;
 }
+// KEINE SWAPS MEHR IM WORKER (gewuenscht: "keine Swaps oder Aehnliches im Worker speichern, alles oeffentlich"):
+// Die Swap-Historie wird nicht mehr gespeichert; vorhandene Eintraege loescht der Worker beim ersten Aufruf.
+// GET liefert eine leere Liste, POST nimmt nichts an. Die Liste "Swaps via rune.watch" kommt nur noch aus
+// oeffentlichen Blockchain-Daten (Midgard, Kennung "runewatch").
+let swapHistorieGeleert = false;
 async function handleSwapHistory(request, env, ctx) {
+  if (!swapHistorieGeleert) {
+    swapHistorieGeleert = true;
+    try { await env.DB.prepare('DELETE FROM user_swap_history').run(); } catch (e) {}
+  }
+  if (request.method === 'GET') return json({ swaps: [] }, env);
+  if (request.method === 'POST') return json({ saved: 0 }, env);
+  return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
+}
+async function handleSwapHistoryAlt(request, env, ctx) {
   const url = new URL(request.url);
   const address = url.searchParams.get('address');
   if (!isValidThorAddress(address)) {
@@ -2391,7 +2413,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-11-2330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-12-0045'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7630,7 +7652,9 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
   const lj = await lr.json();
   const nodes = (Array.isArray(lj && lj.nodes) ? lj.nodes : []).map(n => n && n.nodeAddress).filter(Boolean).slice(0, 40);
   if (!nodes.length) return null;
-  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS rb_wht_memo (tx_id TEXT PRIMARY KEY, unser INTEGER, at INTEGER)').run(); } catch (e) {}
+  // Gespeichert wird NUR das oeffentliche Ergebnis "Transaktion traegt die Kennung runewatch: ja/nein" (steht fuer jeden
+  // sichtbar auf der Blockchain, nichts Persoenliches) -- damit die Zaehlung nach einem Neustart sofort vollstaendig ist.
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS rb_wht_memo (tx_id TEXT PRIMARY KEY, unser INTEGER)').run(); } catch (e) {}
   const alle = [];
   await Promise.all(nodes.map(async (addr) => {
     try {
@@ -7640,7 +7664,7 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
       for (const x of (Array.isArray(j && j.requests) ? j.requests : [])) if (x && x.txId) alle.push(x);
     } catch (e) {}
   }));
-  // Memo je Transaktion: erst Speicher, dann D1, dann THORNode (hoechstens 30 neue je Lauf)
+  // Memo je Transaktion: erst Arbeitsspeicher, dann Datenbank, dann THORNode (hoechstens 30 neue je Lauf)
   const offen = alle.filter(x => !RB_MEMO_UNSER.has(String(x.txId).toUpperCase()));
   if (offen.length) {
     try {
@@ -7664,7 +7688,7 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
       const aff = teile.length >= 6 ? teile.slice(5).join(':').trim().toLowerCase() : '';
       const ja = !!aff && unsere.has(aff);
       RB_MEMO_UNSER.set(id, ja);
-      try { await env.DB.prepare('INSERT OR REPLACE INTO rb_wht_memo (tx_id, unser, at) VALUES (?, ?, ?)').bind(id, ja ? 1 : 0, Date.now()).run(); } catch (e) {}
+      try { await env.DB.prepare('INSERT OR REPLACE INTO rb_wht_memo (tx_id, unser) VALUES (?, ?)').bind(id, ja ? 1 : 0).run(); } catch (e) {}
     } catch (e) { /* naechster Lauf */ }
   }
   const unsereAnfragen = alle.filter(x => RB_MEMO_UNSER.get(String(x.txId).toUpperCase()) === true);
