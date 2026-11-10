@@ -162,6 +162,45 @@ async function ethGuthaben(adr) {
   }
   return out;
 }
+// ALLE SWAPS UEBER RUNE.WATCH (gewuenscht: "Swaps aller Nutzer sofort erkennen, das sieht man doch
+// on-chain"): Jeder Swap ueber rune.watch traegt die Kennung "runewatch" im Memo (Affiliate, 0 bps).
+// Midgard filtert danach (/actions?affiliate=runewatch). Der Worker fragt das hoechstens alle 45 s ab
+// und liefert eine schlanke Liste -- ohne Adressen: Paar, Mengen, Zeit, Status, Eingangs-Transaktion
+// (damit die App eigene Swaps erkennen kann).
+const RW_AFFILIATE = 'runewatch';
+let RW_SWAPS_CACHE = { at: 0, v: null };
+async function handleRwSwaps(request, env) {
+  if (RW_SWAPS_CACHE.v && Date.now() - RW_SWAPS_CACHE.at < 45000) return json(RW_SWAPS_CACHE.v, env);
+  let actions = null, fehler = null;
+  for (const basis of getMidgardBases()) {
+    try {
+      const r = await fetchWithTimeout(`${basis}/actions?affiliate=${RW_AFFILIATE}&type=swap&limit=30`, { timeoutMs: 9000, headers: { 'x-client-id': 'rune-watch' } });
+      if (!r.ok) { fehler = 'HTTP_' + r.status; continue; }
+      const j = await r.json();
+      if (Array.isArray(j && j.actions)) { actions = j.actions; break; }
+    } catch (e) { fehler = String(e && e.message || e); }
+  }
+  if (!actions) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, RW_SWAPS_CACHE.v ? 200 : 502);
+  const ohneAff = (g) => (Array.isArray(g) ? g : []).filter((x) => x && !x.affiliate);
+  const swaps = actions.map((a) => {
+    const ein = ohneAff(a.in)[0] || (a.in || [])[0] || {};
+    const raus = ohneAff(a.out).flatMap((g) => g.coins || []);
+    const e = (ein.coins || [])[0] || {};
+    // Ausgang: das, was NICHT die Eingangs-Muenze ist (bei Erstattungen gleich der Eingang)
+    const o = raus.find((c) => c.asset !== e.asset) || raus[0] || {};
+    return {
+      tx: ein.txID || null,
+      von: e.asset || null, menge: Number(e.amount) / 1e8 || null,
+      nach: o.asset || null, erhalten: Number(o.amount) / 1e8 || null,
+      zeit: a.date ? Math.floor(Number(a.date) / 1e6) : null,
+      status: a.status || null,
+    };
+  }).filter((x) => x.tx && x.zeit);
+  const v = { swaps, at: Date.now() };
+  RW_SWAPS_CACHE = { at: Date.now(), v };
+  return json(v, env);
+}
+
 // EINGETRAGENE BTC-/ETH-ADRESSEN GERAETEUEBERGREIFEND (wie Wallets/Kaeufe am ersten thor1-Wallet
 // verankert). Ganze Liste, die neuere gewinnt (Zeitstempel des Geraets).
 async function handleChainAddrs(request, env, ctx) {
@@ -5140,6 +5179,9 @@ export default {
       }
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
+      }
+      if (url.pathname === '/rw-swaps') {
+        return await handleRwSwaps(request, env);
       }
       if (url.pathname === '/chain-addrs') {
         return await handleChainAddrs(request, env, ctx);
