@@ -162,6 +162,26 @@ async function ethGuthaben(adr) {
   }
   return out;
 }
+// JAHRES-APY FUER DIE WILLKOMMENS-KARTE (gewuenscht: "meine Jahres-APY aus der App, fuer jeden neuen
+// Besucher sichtbar"): Die App des Betreibers schickt ihre 12-Monats-APY (Durchschnitt der Churn-APYs)
+// hierher; jeder Besucher liest sie. Angenommen wird sie nur fuer eine Betreiber-Adresse (dieselbe Liste
+// wie STATS_EXCLUDED_ADDRESSES) und nur in einem plausiblen Bereich (1-60 %).
+async function handleRwApy(request, env) {
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS rw_einstellungen (k TEXT PRIMARY KEY, v TEXT, at INTEGER)').run();
+  if (request.method === 'POST') {
+    let b = {}; try { b = await request.json(); } catch (e) { return json({ error: 'INVALID_BODY' }, env, 400); }
+    const adr = String(b.address || '').trim().toLowerCase();
+    const apy = Number(b.apy);
+    if (!adr || !getStatsExcludedAddresses(env).has(adr)) return json({ error: 'FORBIDDEN' }, env, 403);
+    if (!(apy >= 0.01 && apy <= 0.6)) return json({ error: 'IMPLAUSIBLE' }, env, 400);
+    await env.DB.prepare('INSERT INTO rw_einstellungen (k, v, at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+      .bind('jahres_apy', String(apy), Date.now()).run();
+    return json({ ok: true }, env);
+  }
+  const row = await env.DB.prepare('SELECT v, at FROM rw_einstellungen WHERE k = ?').bind('jahres_apy').first().catch(() => null);
+  return json({ apy: row ? Number(row.v) : null, at: row ? row.at : null }, env);
+}
+
 // MIDGARD UEBER DEN WORKER (gewuenscht, Option 1): Die App fragte Midgard bisher direkt aus dem Browser
 // ab -- ohne Liquify-Schluessel (oefter Drosselung/Verzoegerung) und mit der IP der Nutzer. Jetzt geht die
 // Swap-Suche ueber /mg/actions: der Worker nutzt die Schluessel-Instanz zuerst, Zwischenspeicher 30 s.
@@ -250,7 +270,9 @@ async function handleRwSwaps(request, env) {
     const raus = ohneAff(a.out).flatMap((g) => g.coins || []);
     const e = (ein.coins || [])[0] || {};
     // Ausgang: das, was NICHT die Eingangs-Muenze ist (bei Erstattungen gleich der Eingang)
-    const o = raus.find((c) => c.asset !== e.asset) || raus[0] || {};
+    // GROESSTE Ausgabe (gemeldet: "0.1962 ETH -> 0.0697 RUNE"): Kleinstbetraege wie Gebuehren-Anteile an
+    // andere Adressen standen vorn und wurden als Ergebnis genommen.
+    const o = raus.filter((c) => c.asset !== e.asset).sort((a, b) => Number(b.amount) - Number(a.amount))[0] || raus[0] || {};
     return {
       tx: ein.txID || null,
       von: e.asset || null, menge: Number(e.amount) / 1e8 || null,
@@ -5242,6 +5264,9 @@ export default {
       }
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
+      }
+      if (url.pathname === '/rw-apy') {
+        return await handleRwApy(request, env);
       }
       if (url.pathname === '/mg/actions') {
         return await handleMidgardActions(request, env);
