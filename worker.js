@@ -81,6 +81,104 @@ function getMidgardBases() {
   return bases;
 }
 
+// GUTHABEN AUF ANDEREN CHAINS (gewuenscht: "darstellen, wie viel BTC etc. auf der Wallet ist").
+// Die App schickt die selbst eingetragenen BTC- und ETH-Adressen; der Worker fragt oeffentliche
+// Schnittstellen ab, damit deren Betreiber die IP-Adresse der Nutzer NICHT sehen (nur die Adresse).
+//   BTC: mempool.space (Rueckfall blockstream.info) -- bestaetigt + unbestaetigt, in BTC
+//   ETH: oeffentliche RPC-Knoten -- natives ETH sowie USDC und USDT (balanceOf)
+// Hoechstens 12 Adressen je Aufruf, Zwischenspeicher 60 s je Adresse.
+const KETTEN_CACHE = new Map();
+const ETH_RPCS = ['https://ethereum-rpc.publicnode.com', 'https://eth.llamarpc.com', 'https://cloudflare-eth.com'];
+const ETH_TOKENS = [
+  { sym: 'USDC', contract: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', dec: 6, asset: 'ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48' },
+  { sym: 'USDT', contract: '0xdac17f958d2ee523a2206206994597c13d831ec7', dec: 6, asset: 'ETH.USDT-0XDAC17F958D2EE523A2206206994597C13D831EC7' },
+];
+const istBtcAdresse = (a) => /^(bc1[a-z0-9]{25,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/.test(a);
+const istEthAdresse = (a) => /^0x[0-9a-fA-F]{40}$/.test(a);
+async function btcGuthaben(adr) {
+  for (const basis of ['https://mempool.space/api', 'https://blockstream.info/api']) {
+    try {
+      const r = await fetchWithTimeout(`${basis}/address/${adr}`, { timeoutMs: 8000 });
+      if (!r.ok) continue;
+      const j = await r.json();
+      const c = j.chain_stats || {}, m = j.mempool_stats || {};
+      const sats = (c.funded_txo_sum || 0) - (c.spent_txo_sum || 0) + (m.funded_txo_sum || 0) - (m.spent_txo_sum || 0);
+      return [{ asset: 'BTC.BTC', sym: 'BTC', menge: Math.max(0, sats) / 1e8 }];
+    } catch (e) { /* naechste Quelle */ }
+  }
+  throw new Error('BTC_NICHT_ERREICHBAR');
+}
+async function ethRpc(methode, params) {
+  for (const rpc of ETH_RPCS) {
+    try {
+      const r = await fetchWithTimeout(rpc, { timeoutMs: 7000, method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: methode, params }) });
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (j && typeof j.result === 'string') return j.result;
+    } catch (e) { /* naechster Knoten */ }
+  }
+  throw new Error('ETH_NICHT_ERREICHBAR');
+}
+const hexZuZahl = (hex, dec) => { try { const v = BigInt(hex === '0x' ? '0x0' : hex); const teiler = 10n ** BigInt(dec); return Number(v / teiler) + Number(v % teiler) / Number(teiler); } catch (e) { return 0; } };
+async function ethGuthaben(adr) {
+  const a = adr.toLowerCase();
+  const nativ = hexZuZahl(await ethRpc('eth_getBalance', [a, 'latest']), 18);
+  const out = [{ asset: 'ETH.ETH', sym: 'ETH', menge: nativ }];
+  for (const t of ETH_TOKENS) {
+    try {
+      const data = '0x70a08231' + a.slice(2).padStart(64, '0');
+      const v = hexZuZahl(await ethRpc('eth_call', [{ to: t.contract, data }, 'latest']), t.dec);
+      if (v > 0) out.push({ asset: t.asset, sym: t.sym, menge: v });
+    } catch (e) { /* Token auslassen */ }
+  }
+  return out;
+}
+// EINGETRAGENE BTC-/ETH-ADRESSEN GERAETEUEBERGREIFEND (wie Wallets/Kaeufe am ersten thor1-Wallet
+// verankert). Ganze Liste, die neuere gewinnt (Zeitstempel des Geraets).
+async function handleChainAddrs(request, env, ctx) {
+  const url = new URL(request.url);
+  const address = url.searchParams.get('address');
+  if (!isValidThorAddress(address)) return json({ error: 'INVALID_ADDRESS' }, env, 400);
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS user_chain_addrs (address TEXT PRIMARY KEY, data TEXT, updated_at INTEGER)').run();
+  const row = await env.DB.prepare('SELECT data, updated_at FROM user_chain_addrs WHERE address = ?').bind(address).first();
+  if (request.method === 'GET') {
+    let liste = []; try { liste = row && row.data ? JSON.parse(row.data) : []; } catch (e) { liste = []; }
+    return json({ adressen: liste, updatedAt: row ? row.updated_at : 0 }, env);
+  }
+  if (request.method === 'POST') {
+    let body = {}; try { body = await request.json(); } catch (e) { return json({ error: 'INVALID_BODY' }, env, 400); }
+    const liste = (Array.isArray(body.adressen) ? body.adressen : []).map((a) => String(a || '').trim())
+      .filter((a) => istBtcAdresse(a) || istEthAdresse(a)).slice(0, 12);
+    const zeit = Number(body.updatedAt) || Date.now();
+    if (row && Number(row.updated_at) > zeit) return json({ adressen: JSON.parse(row.data || '[]'), updatedAt: row.updated_at, veraltet: true }, env);
+    await env.DB.prepare('INSERT INTO user_chain_addrs (address, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(address) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at')
+      .bind(address, JSON.stringify(liste), zeit).run();
+    return json({ adressen: liste, updatedAt: zeit }, env);
+  }
+  return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
+}
+async function handleChainBalances(request, env) {
+  const url = new URL(request.url);
+  const liste = String(url.searchParams.get('addrs') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 12);
+  const ergebnis = [];
+  await Promise.all(liste.map(async (adr) => {
+    const kette = istBtcAdresse(adr) ? 'BTC' : istEthAdresse(adr) ? 'ETH' : null;
+    if (!kette) { ergebnis.push({ adresse: adr, fehler: 'UNBEKANNTES_FORMAT' }); return; }
+    const k = kette + ':' + adr.toLowerCase();
+    const c = KETTEN_CACHE.get(k);
+    if (c && Date.now() - c.at < 60000) { ergebnis.push(c.v); return; }
+    try {
+      const guthaben = kette === 'BTC' ? await btcGuthaben(adr) : await ethGuthaben(adr);
+      const v = { adresse: adr, kette, guthaben };
+      KETTEN_CACHE.set(k, { at: Date.now(), v });
+      if (KETTEN_CACHE.size > 2000) KETTEN_CACHE.clear();
+      ergebnis.push(v);
+    } catch (e) { ergebnis.push({ adresse: adr, kette, fehler: String(e && e.message || e) }); }
+  }));
+  return json({ adressen: ergebnis }, env);
+}
+
 async function fetchWithTimeout(url, { timeoutMs = 10000, ...options } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1567,7 +1665,7 @@ const LOESCH_TABELLEN = [
   'user_wallet_lists', 'user_wallet_lists_deleted', 'user_wallet_lists_restored', 'user_wallet_profiles',
   'user_purchases', 'user_purchases_deleted', 'user_chart_drawings', 'user_chart_drawings_deleted',
   'user_swap_history', 'sync_activity_days', 'sync_activity_counts', 'sync_activity_art',
-  'balance_cache',
+  'balance_cache', 'user_chain_addrs',
   ['tracked_addresses', 'bond_address'], ['bond_history_rows', 'bond_address'],
 ];
 async function handleDatenLoeschen(request, env) {
@@ -4967,6 +5065,12 @@ export default {
       }
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
+      }
+      if (url.pathname === '/chain-addrs') {
+        return await handleChainAddrs(request, env, ctx);
+      }
+      if (url.pathname === '/chain-balances') {
+        return await handleChainBalances(request, env);
       }
       if (url.pathname === '/podcast') {
         // THORCHAIN-PODCAST fuer den Player in der App: Folgenliste aus dem oeffentlichen RSS-Feed
