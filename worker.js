@@ -162,6 +162,22 @@ async function ethGuthaben(adr) {
   }
   return out;
 }
+// BONDER IM NETZ (gemeldet: Zahl in der Cockpit-Karte wich von der Statistikseite ab): dieselbe Zaehlung wie
+// dort -- verschiedene Bond-Provider-Adressen ueber ALLE Nodes der Node-Liste. 10 Min. Zwischenspeicher.
+let BONDER_CACHE = { at: 0, v: null };
+async function handleBonderZahl(request, env) {
+  if (BONDER_CACHE.v && Date.now() - BONDER_CACHE.at < 600000) return json(BONDER_CACHE.v, env);
+  const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
+  if (!Array.isArray(nodes)) return json(BONDER_CACHE.v || { bonder: null }, env, BONDER_CACHE.v ? 200 : 502);
+  const set = new Set();
+  for (const n of nodes) for (const pr of ((n.bond_providers && n.bond_providers.providers) || [])) {
+    const a = String(pr.bond_address || '').toLowerCase(); if (a) set.add(a);
+  }
+  const v = { bonder: set.size, at: Date.now() };
+  BONDER_CACHE = { at: Date.now(), v };
+  return json(v, env);
+}
+
 // JAHRES-APY FUER DIE WILLKOMMENS-KARTE (gewuenscht: "meine Jahres-APY aus der App, fuer jeden neuen
 // Besucher sichtbar"): Die App des Betreibers schickt ihre 12-Monats-APY (Durchschnitt der Churn-APYs)
 // hierher; jeder Besucher liest sie. Angenommen wird sie nur fuer eine Betreiber-Adresse (dieselbe Liste
@@ -5264,6 +5280,9 @@ export default {
       }
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
+      }
+      if (url.pathname === '/bonder-zahl') {
+        return await handleBonderZahl(request, env);
       }
       if (url.pathname === '/rw-apy') {
         return await handleRwApy(request, env);
