@@ -2369,7 +2369,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-10-28-1700';
+const WORKER_VERSION = '2026-11-11-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7562,6 +7562,15 @@ async function runebondEmpfehlungen(env) {
     if (a && a.address) unsere.add(String(a.address).toLowerCase());
     if (tn && tn.owner) unsere.add(String(tn.owner).toLowerCase());
   } catch (e) {}
+  // GENAUER UEBER DIE INTEGRATORS-API (Hippo, RUNEBond): je gelisteter Node die Whitelist-Anfragen mit Status
+  // (pending/approved/bonded/rejected), echtem Bond und Transaktion. Von wem die Anfrage kam (unser Link?),
+  // steht im Memo am Ende -- das liest der Worker je Transaktion EINMAL bei THORNode und merkt es sich.
+  if (env && env.RUNEBOND_API_KEY) {
+    try {
+      const v = await runebondEmpfehlungenIntegrators(env, unsere);
+      if (v) { runebondRefCache = { at: Date.now(), data: v }; return v; }
+    } catch (e) { /* Rueckfall auf den Memo-Abgleich unten */ }
+  }
   if (!runebondMemos.liste.length) { try { await runebondVonDerChain(); } catch (e) {} }
   const nodes = await fetchNodes().catch(() => []);
   const nachAddr = new Map((Array.isArray(nodes) ? nodes : []).map(n => [String(n.node_address).toLowerCase(), n]));
@@ -7589,6 +7598,68 @@ async function runebondEmpfehlungen(env) {
   const data = { anfragen: anfragen.length, wallets: wallets.size, gebondet, runeGebondet: Math.round(rune), letzte: anfragen.reduce((m, x) => Math.max(m, x.zeit || 0), 0) || null, memosGelesen: runebondMemos.liste.length };
   runebondRefCache = { at: Date.now(), data };
   return data;
+}
+const RB_MEMO_UNSER = new Map(); // txId -> true/false (Anfrage kam ueber rune.watch?)
+async function runebondEmpfehlungenIntegrators(env, unsere) {
+  const basis = String(env.RUNEBOND_INTEGRATORS_BASE || RUNEBOND_INTEGRATORS_BASE).replace(/\/+$/, '');
+  const kopf = { accept: 'application/json', 'x-api-key': String(env.RUNEBOND_API_KEY).trim() };
+  const lr = await fetchWithTimeout(basis + '/v1/runebond/listed-nodes', { timeoutMs: 8000, headers: kopf });
+  if (!lr.ok) return null;
+  const lj = await lr.json();
+  const nodes = (Array.isArray(lj && lj.nodes) ? lj.nodes : []).map(n => n && n.nodeAddress).filter(Boolean).slice(0, 40);
+  if (!nodes.length) return null;
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS rb_wht_memo (tx_id TEXT PRIMARY KEY, unser INTEGER, at INTEGER)').run(); } catch (e) {}
+  const alle = [];
+  await Promise.all(nodes.map(async (addr) => {
+    try {
+      const r = await fetchWithTimeout(`${basis}/v1/nodes/${encodeURIComponent(addr)}/whitelist-requests?limit=100`, { timeoutMs: 8000, headers: kopf });
+      if (!r.ok) return;
+      const j = await r.json();
+      for (const x of (Array.isArray(j && j.requests) ? j.requests : [])) if (x && x.txId) alle.push(x);
+    } catch (e) {}
+  }));
+  // Memo je Transaktion: erst Speicher, dann D1, dann THORNode (hoechstens 30 neue je Lauf)
+  const offen = alle.filter(x => !RB_MEMO_UNSER.has(String(x.txId).toUpperCase()));
+  if (offen.length) {
+    try {
+      const ids = offen.map(x => String(x.txId).toUpperCase());
+      for (let i = 0; i < ids.length; i += 80) {
+        const teil = ids.slice(i, i + 80);
+        const rows = await env.DB.prepare(`SELECT tx_id, unser FROM rb_wht_memo WHERE tx_id IN (${teil.map(() => '?').join(',')})`).bind(...teil).all();
+        for (const row of (rows.results || [])) RB_MEMO_UNSER.set(row.tx_id, !!row.unser);
+      }
+    } catch (e) {}
+  }
+  let neu = 0;
+  for (const x of alle) {
+    const id = String(x.txId).toUpperCase();
+    if (RB_MEMO_UNSER.has(id) || neu >= 30) continue;
+    neu++;
+    try {
+      const t = await fetchFromBases(getThornodeBases(), `/thorchain/tx/${id}`);
+      const memo = String((t && t.observed_tx && t.observed_tx.tx && t.observed_tx.tx.memo) || (t && t.tx && t.tx.memo) || '');
+      const teile = memo.split(':');
+      const aff = teile.length >= 6 ? teile.slice(5).join(':').trim().toLowerCase() : '';
+      const ja = !!aff && unsere.has(aff);
+      RB_MEMO_UNSER.set(id, ja);
+      try { await env.DB.prepare('INSERT OR REPLACE INTO rb_wht_memo (tx_id, unser, at) VALUES (?, ?, ?)').bind(id, ja ? 1 : 0, Date.now()).run(); } catch (e) {}
+    } catch (e) { /* naechster Lauf */ }
+  }
+  const unsereAnfragen = alle.filter(x => RB_MEMO_UNSER.get(String(x.txId).toUpperCase()) === true);
+  const paare = new Map();
+  for (const x of unsereAnfragen) paare.set(String(x.nodeAddress).toLowerCase() + '|' + String(x.providerAddress).toLowerCase(), x);
+  let gebondet = 0, rune = 0, offenZahl = 0, freigegeben = 0;
+  const wallets = new Set();
+  for (const x of paare.values()) {
+    wallets.add(String(x.providerAddress).toLowerCase());
+    const b = Number(x.realBond) / 1e8;
+    if (x.status === 'bonded' || b > 0) { gebondet++; rune += b > 0 ? b : 0; }
+    else if (x.status === 'approved') freigegeben++;
+    else if (x.status === 'pending') offenZahl++;
+  }
+  return { anfragen: unsereAnfragen.length, wallets: wallets.size, gebondet, runeGebondet: Math.round(rune), freigegeben, offen: offenZahl,
+    letzte: unsereAnfragen.reduce((m, x) => Math.max(m, Date.parse(x.requestedAt) || 0), 0) || null,
+    quelle: 'integrators', geprueft: alle.length, nochOhneMemo: alle.filter(x => !RB_MEMO_UNSER.has(String(x.txId).toUpperCase())).length };
 }
 // NEUE PODCAST-FOLGE MELDEN (gewuenscht): Alle 30 Minuten den Feed frisch lesen; ist die neueste Folge eine
 // andere als zuletzt gemerkt, Push an alle, die das Thema \"Neue Podcast-Folge\" eingeschaltet haben.
