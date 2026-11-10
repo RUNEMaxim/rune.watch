@@ -1304,6 +1304,13 @@ async function handlePurchases(request, env, ctx) {
     const incomingSettings = sanitizeSettings(body.settings);
 
     const newlyDeletedIds = Array.isArray(body.deletedIds) ? body.deletedIds.filter(Boolean) : [];
+    // WIEDERHERGESTELLT: Ein bewusst wieder uebernommener DEX-Kauf hebt seine Loeschmarke "tx:<txId>"
+    // auf (nur solche Marken -- normale ID-Loeschungen bleiben endgueltig).
+    const restoredIds = Array.isArray(body.restoredIds) ? body.restoredIds.filter((x) => typeof x === 'string' && x.startsWith('tx:')).slice(0, 500) : [];
+    if (restoredIds.length) {
+      const weg = env.DB.prepare('DELETE FROM user_purchases_deleted WHERE address = ? AND deleted_id = ?');
+      await env.DB.batch(restoredIds.map((x) => weg.bind(address, x)));
+    }
 
     if (newlyDeletedIds.length) {
       const now0 = Date.now();
