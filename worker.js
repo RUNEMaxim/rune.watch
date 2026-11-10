@@ -162,6 +162,64 @@ async function ethGuthaben(adr) {
   }
   return out;
 }
+// MIDGARD UEBER DEN WORKER (gewuenscht, Option 1): Die App fragte Midgard bisher direkt aus dem Browser
+// ab -- ohne Liquify-Schluessel (oefter Drosselung/Verzoegerung) und mit der IP der Nutzer. Jetzt geht die
+// Swap-Suche ueber /mg/actions: der Worker nutzt die Schluessel-Instanz zuerst, Zwischenspeicher 30 s.
+// Nur /actions mit den Parametern, die die App braucht.
+const MG_CACHE = new Map();
+async function handleMidgardActions(request, env) {
+  const url = new URL(request.url);
+  const erlaubt = ['address', 'type', 'txType', 'limit', 'offset', 'affiliate', 'txid'];
+  const q = new URLSearchParams();
+  for (const k of erlaubt) { const v = url.searchParams.get(k); if (v != null && v !== '') q.set(k, String(v).slice(0, 120)); }
+  if (!q.get('address') && !q.get('txid') && !q.get('affiliate')) return json({ error: 'MISSING_FILTER' }, env, 400);
+  const lim = Math.min(50, Math.max(1, Number(q.get('limit')) || 50)); q.set('limit', String(lim));
+  const schl = q.toString();
+  const c = MG_CACHE.get(schl);
+  if (c && Date.now() - c.at < 30000) return json(c.v, env);
+  let letzter = null;
+  for (const basis of getMidgardBases()) {
+    try {
+      const r = await fetchWithTimeout(`${basis}/actions?${schl}`, { timeoutMs: 10000, headers: { 'x-client-id': 'rune-watch' } });
+      if (!r.ok) { letzter = 'HTTP_' + r.status; continue; }
+      const v = await r.json();
+      MG_CACHE.set(schl, { at: Date.now(), v });
+      if (MG_CACHE.size > 500) MG_CACHE.clear();
+      return json(v, env);
+    } catch (e) { letzter = String(e && e.message || e); }
+  }
+  return json({ error: 'MIDGARD_UNAVAILABLE', detail: letzter }, env, 502);
+}
+
+// SWAP PER TRANSAKTIONS-ID (gewuenscht, Option 2): direkt bei THORNode, ganz ohne Midgard -- dieselbe
+// Quelle wie RuneScan. Liefert Eingang (Muenze, Menge, Absender), RUNE-Ausgaenge (an wen, wie viel),
+// Block und Zeit.
+async function handleThorTx(request, env) {
+  const url = new URL(request.url);
+  const id = String(url.searchParams.get('id') || '').trim().toUpperCase().replace(/^0X/, '');
+  if (!/^[0-9A-F]{64}$/.test(id)) return json({ error: 'INVALID_TX' }, env, 400);
+  let d;
+  try { d = await fetchFromBases(getThornodeBases(), `/thorchain/tx/details/${id}`); }
+  catch (e) { return json({ error: 'THORNODE_UNAVAILABLE' }, env, 502); }
+  const tx = (d && d.tx && d.tx.tx) || (d && Array.isArray(d.txs) && d.txs[0] && d.txs[0].tx) || {};
+  const ein = (tx.coins || [])[0] || {};
+  const outs = Array.isArray(d && d.out_txs) ? d.out_txs : [];
+  const rune = outs.flatMap((o) => (o.coins || []).filter((c) => c.asset === 'THOR.RUNE').map((c) => ({ an: o.to_address, menge: Number(c.amount) / 1e8 })));
+  const hoehe = Number(d && (d.finalised_height || d.consensus_height)) || null;
+  let zeit = null;
+  if (hoehe) {
+    try {
+      const b = await fetchFromBases(getThornodeBases(), `/cosmos/base/tendermint/v1beta1/blocks/${hoehe}`);
+      const t = b && b.block && b.block.header && b.block.header.time;
+      if (t) zeit = Date.parse(t);
+    } catch (e) { /* Zeit fehlt dann */ }
+  }
+  return json({
+    id, von: ein.asset || null, menge: Number(ein.amount) / 1e8 || null, absender: tx.from_address || null,
+    memo: tx.memo || null, rune, hoehe, zeit, fertig: outs.length > 0,
+  }, env);
+}
+
 // ALLE SWAPS UEBER RUNE.WATCH (gewuenscht: "Swaps aller Nutzer sofort erkennen, das sieht man doch
 // on-chain"): Jeder Swap ueber rune.watch traegt die Kennung "runewatch" im Memo (Affiliate, 0 bps).
 // Midgard filtert danach (/actions?affiliate=runewatch). Der Worker fragt das hoechstens alle 45 s ab
@@ -5179,6 +5237,12 @@ export default {
       }
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
+      }
+      if (url.pathname === '/mg/actions') {
+        return await handleMidgardActions(request, env);
+      }
+      if (url.pathname === '/thor-tx') {
+        return await handleThorTx(request, env);
       }
       if (url.pathname === '/rw-swaps') {
         return await handleRwSwaps(request, env);
