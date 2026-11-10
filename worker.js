@@ -191,12 +191,26 @@ async function handleChainAddrs(request, env, ctx) {
 // ETH in gwei). Geschaetzt wird eine einfache Ueberweisung an die Einzahlungsadresse:
 //   BTC: Satz x typische Groesse je Adressart (bc1q 150, bc1p 160, 3... 175, 1... 230 vByte)
 //   ETH: Satz x 21.000 Gas (normale ETH-Ueberweisung)
+// GENAUER (THORChains Satz ist bewusst grosszuegig gepolstert, $0,67 statt real ~$0,05): zuerst der
+// aktuelle Marktsatz -- BTC: mempool.space "halbe Stunde", ETH: eth_gasPrice +20 % --, THORChains
+// Satz nur als Rueckfall.
 let INBOUND_CACHE = { at: 0, v: null };
 async function gebuehrSaetze() {
   if (INBOUND_CACHE.v && Date.now() - INBOUND_CACHE.at < 120000) return INBOUND_CACHE.v;
-  const ib = await fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses');
   const v = {};
-  for (const x of Array.isArray(ib) ? ib : []) if (x && x.chain && Number(x.gas_rate) > 0) v[String(x.chain).toUpperCase()] = Number(x.gas_rate);
+  try {
+    const ib = await fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses');
+    for (const x of Array.isArray(ib) ? ib : []) if (x && x.chain && Number(x.gas_rate) > 0) v[String(x.chain).toUpperCase()] = Number(x.gas_rate);
+  } catch (e) { /* Rueckfall fehlt dann */ }
+  try {
+    const r = await fetchWithTimeout('https://mempool.space/api/v1/fees/recommended', { timeoutMs: 6000 });
+    const j = r.ok ? await r.json() : null;
+    if (j && Number(j.halfHourFee) > 0) v.BTC = Number(j.halfHourFee);
+  } catch (e) {}
+  try {
+    const gwei = hexZuZahl(await ethRpc('eth_gasPrice', []), 9);
+    if (gwei > 0) v.ETH = Math.max(0.05, gwei * 1.2);
+  } catch (e) {}
   INBOUND_CACHE = { at: Date.now(), v };
   return v;
 }
