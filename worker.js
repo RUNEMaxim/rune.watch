@@ -194,10 +194,13 @@ async function handleMidgardActions(request, env) {
 // SWAP PER TRANSAKTIONS-ID (gewuenscht, Option 2): direkt bei THORNode, ganz ohne Midgard -- dieselbe
 // Quelle wie RuneScan. Liefert Eingang (Muenze, Menge, Absender), RUNE-Ausgaenge (an wen, wie viel),
 // Block und Zeit.
+const THOR_TX_CACHE = new Map(); // fertige Transaktionen aendern sich nicht mehr -> 6 Std. merken
 async function handleThorTx(request, env) {
   const url = new URL(request.url);
   const id = String(url.searchParams.get('id') || '').trim().toUpperCase().replace(/^0X/, '');
   if (!/^[0-9A-F]{64}$/.test(id)) return json({ error: 'INVALID_TX' }, env, 400);
+  const c = THOR_TX_CACHE.get(id);
+  if (c && Date.now() - c.at < 6 * 3600e3) return json(c.v, env);
   let d;
   try { d = await fetchFromBases(getThornodeBases(), `/thorchain/tx/details/${id}`); }
   catch (e) { return json({ error: 'THORNODE_UNAVAILABLE' }, env, 502); }
@@ -214,10 +217,12 @@ async function handleThorTx(request, env) {
       if (t) zeit = Date.parse(t);
     } catch (e) { /* Zeit fehlt dann */ }
   }
-  return json({
+  const v = {
     id, von: ein.asset || null, menge: Number(ein.amount) / 1e8 || null, absender: tx.from_address || null,
     memo: tx.memo || null, rune, hoehe, zeit, fertig: outs.length > 0,
-  }, env);
+  };
+  if (v.fertig) { THOR_TX_CACHE.set(id, { at: Date.now(), v }); if (THOR_TX_CACHE.size > 3000) THOR_TX_CACHE.clear(); }
+  return json(v, env);
 }
 
 // ALLE SWAPS UEBER RUNE.WATCH (gewuenscht: "Swaps aller Nutzer sofort erkennen, das sieht man doch
