@@ -311,7 +311,11 @@ async function handleRwSwaps(request, env) {
     // Ausgang: das, was NICHT die Eingangs-Muenze ist (bei Erstattungen gleich der Eingang)
     // GROESSTE Ausgabe (gemeldet: "0.1962 ETH -> 0.0697 RUNE"): Kleinstbetraege wie Gebuehren-Anteile an
     // andere Adressen standen vorn und wurden als Ergebnis genommen.
-    const o = raus.filter((c) => c.asset !== e.asset).sort((a, b) => Number(b.amount) - Number(a.amount))[0] || raus[0] || {};
+    // Groesster Ausgang UEBER ALLE Ausgaenge, auch die als Affiliate markierten (gemeldet: wieder 0.0697 -- das ist die
+    // Gebuehr an den Memoless-Dienst "uws"; Midgard markiert die Ausgaenge nicht verlaesslich). Die Gebuehr ist stets winzig
+    // gegen den eigentlichen Erhalt, der groesste Ausgang ist also immer der Erhalt.
+    const alleRaus = (Array.isArray(a.out) ? a.out : []).flatMap((g) => (g && g.coins) || []);
+    const o = alleRaus.filter((c) => c.asset !== e.asset).sort((x, y) => Number(y.amount) - Number(x.amount))[0] || raus[0] || {};
     return {
       tx: ein.txID || null,
       von: e.asset || null, menge: Number(e.amount) / 1e8 || null,
@@ -2417,7 +2421,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-12-0100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-12-0115'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
