@@ -158,22 +158,48 @@ async function handleChainAddrs(request, env, ctx) {
   }
   return json({ error: 'METHOD_NOT_ALLOWED' }, env, 405);
 }
+// NETZWERKGEBUEHR FUERS EINZAHLEN (gefragt: "kann man sagen, wie viel ETH- bzw. BTC-Gebuehren man zahlt?"):
+// THORChain nennt je Chain einen empfohlenen Gebuehrensatz (inbound_addresses: gas_rate, BTC in sat/vByte,
+// ETH in gwei). Geschaetzt wird eine einfache Ueberweisung an die Einzahlungsadresse:
+//   BTC: Satz x typische Groesse je Adressart (bc1q 150, bc1p 160, 3... 175, 1... 230 vByte)
+//   ETH: Satz x 21.000 Gas (normale ETH-Ueberweisung)
+let INBOUND_CACHE = { at: 0, v: null };
+async function gebuehrSaetze() {
+  if (INBOUND_CACHE.v && Date.now() - INBOUND_CACHE.at < 120000) return INBOUND_CACHE.v;
+  const ib = await fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses');
+  const v = {};
+  for (const x of Array.isArray(ib) ? ib : []) if (x && x.chain && Number(x.gas_rate) > 0) v[String(x.chain).toUpperCase()] = Number(x.gas_rate);
+  INBOUND_CACHE = { at: Date.now(), v };
+  return v;
+}
+function gebuehrFuer(kette, adr, saetze) {
+  const r = saetze && saetze[kette];
+  if (!(r > 0)) return null;
+  if (kette === 'BTC') {
+    const vb = /^bc1q/.test(adr) ? 150 : /^bc1p/.test(adr) ? 160 : /^3/.test(adr) ? 175 : 230;
+    return { menge: (r * vb) / 1e8, satz: r, einheit: 'sat/vB' };
+  }
+  if (kette === 'ETH') return { menge: (r * 21000) / 1e9, satz: r, einheit: 'gwei' };
+  return null;
+}
 async function handleChainBalances(request, env) {
   const url = new URL(request.url);
   const liste = String(url.searchParams.get('addrs') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 12);
   const ergebnis = [];
+  let saetze = null;
+  try { saetze = await gebuehrSaetze(); } catch (e) { saetze = null; }
   await Promise.all(liste.map(async (adr) => {
     const kette = istBtcAdresse(adr) ? 'BTC' : istEthAdresse(adr) ? 'ETH' : null;
     if (!kette) { ergebnis.push({ adresse: adr, fehler: 'UNBEKANNTES_FORMAT' }); return; }
     const k = kette + ':' + adr.toLowerCase();
     const c = KETTEN_CACHE.get(k);
-    if (c && Date.now() - c.at < 60000) { ergebnis.push(c.v); return; }
+    if (c && Date.now() - c.at < 60000) { ergebnis.push({ ...c.v, gebuehr: gebuehrFuer(kette, adr, saetze) }); return; }
     try {
       const guthaben = kette === 'BTC' ? await btcGuthaben(adr) : await ethGuthaben(adr);
       const v = { adresse: adr, kette, guthaben };
       KETTEN_CACHE.set(k, { at: Date.now(), v });
       if (KETTEN_CACHE.size > 2000) KETTEN_CACHE.clear();
-      ergebnis.push(v);
+      ergebnis.push({ ...v, gebuehr: gebuehrFuer(kette, adr, saetze) });
     } catch (e) { ergebnis.push({ adresse: adr, kette, fehler: String(e && e.message || e) }); }
   }));
   return json({ adressen: ergebnis }, env);
