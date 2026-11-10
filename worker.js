@@ -2421,7 +2421,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-12-0115'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-12-1900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5333,6 +5333,12 @@ export default {
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
       }
+      if (url.pathname === '/rb-pruefung') {
+        // NACHPRUEFEN (gemeldet: "die Zahlen koennen nicht stimmen"): oeffentliche Rohdaten der RUNEBond-Zaehlung --
+        // wie viele Anfragen RUNEBond liefert, wie viele Memos geprueft sind, Beispiel-Memos und unsere Kennungen.
+        const erg = await runebondEmpfehlungen(env).catch(e => ({ fehler: String(e && e.message || e) }));
+        return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
+      }
       if (url.pathname === '/bonder-zahl') {
         return await handleBonderZahl(request, env);
       }
@@ -7652,6 +7658,7 @@ async function runebondEmpfehlungen(env) {
   return data;
 }
 const RB_MEMO_UNSER = new Map(); // txId -> true/false (Anfrage kam ueber rune.watch?)
+const RB_PRUEF_BEISPIELE = []; // die ersten gelesenen Memos (oeffentlich), fuer /rb-pruefung
 async function runebondEmpfehlungenIntegrators(env, unsere) {
   const basis = String(env.RUNEBOND_INTEGRATORS_BASE || RUNEBOND_INTEGRATORS_BASE).replace(/\/+$/, '');
   const kopf = { accept: 'application/json', 'x-api-key': String(env.RUNEBOND_API_KEY).trim() };
@@ -7662,7 +7669,7 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
   if (!nodes.length) return null;
   // Gespeichert wird NUR das oeffentliche Ergebnis "Transaktion traegt die Kennung runewatch: ja/nein" (steht fuer jeden
   // sichtbar auf der Blockchain, nichts Persoenliches) -- damit die Zaehlung nach einem Neustart sofort vollstaendig ist.
-  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS rb_wht_memo (tx_id TEXT PRIMARY KEY, unser INTEGER)').run(); } catch (e) {}
+  try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS rb_wht_memo2 (tx_id TEXT PRIMARY KEY, unser INTEGER)').run(); } catch (e) {}
   const alle = [];
   await Promise.all(nodes.map(async (addr) => {
     try {
@@ -7679,7 +7686,7 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
       const ids = offen.map(x => String(x.txId).toUpperCase());
       for (let i = 0; i < ids.length; i += 80) {
         const teil = ids.slice(i, i + 80);
-        const rows = await env.DB.prepare(`SELECT tx_id, unser FROM rb_wht_memo WHERE tx_id IN (${teil.map(() => '?').join(',')})`).bind(...teil).all();
+        const rows = await env.DB.prepare(`SELECT tx_id, unser FROM rb_wht_memo2 WHERE tx_id IN (${teil.map(() => '?').join(',')})`).bind(...teil).all();
         for (const row of (rows.results || [])) RB_MEMO_UNSER.set(row.tx_id, !!row.unser);
       }
     } catch (e) {}
@@ -7692,11 +7699,13 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
     try {
       const t = await fetchFromBases(getThornodeBases(), `/thorchain/tx/${id}`);
       const memo = String((t && t.observed_tx && t.observed_tx.tx && t.observed_tx.tx.memo) || (t && t.tx && t.tx.memo) || '');
-      const teile = memo.split(':');
-      const aff = teile.length >= 6 ? teile.slice(5).join(':').trim().toLowerCase() : '';
-      const ja = !!aff && unsere.has(aff);
+      // ROBUSTER: unsere Kennung (Name oder THOR-Adresse) in IRGENDEINEM Teil ab dem 4. Feld -- je nach Memo-Aufbau
+      // (mit/ohne Mengenfeld) steht sie nicht immer an derselben Stelle.
+      const teile = memo.split(':').map(x => x.trim().toLowerCase());
+      const ja = teile.slice(3).some(x => x && unsere.has(x));
+      if (RB_PRUEF_BEISPIELE.length < 12) RB_PRUEF_BEISPIELE.push({ tx: id, memo, unser: ja });
       RB_MEMO_UNSER.set(id, ja);
-      try { await env.DB.prepare('INSERT OR REPLACE INTO rb_wht_memo (tx_id, unser) VALUES (?, ?)').bind(id, ja ? 1 : 0).run(); } catch (e) {}
+      try { await env.DB.prepare('INSERT OR REPLACE INTO rb_wht_memo2 (tx_id, unser) VALUES (?, ?)').bind(id, ja ? 1 : 0).run(); } catch (e) {}
     } catch (e) { /* naechster Lauf */ }
   }
   const unsereAnfragen = alle.filter(x => RB_MEMO_UNSER.get(String(x.txId).toUpperCase()) === true);
