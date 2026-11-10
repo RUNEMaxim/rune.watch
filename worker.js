@@ -279,7 +279,18 @@ async function handleRwSwaps(request, env) {
       if (Array.isArray(j && j.actions)) { actions = j.actions; break; }
     } catch (e) { fehler = String(e && e.message || e); }
   }
-  if (!actions) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, RW_SWAPS_CACHE.v ? 200 : 502);
+  // ZWEITE QUELLE (gemeldet: "ohne Wallet keine Swaps zu sehen"): Midgards Affiliate-Suche liefert oft nichts.
+  // Zusaetzlich die fertigen Swaps aus der Swap-Historie aller Nutzer (D1, user_swap_history) -- ohne Adressen,
+  // nur Paar, Mengen, Zeit und Eingangs-Transaktion.
+  let ausDb = [];
+  try {
+    const rows = await env.DB.prepare(`SELECT from_asset, to_asset, amount, out_amount, in_tx_id, resolved_at, registered_at
+      FROM user_swap_history WHERE track_status = 'success' AND in_tx_id IS NOT NULL ORDER BY COALESCE(resolved_at, registered_at) DESC LIMIT 60`).all();
+    ausDb = (rows.results || []).map((r) => ({ tx: r.in_tx_id, von: r.from_asset, menge: Number(r.amount) || null, nach: r.to_asset,
+      erhalten: Number(r.out_amount) || null, zeit: Number(r.resolved_at || r.registered_at) || null, status: 'success' }));
+  } catch (e) { ausDb = []; }
+  if (!actions && !ausDb.length) return json(RW_SWAPS_CACHE.v || { swaps: [], fehler }, env, RW_SWAPS_CACHE.v ? 200 : 502);
+  actions = actions || [];
   const ohneAff = (g) => (Array.isArray(g) ? g : []).filter((x) => x && !x.affiliate);
   const swaps = actions.map((a) => {
     const ein = ohneAff(a.in)[0] || (a.in || [])[0] || {};
@@ -297,7 +308,18 @@ async function handleRwSwaps(request, env) {
       status: a.status || null,
     };
   }).filter((x) => x.tx && x.zeit);
-  const v = { swaps, at: Date.now() };
+  // zusammenfuehren: gleiche Eingangs-Transaktion = derselbe Swap; groesste erhaltene Menge gewinnt
+  const nachTx = new Map();
+  for (const x of [...swaps, ...ausDb]) {
+    if (!x.tx || !x.zeit) continue;
+    const k = String(x.tx).toLowerCase();
+    const a = nachTx.get(k);
+    if (!a) { nachTx.set(k, { ...x }); continue; }
+    a.von = a.von || x.von; a.nach = a.nach || x.nach; a.menge = a.menge || x.menge;
+    a.erhalten = Math.max(a.erhalten || 0, x.erhalten || 0) || null;
+  }
+  const alleSwaps = [...nachTx.values()].sort((a, b) => b.zeit - a.zeit).slice(0, 40);
+  const v = { swaps: alleSwaps, at: Date.now() };
   RW_SWAPS_CACHE = { at: Date.now(), v };
   return json(v, env);
 }
@@ -2369,7 +2391,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-11-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-11-2330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
