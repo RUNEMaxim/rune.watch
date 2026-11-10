@@ -1943,6 +1943,13 @@ async function handleSwapHistory(request, env, ctx) {
       const outTxt = s => (Number.isFinite(Number(s.trackOutAmount)) && Number(s.trackOutAmount) > 0 ? String(Number(s.trackOutAmount)) : null);
       // Bestehende Zeilen ohne Menge nachtragen (INSERT OR IGNORE laesst sie sonst unveraendert).
       const nach = env.DB.prepare('UPDATE user_swap_history SET out_amount = ? WHERE address = ? AND swap_id = ? AND (out_amount IS NULL OR out_amount = \'\')');
+      // Bestehende Eintraege AKTUALISIEREN: Ein frueher falsch zugeordneter Swap bekommt so seine richtige
+      // Einzahlung (in_tx_id) -- sonst blieb auf anderen Geraeten die falsche stehen und der Swap fiel beim
+      // Entdoppeln weg (gemeldet: "3 Swaps, aber nur 2 gezeigt"). Getrennte UPDATEs, unabhaengig vom
+      // Schluessel der Tabelle.
+      const txNeu = env.DB.prepare('UPDATE user_swap_history SET in_tx_id = ?, out_tx_id = COALESCE(?, out_tx_id), resolved_at = COALESCE(?, resolved_at) WHERE address = ? AND swap_id = ? AND (in_tx_id IS NULL OR in_tx_id <> ?)');
+      const mitTx = valid.filter(s => s.trackInTxId);
+      if (mitTx.length) { try { await env.DB.batch(mitTx.map(s => txNeu.bind(s.trackInTxId, s.trackOutTxId || null, Number.isFinite(s.resolvedAtMs) ? s.resolvedAtMs : null, address, s.id, s.trackInTxId))); } catch (e) {} }
       const mitMenge = valid.filter(s => outTxt(s));
       if (mitMenge.length) { try { await env.DB.batch(mitMenge.map(s => nach.bind(outTxt(s), address, s.id))); } catch (e) {} }
       await env.DB.batch(valid.map((s) => stmt.bind(
