@@ -2421,7 +2421,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-13-0015'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-13-1530'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2590,7 +2590,7 @@ function marktAntwort(erg, url, env) {
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
-async function handleStats(request, env) {
+async function handleStats(request, env, ctx) {
   const url = new URL(request.url);
   const key = url.searchParams.get('key');
   if (!env.STATS_ACCESS_KEY || key !== env.STATS_ACCESS_KEY) {
@@ -2736,7 +2736,16 @@ async function handleStats(request, env) {
     runebondClicksLast30d: klick30Row?.n ?? null,
     runebondClicksTotal: klickGesamtRow?.n ?? null,
     runebondClicksBySource30d: klickQuellenRows && Array.isArray(klickQuellenRows.results) ? klickQuellenRows.results : null,
-    runebondRef: await runebondEmpfehlungen(env).catch(() => null),
+    // SCHNELL (gemeldet: "Statistikseite oeffnet sehr langsam"): letzten Stand sofort, Auffrischung im Hintergrund;
+    // ohne Stand hoechstens 3 s warten.
+    runebondRef: await (async () => {
+      const alt = runebondRefCache.data;
+      const frisch = runebondEmpfehlungen(env).catch(() => null);
+      if (alt) { if (ctx && ctx.waitUntil) ctx.waitUntil(frisch); return alt; }
+      const r = await Promise.race([frisch, new Promise((res) => setTimeout(() => res(null), 3000))]);
+      if (!r && ctx && ctx.waitUntil) ctx.waitUntil(frisch);
+      return r;
+    })(),
   };
 
   // KOHORTEN: Adressen nach Woche ihres ersten Syncs; je Kohorte der Anteil, der in Woche
@@ -2781,11 +2790,13 @@ async function handleStats(request, env) {
   try {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS markt_cache (k TEXT PRIMARY KEY, v TEXT, at INTEGER)').run();
     const c = await env.DB.prepare('SELECT v, at FROM markt_cache WHERE k = ?').bind('markt').first();
-    if (c && Date.now() - c.at < 24 * 3600e3) markt = JSON.parse(c.v);
-    else {
+    // SCHNELL: vorhandenen Stand (auch aelteren) sofort zeigen; ist er aelter als 24 h oder fehlt, wird im
+    // HINTERGRUND neu gerechnet (dauerte bisher 10-25 s im Seitenaufruf).
+    if (c) markt = JSON.parse(c.v);
+    if (!c || Date.now() - c.at >= 24 * 3600e3) {
       const u = new URL(request.url); u.pathname = '/analyse/markt'; u.searchParams.set('neu', '1'); u.searchParams.set('format', 'json');
-      const r = await handleMarkt(new Request(u.toString()), env);
-      if (r.ok) markt = await r.json();
+      const neu = handleMarkt(new Request(u.toString()), env).catch(() => null);
+      if (ctx && ctx.waitUntil) ctx.waitUntil(neu);
     }
   } catch (e) { markt = null; }
 
@@ -5472,7 +5483,7 @@ export default {
         return await handleClick(request, env, ctx);
       }
       if (url.pathname === '/stats') {
-        return await handleStats(request, env);
+        return await handleStats(request, env, ctx);
       }
       if (url.pathname === '/analyse/markt') {
         return await handleMarkt(request, env);
@@ -7691,23 +7702,20 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
       }
     } catch (e) {}
   }
-  let neu = 0;
-  for (const x of alle) {
-    const id = String(x.txId).toUpperCase();
-    if (RB_MEMO_UNSER.has(id) || neu >= 30) continue;
-    neu++;
+  // parallel statt nacheinander (je Transaktion eine THORNode-Abfrage), hoechstens 30 neue je Lauf
+  const zuPruefen = []; const gesehen = new Set();
+  for (const x of alle) { const id = String(x.txId).toUpperCase(); if (!RB_MEMO_UNSER.has(id) && !gesehen.has(id) && zuPruefen.length < 30) { gesehen.add(id); zuPruefen.push(id); } }
+  await Promise.all(zuPruefen.map(async (id) => {
     try {
       const t = await fetchFromBases(getThornodeBases(), `/thorchain/tx/${id}`);
       const memo = String((t && t.observed_tx && t.observed_tx.tx && t.observed_tx.tx.memo) || (t && t.tx && t.tx.memo) || '');
-      // ROBUSTER: unsere Kennung (Name oder THOR-Adresse) in IRGENDEINEM Teil ab dem 4. Feld -- je nach Memo-Aufbau
-      // (mit/ohne Mengenfeld) steht sie nicht immer an derselben Stelle.
       const teile = memo.split(':').map(x => x.trim().toLowerCase());
       const ja = teile.slice(3).some(x => x && unsere.has(x));
       if (RB_PRUEF_BEISPIELE.length < 12) RB_PRUEF_BEISPIELE.push({ tx: id, memo, unser: ja });
       RB_MEMO_UNSER.set(id, ja);
       try { await env.DB.prepare('INSERT OR REPLACE INTO rb_wht_memo2 (tx_id, unser) VALUES (?, ?)').bind(id, ja ? 1 : 0).run(); } catch (e) {}
     } catch (e) { /* naechster Lauf */ }
-  }
+  }));
   const unsereAnfragen = alle.filter(x => RB_MEMO_UNSER.get(String(x.txId).toUpperCase()) === true);
   const paare = new Map();
   for (const x of unsereAnfragen) paare.set(String(x.nodeAddress).toLowerCase() + '|' + String(x.providerAddress).toLowerCase(), x);
