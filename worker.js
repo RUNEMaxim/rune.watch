@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-13-1945'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-13-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2774,6 +2774,7 @@ async function handleStats(request, env, ctx) {
     runebondClicksBySource30d: klickQuellenRows && Array.isArray(klickQuellenRows.results) ? klickQuellenRows.results : null,
     // SCHNELL (gemeldet: "Statistikseite oeffnet sehr langsam"): letzten Stand sofort, Auffrischung im Hintergrund;
     // ohne Stand hoechstens 3 s warten.
+    liveTest: await liveBilanz(env),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
       const frisch = runebondEmpfehlungen(env).catch(() => null);
@@ -3086,6 +3087,15 @@ async function handleStats(request, env, ctx) {
           const summe = rows.reduce((a, r) => a + (Number(r.n) || 0), 0);
           const zeilen = rows.map(r => `${namen[r.q] || r.q}: <b>${Number(r.n) || 0}</b>`).join('<br>');
           return tile('rbsrc', 'Clicks by source', summe, zeilen);
+        })()}
+        <div class="sec">Chart analysis \u00b7 live test</div>
+        ${(() => {
+          const L = stats.liveTest;
+          if (!L || !L.n) return tile('live0', 'Signals recorded', null, 'starts with the next 4h candle \u00b7 RUNE, BTC, ETH, SOL');
+          const seit = new Date(L.seit).toISOString().slice(0, 10);
+          const zeile = (name, a) => a ? `${name}: after bullish ${a.bullUp ?? '\u2013'} % up (${a.bullN}) \u00b7 after bearish ${a.bearDown ?? '\u2013'} % down (${a.bearN}) \u00b7 base ${a.basisUp} % up \u00b7 Brier ${a.brier} (random ${a.brierZufall})` : `${name}: waiting for results`;
+          return tile('live1', 'Signals recorded', L.n, `since ${seit}`) +
+            tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>'));
         })()}
       </div>
     </section>
@@ -7789,7 +7799,73 @@ async function syncPodcastMeldung(env) {
   if (f.datum && Date.now() - f.datum > 3 * 864e5) return; // keine alten Folgen nachmelden
   await pushAnThema(env, 'podcast', de => ({ titel: de ? 'Neue Podcast-Folge' : 'New podcast episode', text: String(f.titel || '').slice(0, 140), tag: 'rw-podcast', url: '/#podcast' }));
 }
+// LIVE-MITSCHREIBER (gewuenscht): Alle 4 Stunden fuer RUNE, BTC, ETH, SOL die gerade geschlossene 4H-Kerze mit
+// derselben Chart-Analyse wie in der App auswerten und das Signal festhalten; um 00 UTC zusaetzlich die Tageskerze.
+// Spaeter traegt der Worker ein, was danach passiert ist (Kursveraenderung nach 1/3/7 bzw. 3/7/14 Kerzen-Tagen).
+// Gespeichert werden NUR oeffentliche Marktdaten. Kurse vom oeffentlichen Binance-Spiegel data-api.binance.vision.
+const RW_LIVE_COINS = ['RUNE', 'BTC', 'ETH', 'SOL'];
+const RW_LIVE_H = { '4h': [6, 18, 42], '1d': [3, 7, 14] };
+async function rwLiveKerzen(sym, iv, n) {
+  const r = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}USDT&interval=${iv}&limit=${n}`, { timeoutMs: 12000 });
+  if (!r.ok) throw new Error('klines ' + r.status);
+  const j = await r.json();
+  const jetzt = Date.now();
+  return j.filter(k => Number(k[6]) < jetzt).map(k => ({ date: Number(k[0]), open: +k[1], high: +k[2], low: +k[3], close: +k[4], value: +k[4], volume: +k[5] })); // nur geschlossene Kerzen
+}
+async function liveMitschreiber(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS live_signale (coin TEXT, ebene TEXT, at INTEGER, close REAL, bull_pct INTEGER, urteil TEXT, trend TEXT,
+    ew_phase TEXT, szen_dir TEXT, szen_prob INTEGER, r1 REAL, r2 REAL, r3 REAL, PRIMARY KEY (coin, ebene, at))`).run();
+  const stunde = new Date().getUTCHours();
+  const ebenen = ['4h'].concat(stunde < 1 ? ['1d'] : []);
+  for (const iv of ebenen) for (const coin of RW_LIVE_COINS) {
+    try {
+      const k = await rwLiveKerzen(coin, iv, 700);
+      if (k.length < 320) continue;
+      const letzte = k[k.length - 1];
+      const da = await env.DB.prepare('SELECT 1 FROM live_signale WHERE coin = ? AND ebene = ? AND at = ?').bind(coin, iv, letzte.date).first();
+      if (!da) {
+        let r = null;
+        try { r = RW_ANALYSE.analyze({ data: k, viewStart: Math.max(0, k.length - 250), viewEnd: k.length - 1, logScale: true, dochtFilter: true }); } catch (e) { console.warn('[live] analyse', coin, iv, e && e.message); }
+        if (r) {
+          const E = r.elliott, S = r.score, sc = E && E.scenarios && E.scenarios[0];
+          await env.DB.prepare('INSERT OR IGNORE INTO live_signale (coin, ebene, at, close, bull_pct, urteil, trend, ew_phase, szen_dir, szen_prob) VALUES (?,?,?,?,?,?,?,?,?,?)')
+            .bind(coin, iv, letzte.date, letzte.close, S ? S.bullPct : null, S ? S.verdict : null, r.trend ? r.trend.dir : null, E ? E.phase : null, sc ? sc.dir : null, sc ? sc.prob : null).run();
+        }
+      }
+      // Auswertung frueherer Signale mit denselben Kerzen
+      const offen = await env.DB.prepare('SELECT at, close, r1, r2, r3 FROM live_signale WHERE coin = ? AND ebene = ? AND (r1 IS NULL OR r2 IS NULL OR r3 IS NULL) AND at >= ?')
+        .bind(coin, iv, k[0].date).all();
+      const idx = new Map(k.map((x, i) => [x.date, i]));
+      for (const o of (offen.results || [])) {
+        const i = idx.get(o.at); if (i == null) continue;
+        const [h1, h2, h3] = RW_LIVE_H[iv];
+        const ret = h => (k[i + h] ? k[i + h].close / o.close - 1 : null);
+        const n1 = o.r1 ?? ret(h1), n2 = o.r2 ?? ret(h2), n3 = o.r3 ?? ret(h3);
+        if (n1 !== o.r1 || n2 !== o.r2 || n3 !== o.r3) await env.DB.prepare('UPDATE live_signale SET r1 = ?, r2 = ?, r3 = ? WHERE coin = ? AND ebene = ? AND at = ?').bind(n1, n2, n3, coin, iv, o.at).run();
+      }
+    } catch (e) { console.warn('[live]', coin, iv, e && e.message); }
+  }
+}
+async function liveBilanz(env) {
+  try {
+    const rows = (await env.DB.prepare('SELECT coin, ebene, at, bull_pct, urteil, szen_dir, szen_prob, r1, r2, r3 FROM live_signale').all()).results || [];
+    if (!rows.length) return { n: 0 };
+    const erste = Math.min(...rows.map(r => r.at));
+    const auswert = (feld) => {
+      const z = rows.filter(r => r[feld] != null);
+      if (!z.length) return null;
+      const up = z.filter(r => r[feld] > 0).length / z.length;
+      const bull = z.filter(r => r.urteil === 'bull'), bear = z.filter(r => r.urteil === 'bear');
+      const q = (g, f) => g.length ? Math.round(100 * g.filter(f).length / g.length) : null;
+      const brier = z.filter(r => r.bull_pct != null).reduce((a, r) => a + Math.pow(r.bull_pct / 100 - (r[feld] > 0 ? 1 : 0), 2), 0) / Math.max(1, z.filter(r => r.bull_pct != null).length);
+      return { n: z.length, basisUp: Math.round(100 * up), bullUp: q(bull, r => r[feld] > 0), bullN: bull.length, bearDown: q(bear, r => r[feld] < 0), bearN: bear.length, brier: +brier.toFixed(3), brierZufall: +(up * (1 - up)).toFixed(3) };
+    };
+    return { n: rows.length, seit: erste, kurz: auswert('r1'), mittel: auswert('r2'), lang: auswert('r3') };
+  } catch (e) { return { n: 0, fehler: String(e && e.message || e) }; }
+}
+
 async function runRefreshCycle(env) {
+  try { await liveMitschreiber(env); } catch (e) { console.warn('[live] Lauf', e && e.message); }
   // Slash-/Erstattungs-Erkennung entfernt (gewuenscht): einmalig ihre Tabellen und Zwischenstaende loeschen
   try {
     if (!(await env.DB.prepare("SELECT v FROM push_state WHERE k = 'slashAufraeumen'").first().catch(() => null))) {
@@ -8016,3 +8092,4032 @@ async function refreshOneAddress(env, addressRow, now) {
     .bind(stillMissing ? 'building' : 'done', now, address)
     .run();
 }
+
+// ===== CHART-ANALYSE (automatisch aus app.js uebernommen, fuer den Live-Mitschreiber) =====
+const RW_ANALYSE = (() => {
+  const t = (k) => k;
+// AUTOMATISCH aus app.js erzeugt (extrahiere.js) -- Chart-Analyse fuer den Worker. Nicht von Hand bearbeiten.
+const RW_EW_ZUVERL = {
+  waveC: { n: 237, treffer: 50, richtung: 46 }, corrDone: { n: 204, treffer: 59, richtung: 43 },
+  impulseDone: { n: 155, treffer: 51, richtung: 46 }, wave4: { n: 143, treffer: 44, richtung: 53 },
+  waveB: { n: 111, treffer: 31, richtung: 37 }, wave5: { n: 74, treffer: 57, richtung: 54 },
+  wave3: { n: 55, treffer: 65, richtung: 49 }, wave2: { n: 36, treffer: 6, richtung: 38 },
+};
+const RW_EW_OHNE_PROJEKTION = ['waveB'];
+const TPAnalysis = (() => {
+  const ln = v => Math.log(Math.max(v, 1e-12));
+  const hiOf = d => d.high != null ? d.high : d.value;
+  const loOf = d => d.low != null ? d.low : d.value;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const avg = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : 0;
+
+  // ---------------------------------------------------------------- Basis-Indikatoren ------
+  function atrSeries(data, period) {
+    const out = [];
+    let a = null;
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const h = hiOf(data[i]), l = loOf(data[i]);
+      const tr = i === 0 ? h - l : Math.max(h - l, Math.abs(h - data[i - 1].value), Math.abs(l - data[i - 1].value));
+      if (i < period) {
+        sum += tr;
+        out.push(i === period - 1 ? sum / period : null);
+        if (i === period - 1) a = sum / period;
+        continue;
+      }
+      a = (a * (period - 1) + tr) / period;
+      out.push(a);
+    }
+    return out;
+  }
+  function emaArr(values, period) {
+    const k = 2 / (period + 1);
+    const out = [];
+    let e = null, warm = 0, sum = 0;
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i];
+      if (v == null || !Number.isFinite(v)) { out.push(e); continue; }
+      if (e == null) {
+        sum += v; warm++;
+        if (warm < period) { out.push(null); continue; }
+        e = sum / period; out.push(e); continue;
+      }
+      e = v * k + e * (1 - k);
+      out.push(e);
+    }
+    return out;
+  }
+  function smaArr(values, period) {
+    const out = [];
+    let sum = 0;
+    for (let i = 0; i < values.length; i++) {
+      sum += values[i];
+      if (i >= period) sum -= values[i - period];
+      out.push(i >= period - 1 ? sum / period : null);
+    }
+    return out;
+  }
+  function rsiArr(closes, period) {
+    const out = [];
+    let ag = 0, al = 0;
+    for (let i = 0; i < closes.length; i++) {
+      if (i === 0) { out.push(null); continue; }
+      const ch = closes[i] - closes[i - 1];
+      const g = Math.max(ch, 0), l = Math.max(-ch, 0);
+      if (i <= period) {
+        ag += g; al += l;
+        if (i < period) { out.push(null); continue; }
+        ag /= period; al /= period;
+      } else {
+        ag = (ag * (period - 1) + g) / period;
+        al = (al * (period - 1) + l) / period;
+      }
+      out.push(al === 0 ? 100 : 100 - 100 / (1 + ag / al));
+    }
+    return out;
+  }
+  function stochArr(data, period, smoothK, smoothD) {
+    const raw = [];
+    for (let i = 0; i < data.length; i++) {
+      if (i < period - 1) { raw.push(null); continue; }
+      let hi = -Infinity, lo = Infinity;
+      for (let j = i - period + 1; j <= i; j++) { hi = Math.max(hi, hiOf(data[j])); lo = Math.min(lo, loOf(data[j])); }
+      raw.push(hi === lo ? 50 : (data[i].value - lo) / (hi - lo) * 100);
+    }
+    const sm = (arr, p) => arr.map((v, i) => {
+      if (v == null || i < p - 1) return null;
+      const w = arr.slice(i - p + 1, i + 1);
+      return w.some(x => x == null) ? null : avg(w);
+    });
+    const k = sm(raw, smoothK);
+    const d = sm(k, smoothD);
+    return { k, d };
+  }
+
+  // ---------------------------------------------------------------- ZigZag-Pivots -----------
+  // Klassischer ZigZag auf Log-Preisen: ein Hoch gilt erst dann als Pivot, wenn der Kurs danach
+  // um mindestens `pct` gefallen ist (und umgekehrt). Das letzte, noch unbestaetigte Extrem wird
+  // als "pending" mitgeliefert -- fuer "Welle X laeuft gerade"-Aussagen.
+  function zigzag(data, from, to, pct) {
+    const thr = Math.log(1 + pct);
+    const piv = [];
+    let trend = 0;
+    let hiIdx = from, hiP = hiOf(data[from]), loIdx = from, loP = loOf(data[from]);
+    for (let i = from + 1; i <= to; i++) {
+      const h = hiOf(data[i]), l = loOf(data[i]);
+      if (trend >= 0 && h > hiP) { hiP = h; hiIdx = i; }
+      if (trend <= 0 && l < loP) { loP = l; loIdx = i; }
+      // WICHTIG: eine Umkehr zaehlt nur auf einer SPAETEREN Kerze als das laufende Extrem --
+      // sonst wuerde eine einzelne grosse Kerze (Hoch UND Tief weit auseinander) sofort zwei
+      // Pivots auf demselben Index erzeugen und die Reihe in Rauschen zerhacken.
+      if (trend === 0) {
+        if (i > hiIdx && ln(hiP) - ln(l) > thr) { piv.push({ idx: hiIdx, price: hiP, type: 'H' }); trend = -1; loP = l; loIdx = i; }
+        else if (i > loIdx && ln(h) - ln(loP) > thr) { piv.push({ idx: loIdx, price: loP, type: 'L' }); trend = 1; hiP = h; hiIdx = i; }
+      } else if (trend === 1) {
+        if (i > hiIdx && ln(hiP) - ln(l) > thr) { piv.push({ idx: hiIdx, price: hiP, type: 'H' }); trend = -1; loP = l; loIdx = i; }
+      } else if (i > loIdx && ln(h) - ln(loP) > thr) {
+        piv.push({ idx: loIdx, price: loP, type: 'L' }); trend = 1; hiP = h; hiIdx = i;
+      }
+    }
+    let pending = null;
+    if (trend === 1) pending = { idx: hiIdx, price: hiP, type: 'H', pending: true };
+    else if (trend === -1) pending = { idx: loIdx, price: loP, type: 'L', pending: true };
+    return { pivots: piv, pending };
+  }
+  const ZZ_STEPS = [0.006, 0.009, 0.013, 0.018, 0.025, 0.035, 0.05, 0.07, 0.1, 0.14, 0.2, 0.28, 0.4, 0.6];
+  // WICHTIG (gemeldet: "Muster verschwinden, wenn ich den Chart etwas verschiebe"): der ZigZag
+  // lief bisher ab dem LINKEN Bildrand. Jedes Verschieben aenderte damit den Startpunkt, die
+  // Wendepunkte und mit ihnen Muster und Ziele -- sie flackerten. Jetzt laeuft der ZigZag immer
+  // ab der ERSTEN geladenen Kerze bis zur letzten sichtbaren ("to"), und erst das fertige
+  // Ergebnis wird auf das Fenster geschnitten. Die Wendepunkte haengen dadurch nur noch von den
+  // Daten ab, nicht vom Bildausschnitt -- genau wie die Fraktal-Pivots in
+  // BennyThadikaran/stock-pattern (barsLeft/barsRight), nur volatilitaetsabhaengig statt fix.
+  // Bis "to" statt bis zum Ende, damit beim Blick in die Vergangenheit nichts aus der Zukunft
+  // "durchsickert" (ein spaeteres Hoch darf ein damaliges Pending-Extrem nicht bestaetigen).
+  // Gecacht je Datenreihe (WeakMap) -- ein Live-Tick liefert eine neue Reihe und leert damit
+  // automatisch den Cache; innerhalb eines Ticks kostet Verschieben nichts mehr.
+  const zzCache = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+  function zigzagUpTo(data, to, pct) {
+    let m = zzCache ? zzCache.get(data) : null;
+    if (!m) { m = new Map(); if (zzCache) zzCache.set(data, m); }
+    const key = to + ':' + pct;
+    let r = m.get(key);
+    if (!r) { r = zigzag(data, 0, to, pct); m.set(key, r); }
+    return r;
+  }
+  // Schwelle rein aus der Volatilitaet (minPct = k x ATR%), auf die naechste Stufe gerundet --
+  // und nur dann grober, wenn im Fenster trotzdem mehr als `maxCount` Wendepunkte liegen. Vorher
+  // wurde die Schwelle nach der Anzahl im Fenster gewaehlt; ein anderes Fenster sprang dadurch
+  // auf eine andere Stufe und lieferte ganz andere Pivots (zweite Flacker-Ursache).
+  const pow2Span = len => Math.pow(2, Math.round(Math.log(Math.max(8, len)) / Math.LN2));
+  function pivotsAuto(data, from, to, maxCount, minCount, minPct, viewLen) {
+    const steps = ZZ_STEPS.filter(p => p >= (minPct || 0));
+    if (!steps.length) steps.push(ZZ_STEPS[ZZ_STEPS.length - 1]);
+    // Die Zaehlung fuer "zu viele Wendepunkte?" laeuft NICHT ueber das exakte Fenster (das
+    // aendert sich bei jedem Verschieben um ein paar Kerzen und wuerde die Stufe kippen lassen),
+    // sondern ueber eine Referenzspanne, die auf Zweierpotenzen gerundet ist (64, 128, 256 ...
+    // Kerzen vor "to"). Gleiche Zoomstufe = gleiche Referenzspanne = gleiche Schwelle.
+    const len = Math.max(8, viewLen || (to - from + 1));
+    const refSpan = pow2Span(len);
+    const refFrom = Math.max(0, to - refSpan);
+    // HYSTERESE DER STUFE (gemeldet: "willkuerlich"): Die Stufe kippte, sobald die Zahl der
+    // Wendepunkte in der gleitenden Referenzspanne um EINEN ueber/unter maxCount lag -- dann
+    // verschwanden bestaetigte Wendepunkte, und die Elliott-Zaehlung baute sich um. Jetzt bleibt
+    // die zuletzt gewaehlte Stufe derselben Reihe, solange sie hoechstens 20 % ueber maxCount
+    // liegt (bzw. bei einer groeberen Stufe, solange die neue nur knapp darunter liegt).
+    const key = data.length > 1 ? [data[0].date, data[0].value, data[1].date - data[0].date, maxCount, refSpan].join('|') : null;
+    const alt = key ? ZZ_HYST.get(key) : null;
+    const bau = pct => {
+      const full = zigzagUpTo(data, to, pct);
+      const inRef = full.pivots.filter(p => p.idx >= refFrom).length;
+      const inWin = full.pivots.filter(p => p.idx >= from);
+      // Der letzte Pivot VOR dem Fenster wird mitgenommen, damit eine Welle, die gerade am
+      // linken Rand beginnt, nicht ohne Startpunkt dasteht.
+      const prev = full.pivots.filter(p => p.idx < from);
+      const pivots = (prev.length ? [prev[prev.length - 1]] : []).concat(inWin);
+      return { pivots, pending: full.pending, pct, inRef };
+    };
+    let best = null, gewaehlt = null;
+    for (const pct of steps) {
+      const r = bau(pct);
+      if (r.inRef <= maxCount) { gewaehlt = r; break; }
+      best = r;
+    }
+    if (!gewaehlt) gewaehlt = best;
+    // Die Untergrenze minPct haengt am ATR und wandert mit jeder Kerze -- die alte Stufe darf
+    // deshalb bis 20 % darunter liegen, sonst fiele sie allein durch das ATR-Rauschen heraus.
+    if (gewaehlt && alt != null && alt !== gewaehlt.pct && ZZ_STEPS.includes(alt) && alt >= (minPct || 0) * 0.8) {
+      const iAlt = ZZ_STEPS.indexOf(alt), iNeu = ZZ_STEPS.indexOf(gewaehlt.pct);
+      if (Math.abs(iAlt - iNeu) === 1) {
+        const rAlt = bau(alt);
+        const halten = iAlt < iNeu ? rAlt.inRef <= maxCount * 1.2 : gewaehlt.inRef >= maxCount * 0.8;
+        if (halten) gewaehlt = rAlt;
+      }
+    }
+    if (key && gewaehlt) { ZZ_HYST.set(key, gewaehlt.pct); if (ZZ_HYST.size > 300) ZZ_HYST.delete(ZZ_HYST.keys().next().value); }
+    if (gewaehlt) { delete gewaehlt.inRef; return gewaehlt; }
+    return { pivots: [], pending: null, pct: ZZ_STEPS[0] };
+  }
+  const ZZ_HYST = new Map();
+
+  // ---------------------------------------------------------------- Trend -------------------
+  function detectTrend(data, from, to, atrPct, pivots) {
+    const n = to - from + 1;
+    if (n < 5) return { dir: 'side', strength: 0, changePct: 0, r2: 0 };
+    let sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+    for (let i = from; i <= to; i++) {
+      const x = i - from, y = ln(data[i].value);
+      sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y;
+    }
+    const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx || 1);
+    const r2num = (n * sxy - sx * sy);
+    const r2 = r2num * r2num / ((n * sxx - sx * sx) * (n * syy - sy * sy) || 1);
+    const moveAtr = slope * n / (atrPct || 0.01);
+    let hh = 0, hl = 0, lh = 0, ll = 0;
+    const H = pivots.filter(p => p.type === 'H'), L = pivots.filter(p => p.type === 'L');
+    for (let i = 1; i < H.length; i++) H[i].price > H[i - 1].price ? hh++ : lh++;
+    for (let i = 1; i < L.length; i++) L[i].price > L[i - 1].price ? hl++ : ll++;
+    const structUp = hh + hl, structDown = lh + ll;
+    let dir = 'side';
+    if (moveAtr > 2 && r2 > 0.2 && structUp >= structDown) dir = 'up';
+    else if (moveAtr < -2 && r2 > 0.2 && structDown >= structUp) dir = 'down';
+    else if (moveAtr > 4 && structUp > structDown) dir = 'up';
+    else if (moveAtr < -4 && structDown > structUp) dir = 'down';
+    const strength = clamp(Math.round(Math.abs(moveAtr) * r2 * 10) / 10, 0, 10);
+    return { dir, strength, changePct: (Math.exp(slope * n) - 1) * 100, r2, moveAtr };
+  }
+
+  // ---------------------------------------------------------------- Trendlinien ------------
+  //
+  // Gemeldet: "kannst du das Zeichnen von wichtigen Linien auch ins Analyse-Tool einbauen?"
+  // -- als Beispiel eine lange fallende Linie vom Allzeithoch ueber die tieferen Hochs.
+  // detectTrend oben rechnet nur eine Regression und liefert "auf/ab/seitwaerts"; eine
+  // zeichenbare Linie gab es bisher nicht.
+  //
+  // Vorgehen wie ein Chartist:
+  //   1. Zwei grosse Wendepunkte gleicher Art verbinden -- Hochs fuer einen Widerstand,
+  //      Tiefs fuer eine Unterstuetzung.
+  //   2. Die Linie gilt nur, wenn ZWISCHEN den beiden Punkten keine Kerze deutlich durch sie
+  //      hindurchgeht. Sonst ist es keine Trendlinie, sondern eine beliebige Verbindung.
+  //   3. Je mehr weitere Wendepunkte die Linie beruehren, je laenger sie haelt und je naeher
+  //      sie am heutigen Kurs liegt, desto wichtiger.
+  //
+  // Gerechnet wird im Massstab des Charts (logarithmisch oder linear). Eine im Log-Raum
+  // gerade Linie waere auf einem linearen Chart gekruemmt -- sie wuerde neben den Kerzen
+  // liegen, die sie beschreiben soll.
+  function detectTrendlines(data, from, to, pivotsIn, useLog, tolLog, lastClose) {
+    // ZWEITE QUELLE: LOKALE HOCHS UND TIEFS ohne Prozentschwelle.
+    //
+    // Die Zickzack-Wendepunkte haben eine Mindestbewegung (hier bis 22 %). Ein gleichmaessiger
+    // Trend mit flachen Ruecksetzern von 12-17 % faellt dadurch komplett durch -- im Test lag
+    // bei einem sauberen Aufwaertstrend ein einziger Wendepunkt vor, und daraus laesst sich
+    // keine Linie bilden. Eine Kerze zaehlt hier als lokales Hoch, wenn keine ihrer Nachbarn
+    // innerhalb von k Kerzen hoeher liegt (sinngemaess fuer Tiefs). Das braucht keine Schwelle
+    // und findet genau die Punkte, an die man eine Trendlinie anlegt.
+    // Nachbarschaft passt sich der Laenge an. Bei kurzen Reihen muss k = 1 sein: In einem
+    // Aufwaertstrend liegt das VORIGE Tief immer tiefer, mit k = 2 findet sich dort nie ein
+    // lokales Tief. Bei langen Reihen dagegen groesser, sonst zaehlt jede Zacke und die
+    // Paarsuche wird quadratisch teuer.
+    const kF = (to - from) < 60 ? 1 : Math.max(2, Math.round((to - from) / 60));
+    const fraktal = [];
+    for (let i = from + kF; i <= to - kF; i++) {
+      let hoch = true, tief = true;
+      for (let j = i - kF; j <= i + kF; j++) {
+        if (j === i) continue;
+        if (hiOf(data[j]) > hiOf(data[i])) hoch = false;
+        if (loOf(data[j]) < loOf(data[i])) tief = false;
+        if (!hoch && !tief) break;
+      }
+      if (hoch) fraktal.push({ idx: i, price: hiOf(data[i]), type: 'H' });
+      if (tief) fraktal.push({ idx: i, price: loOf(data[i]), type: 'L' });
+    }
+    const pivots = (() => {
+      const m = new Map();
+      for (const p of [...(pivotsIn || []), ...fraktal]) {
+        const key = p.type + p.idx;
+        if (!m.has(key)) m.set(key, p);
+      }
+      return [...m.values()].sort((a, b) => a.idx - b.idx);
+    })();
+    if (pivots.length < 3) return { gewichtet: [], beruehrung: [] };
+    const V = (p) => useLog ? ln(p) : p;
+    // Abweichung RELATIV, damit dieselbe Toleranz auf billigen und teuren Kursen gilt.
+    const abw = (ist, linie) => useLog ? (V(ist) - linie) : (ist - linie) / Math.max(Math.abs(linie), 1e-12);
+    // ZWEI TOLERANZEN MIT OBERGRENZE. Die uebergebene Toleranz waechst mit der
+    // Schwankungsbreite -- auf einem volatilen Wochen-Chart wurden daraus rund 34 %, und ein
+    // Ausbruch um 30 % galt noch als "auf der Linie". Fuer Trendlinien ist das viel zu weit.
+    //   Beruehrung: ein Wendepunkt zaehlt als Treffer, wenn er hoechstens 8 % daneben liegt.
+    //   Bruch/Durchstich: schon 4 % Schlusskurs jenseits der Linie gelten als Bruch.
+    const tolTreffer = Math.min(tolLog, Math.log(1.08));
+    const tolBruch = Math.min(tolLog * 0.6, Math.log(1.04));
+    const tol = tolTreffer;
+    const spanne = Math.max(1, to - from);
+    const minAbstand = Math.max(4, Math.round(spanne * 0.06));
+    const kand = [];
+    // WICHTIGE LINIEN BEVORZUGEN (gemeldet: "das sind nicht die wichtigsten Trennlinien"): Im
+    // Monatschart fehlte z. B. der grosse Abwaertstrend vom Allzeithoch ueber das Hoch 2024 --
+    // er lag "zu weit" vom heutigen Kurs (Grenze war Faktor 3,3) und flog raus, obwohl er DIE
+    // Widerstandslinie des Zyklus ist. Jetzt:
+    //  - Naehe-Grenze relativ zur Kursspanne des Ausschnitts (bei grossen Spannen deutlich weiter),
+    //  - Anker-Gewicht: grosse Wendepunkte (Zickzack) und die Extreme des Ausschnitts zaehlen
+    //    mehr als kleine Zacken,
+    //  - Laenge zwischen den Ankern zaehlt staerker.
+    let wHi = -Infinity, wLo = Infinity;
+    for (let i = from; i <= to; i++) { if (!data[i]) continue; wHi = Math.max(wHi, hiOf(data[i])); wLo = Math.min(wLo, loOf(data[i])); }
+    const spanneLog = wLo > 0 && wHi > wLo ? Math.log(wHi / wLo) : 1;
+    const naeheGrenze = Math.max(1.2, 0.55 * spanneLog);
+    const grossIdx = new Set((pivotsIn || []).map(p => p.type + p.idx));
+    const ankerGewicht = (p) => {
+      let g = grossIdx.has(p.type + p.idx) ? 1.5 : 0;
+      const extrem = p.type === 'H' ? Math.abs(Math.log(p.price / wHi)) : Math.abs(Math.log(p.price / wLo));
+      if (extrem < 0.03) g += 3; // Hoch/Tief des Ausschnitts
+      return g;
+    };
+
+    // koerper = true: LINIEN DURCH DIE KERZEN (gewuenscht: "auch Linien einzeichnen, die durch die
+    // Coins gehen"). Angelegt an SCHLUSSKURSEN statt an Dochten; Dochte duerfen die Linie beliebig
+    // durchstechen, nur Schlusskurse zaehlen fuer Beruehrung und Bruch -- so ziehen viele Trader
+    // ihre Linien durch die Kerzenkoerper.
+    const pruefe = (liste, art, koerper = false) => {
+      for (let a = 0; a < liste.length; a++) {
+        for (let b = a + 1; b < liste.length; b++) {
+          const p1 = liste[a], p2 = liste[b];
+          if (p2.idx - p1.idx < minAbstand) continue;
+          const steig = (V(p2.price) - V(p1.price)) / (p2.idx - p1.idx);
+          // BEIDE RICHTUNGEN. Vorher nur fallende Widerstaende und steigende Unterstuetzungen --
+          // damit fehlten die Oberkante eines Aufwaertskanals (steigender Widerstand) und die
+          // Unterkante eines Abwaertskanals oder Keils (fallende Unterstuetzung), oft die
+          // wichtigsten Linien ueberhaupt. Ausgeschlossen bleibt nur fast Waagerechtes: Das
+          // deckt Support/Resistance bereits ab, sonst stuenden Marken doppelt im Chart.
+          const gesamtAenderung = useLog
+            ? Math.abs(steig * spanne)
+            : Math.abs(steig * spanne) / Math.max(Math.abs(V(lastClose)), 1e-12);
+          if (gesamtAenderung < Math.log(1.03)) continue;
+          const auf = (i) => V(p1.price) + steig * (i - p1.idx);
+
+          // Zwischen den Ankern darf nichts deutlich durchstossen.
+          // Dochte duerfen die Linie kurz ueberragen (Toleranz fuer Treffer), Schlusskurse nicht
+          // (Toleranz fuer Bruch) -- genau so liest ein Chartist eine Trendlinie.
+          let gueltig = true;
+          for (let i = p1.idx; i <= p2.idx; i++) {
+            const docht = koerper ? -Infinity : (art === 'res' ? abw(hiOf(data[i]), auf(i)) : -abw(loOf(data[i]), auf(i)));
+            const schluss = art === 'res' ? abw(data[i].value, auf(i)) : -abw(data[i].value, auf(i));
+            if (docht > tolTreffer || schluss > tolBruch) { gueltig = false; break; }
+          }
+          if (!gueltig) continue;
+
+          // Beruehrungen: weitere Wendepunkte dieser Art nahe der Linie.
+          let beruehr = 0;
+          for (const p of liste) {
+            if (p.idx < p1.idx) continue;
+            if (Math.abs(abw(p.price, auf(p.idx))) <= tol) beruehr++;
+          }
+          if (beruehr < 2) continue;
+
+          // Bruch: erster SCHLUSSKURS deutlich jenseits der Linie nach dem zweiten Anker.
+          let bruchIdx = null;
+          for (let i = p2.idx + 1; i <= to; i++) {
+            const d = art === 'res' ? abw(data[i].value, auf(i)) : -abw(data[i].value, auf(i));
+            if (d > tolBruch) { bruchIdx = i; break; }
+          }
+
+          // Laenger zurueckliegende Brueche verwerfen. Ein FRISCHER Bruch ist die Nachricht
+          // ("der Abwaertstrend ist gerade gebrochen"), ein alter nur noch Chartgeschichte --
+          // der zeichnete sonst ein blasses Relikt quer durch den heutigen Kurs.
+          if (bruchIdx != null && (to - bruchIdx) > spanne * 0.15) continue;
+
+          // Wo liegt die Linie HEUTE? Eine Linie, die weit ausserhalb des Kurses liegt, ist
+          // fuer die aktuelle Lage bedeutungslos, egal wie schoen sie frueher war.
+          const heute = useLog ? Math.exp(auf(to)) : auf(to);
+          const naehe = Math.abs(ln(Math.max(heute, 1e-12)) - ln(Math.max(lastClose, 1e-12)));
+          if (naehe > naeheGrenze) continue;   // relativ zur Spanne zu weit weg -> nicht mehr relevant
+
+          const haelt = (bruchIdx != null ? bruchIdx : to) - p1.idx;
+          const punkte = beruehr * 2
+            + (haelt / spanne) * 6
+            + ((p2.idx - p1.idx) / spanne) * 4
+            + ankerGewicht(p1) + ankerGewicht(p2)
+            + (bruchIdx == null ? 2 : (to - bruchIdx < spanne * 0.08 ? 1.5 : 0))  // frischer Bruch zaehlt
+            - (naehe / naeheGrenze) * 2.4;
+          kand.push({ art, richtung: steig < 0 ? 'ab' : 'auf', p1, p2, steig, beruehr, bruchIdx, preisHeute: heute, punkte, koerper });
+        }
+      }
+    };
+    pruefe(pivots.filter((p) => p.type === 'H'), 'res');
+    pruefe(pivots.filter((p) => p.type === 'L'), 'sup');
+    // Kerzen-Linien: dieselben Wendepunkte, aber mit ihrem SCHLUSSKURS als Anker.
+    const kAnz = kand.length;
+    const schlussPiv = (typ) => pivots.filter((p) => p.type === typ).map((p) => ({ ...p, price: data[p.idx].value }));
+    pruefe(schlussPiv('H'), 'res', true);
+    pruefe(schlussPiv('L'), 'sup', true);
+    const koerperKand = kand.splice(kAnz);
+
+    // AUSWAHL: die ZWEI staerksten je Art (Widerstand / Unterstuetzung), nicht nur eine.
+    // Vorher verschwand die zweitbeste Linie komplett, auch wenn sie fast gleich gut war.
+    //
+    // Mehr als zwei je Art bewusst nicht -- das Fibonacci-Werkzeug hat gezeigt, wohin das
+    // fuehrt ("viele ueberlappen sich"). Und Beinahe-Doppel werden uebersprungen: Zwei Linien,
+    // die am linken und rechten Ende fast deckungsgleich liegen, sind dieselbe Aussage.
+    const liniAn = (k, i) => V(k.p1.price) + k.steig * (i - k.p1.idx);
+    const relAbst = (x, y) => useLog ? Math.abs(x - y) : Math.abs(x - y) / Math.max(Math.abs(y), 1e-12);
+    const aehnlich = (a, b) => a.art === b.art
+      && relAbst(liniAn(a, from), liniAn(b, from)) < tolTreffer * 2
+      && relAbst(liniAn(a, to), liniAn(b, to)) < tolTreffer * 2;
+    const waehle = (sortierung) => {
+      const aus = [];
+      for (const art of ['res', 'sup']) {
+        const reihe = kand.filter((k) => k.art === art).sort(sortierung);
+        const gewaehlt = [];
+        for (const k of reihe) {
+          if (gewaehlt.length >= 2) break;
+          if (gewaehlt.some((g) => aehnlich(g, k))) continue;
+          gewaehlt.push(k);
+        }
+        gewaehlt.forEach((k, rang) => aus.push({ ...k, rang }));
+      }
+      return aus;
+    };
+    // Je Art EINE Kerzen-Linie zusaetzlich -- nur wenn sie sich von den Docht-Linien unterscheidet.
+    const mitKoerper = (aus) => {
+      const extra = [];
+      for (const art of ['res', 'sup']) {
+        const k = koerperKand.filter((x) => x.art === art).sort((x, y) => y.punkte - x.punkte)
+          .find((x) => !aus.some((g) => aehnlich(g, x)));
+        if (k) extra.push({ ...k, rang: 2 });
+      }
+      return [...aus, ...extra];
+    };
+    return {
+      // Gewichtet: Beruehrungen, Dauer und Naehe zum heutigen Kurs zusammen (Standard).
+      gewichtet: mitKoerper(waehle((x, y) => y.punkte - x.punkte)),
+      // Rein nach Beruehrungen: die Linie mit den meisten Treffern zuerst, bei Gleichstand
+      // entscheidet die gewichtete Bewertung.
+      beruehrung: mitKoerper(waehle((x, y) => (y.beruehr - x.beruehr) || (y.punkte - x.punkte)))
+    };
+  }
+
+  // ---------------------------------------------------------------- Support / Resistance ----
+  function detectSR(data, ctxFrom, to, atrAbs, lastClose, atrPct) {
+    const fine = pivotsAuto(data, ctxFrom, to, 40, 8, Math.min(0.15, atrPct * 1.3), Math.round((to - ctxFrom + 1) / 3));
+    const pts = fine.pivots.slice();
+    if (fine.pending) pts.push(fine.pending);
+    // Hoechstes Hoch / tiefstes Tief des Kontexts sind immer relevante Marken.
+    let maxI = ctxFrom, minI = ctxFrom;
+    for (let i = ctxFrom; i <= to; i++) { if (hiOf(data[i]) > hiOf(data[maxI])) maxI = i; if (loOf(data[i]) < loOf(data[minI])) minI = i; }
+    pts.push({ idx: maxI, price: hiOf(data[maxI]), type: 'H', major: true });
+    pts.push({ idx: minI, price: loOf(data[minI]), type: 'L', major: true });
+    // TOLERANZ MIT OBERGRENZE. Vorher wuchs sie ungebremst mit der Schwankungsbreite: im
+    // Tageschart ~6 %, im Wochenchart ~18 %, bei einer maximalen Zonenbreite des 1,8-Fachen.
+    // Dort wurden Wendepunkte zu einer Zone verschmolzen, die ein Chartist klar trennt, und die
+    // angezeigte Zahl war der Durchschnitt einer 30 % breiten Flaeche statt einer Linie.
+    // Jetzt hoechstens 4 % -- dasselbe Mass, das sich bei den Trendlinien bewaehrt hat.
+    // Cluster-Breite: bisher hoechstens 4 % -- auf Wochen-/Monatskerzen im Krypto (ATR oft 15-20 %)
+    // blieben so zwei Beruehrungen derselben Zone (z. B. $0.98 und $1.03) getrennt, jede mit nur
+    // EINER Beruehrung, und fielen beide heraus. Jetzt bis 7 %.
+    const tol = Math.max(Math.log(1.016), Math.min(0.9 * atrAbs / Math.max(lastClose, 1e-9), Math.log(1.07)));
+    const sorted = pts.slice().sort((a, b) => a.price - b.price);
+    const clusters = [];
+    for (const p of sorted) {
+      const c = clusters[clusters.length - 1];
+      if (c && ln(p.price) - ln(c.members[c.members.length - 1].price) <= tol && ln(p.price) - ln(c.members[0].price) <= tol * 1.8) c.members.push(p);
+      else clusters.push({ members: [p] });
+    }
+    const span = Math.max(1, to - ctxFrom);
+    const zones = clusters.map(c => {
+      const m = c.members;
+      let wsum = 0, psum = 0, lastIdx = 0;
+      for (const p of m) { const w = 0.5 + 0.5 * (p.idx - ctxFrom) / span + (p.major ? 0.6 : 0); wsum += w; psum += w * ln(p.price); lastIdx = Math.max(lastIdx, p.idx); }
+      // MITTE AM LETZTEN WENDEPUNKT. Vorher der gewichtete Durchschnitt aller Beruehrungen --
+      // bei breiten Zonen eine Zahl, an der der Kurs nie gedreht hat. Jetzt der Preis der
+      // juengsten Beruehrung: dort hat der Markt die Marke zuletzt tatsaechlich respektiert.
+      // Der gewichtete Durchschnitt bleibt als "mittel" erhalten, falls ihn etwas braucht.
+      const mittel = Math.exp(psum / wsum);
+      const juengster = m.reduce((a, b) => (b.idx > a.idx ? b : a), m[0]);
+      const center = juengster.price;
+      // Band um die Zone ebenfalls gedeckelt: 0,3 x ATR waren im Wochenchart rund +-6 %.
+      const pad = Math.min(0.3 * atrAbs, center * 0.015);
+      const lo = Math.min(m[0].price, center - pad);
+      const hi = Math.max(m[m.length - 1].price, center + pad);
+      // Nur ECHTE Beruehrungen zaehlen (Pivots, die nicht dasselbe Extrem doppelt sind).
+      const uniq = new Set(m.map(p => p.idx));
+      const touches = uniq.size;
+      const major = m.some(p => p.major);
+      const strength = clamp(Math.round((touches * 0.9 + (major ? 1.2 : 0) + wsum * 0.4) * 10) / 10, 0.5, 9);
+      const type = lastClose > hi ? 'support' : lastClose < lo ? 'resistance' : 'inside';
+      return { price: center, mittel, lo, hi, touches, strength, lastIdx, major, type, firstIdx: Math.min(...m.map(p => p.idx)) };
+    });
+    // AUSWAHL: die NAECHSTLIEGENDE gueltige Zone je Seite plus die zwei staerksten.
+    // Vorher nur die drei staerksten -- dadurch verdraengten viel beruehrte, aber weit
+    // entfernte Zonen (etwa die $1,29-$1,53 aus dem Handel 2025) die naechste Marke direkt
+    // ueber dem Kurs (gemeldet: ein Doppeltop bei $0,64 fehlte). Fuer die aktuelle Lage ist
+    // aber gerade die naechste Marke die wichtigste.
+    const abstand = (z) => Math.abs(ln(z.price) - ln(lastClose));
+    // AUSWAHL OHNE LUECKEN (gemeldet: "werden alle wichtigen Zonen gezeigt?" -- RUNE Woche:
+    // R $0.777, dann direkt R $4.218 und $7.576; alles dazwischen fehlte). Bisher: naechste Zone +
+    // die zwei STAERKSTEN -- und die staerksten lagen oft weit weg (Allzeithoch, altes Plateau),
+    // waehrend die Zonen, auf die der Kurs als Naechstes trifft, fehlten. Jetzt:
+    //  1. die naechste Zone,
+    //  2. das Extrem des Ausschnitts (Hoch/Tief), falls es eine Zone auf dieser Seite ist,
+    //  3. Auffuellen bis n: Zonen werden nach Staerke x Naehe gewaehlt, und vor allem wird die
+    //     groesste LUECKE (im Log-Abstand) zwischen den schon gewaehlten Zonen zuerst geschlossen,
+    //     solange sie groesser als ~x1,6 ist.
+    const pick = (list, n) => {
+      if (!list.length) return [];
+      const nachAbstand = list.slice().sort((a, b) => abstand(a) - abstand(b));
+      const gewaehlt = [nachAbstand[0]];
+      const extrem = list.filter(z => z.major && z !== nachAbstand[0]).sort((a, b) => abstand(b) - abstand(a))[0];
+      if (extrem) gewaehlt.push(extrem);
+      const wert = z => z.strength * Math.exp(-abstand(z) / 1.2);
+      while (gewaehlt.length < n) {
+        const rest = list.filter(z => !gewaehlt.includes(z));
+        if (!rest.length) break;
+        const stufen = [0, ...gewaehlt.map(abstand)].sort((a, b) => a - b);
+        let lueckeA = 0, lueckeB = 0;
+        for (let k = 1; k < stufen.length; k++) if (stufen[k] - stufen[k - 1] > lueckeB - lueckeA) { lueckeA = stufen[k - 1]; lueckeB = stufen[k]; }
+        const inLuecke = lueckeB - lueckeA > Math.log(1.6) ? rest.filter(z => abstand(z) > lueckeA + Math.log(1.12) && abstand(z) < lueckeB - Math.log(1.12)) : [];
+        const kand = (inLuecke.length ? inLuecke : rest).sort((a, b) => wert(b) - wert(a))[0];
+        if (!inLuecke.length && wert(kand) < 1.2) break; // keine schwachen Fernzonen nur zum Auffuellen
+        gewaehlt.push(kand);
+      }
+      return gewaehlt.sort((a, b) => abstand(a) - abstand(b));
+    };
+    const supports = pick(zones.filter(z => z.type === 'support' && (z.touches >= 2 || z.major)), 4);
+    const resistances = pick(zones.filter(z => z.type === 'resistance' && (z.touches >= 2 || z.major)), 4);
+    const inside = zones.filter(z => z.type === 'inside' && (z.touches >= 2 || z.major)).slice(0, 1);
+    return { supports, resistances, inside, all: zones };
+  }
+
+  // ---------------------------------------------------------------- Fibonacci --------------
+  const FIB_RETRACE = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+  const FIB_EXT = [1, 1.272, 1.618, 2, 2.618];
+  const fibPrice = (a, b, r, useLog) => useLog ? Math.exp(ln(a) + r * (ln(b) - ln(a))) : a + r * (b - a);
+  const fibRatio = (a, b, p, useLog) => useLog ? (ln(p) - ln(a)) / ((ln(b) - ln(a)) || 1e-9) : (p - a) / ((b - a) || 1e-9);
+  // Ein Fibonacci-Satz aus zwei Ankerpunkten. mode: retracement (Kurs innerhalb des Swings),
+  // extension (Kurs ueber das Swing-Ende hinaus). Level ausserhalb des sichtbaren Preisbereichs
+  // blendet das UI selbst aus.
+  function fibSet(id, A, B, lastClose, lastIdx, useLog) {
+    if (!A || !B || A.idx === B.idx || !(A.price > 0) || !(B.price > 0)) return null;
+    const dir = B.price > A.price ? 'up' : 'down';
+    const ratioNow = fibRatio(B.price, A.price, lastClose, useLog); // 0 = bei B, 1 = zurueck bei A
+    let mode, levels;
+    if (ratioNow < 0) { mode = 'extension'; levels = FIB_EXT.map(r => ({ r, price: fibPrice(A.price, B.price, r, useLog) })); }
+    else { mode = 'retracement'; levels = FIB_RETRACE.map(r => ({ r, price: fibPrice(B.price, A.price, r, useLog) })); }
+    let nearest = null;
+    for (const l of levels) { const d = Math.abs(ln(l.price) - ln(lastClose)); if (!nearest || d < nearest.d) nearest = { ...l, d }; }
+    return { id, from: A, to: B, dir, mode, levels, ratioNow: clamp(ratioNow, -3, 3), nearest, drawFromIdx: A.idx, drawToIdx: Math.max(B.idx, lastIdx) };
+  }
+  // Fibonacci in DREI Ebenen (gemeldet: "zu selten zu sehen, muss auch ueber grosse Zeitraeume
+  // sichtbar sein"):
+  //  1. major  -- die Gesamtbewegung des sichtbaren Zeitraums (hoechstes Hoch <-> tiefstes
+  //               Tief, zeitlich geordnet). Immer da, auch ueber Jahre.
+  //  2. swing  -- der letzte groessere Swing (grobe Pivots), das "aktuelle" Fib.
+  //  3. elliott -- an die laufende Wellenzaehlung gekoppelt (siehe elliottFib): die Level,
+  //               die fuer die aktuelle Welle relevant sind (Welle-2-Ruecksetzer, Welle-3-
+  //               Erweiterungen usw.). Das ist die "Waffe": Elliott sagt, WELCHES Fib zaehlt.
+  // Dazu Konfluenz: fallen Level verschiedener Ebenen (oder eine S/R-Zone) auf denselben
+  // Preis, wird das markiert -- dort ist die Reaktion am wahrscheinlichsten.
+  function detectFib(data, from, to, coarse, lastClose, useLog) {
+    let hiI = from, loI = from;
+    for (let i = from; i <= to; i++) { if (hiOf(data[i]) > hiOf(data[hiI])) hiI = i; if (loOf(data[i]) < loOf(data[loI])) loI = i; }
+    const hiP = { idx: hiI, price: hiOf(data[hiI]), type: 'H' }, loP = { idx: loI, price: loOf(data[loI]), type: 'L' };
+    const major = hiI < loI ? fibSet('major', hiP, loP, lastClose, to, useLog) : fibSet('major', loP, hiP, lastClose, to, useLog);
+    const P = coarse.pivots;
+    let swing = null;
+    if (P.length >= 2) {
+      const A = P[P.length - 2], B = P[P.length - 1];
+      // Nur, wenn es nicht derselbe Swing wie "major" ist UND der Swing gross genug ist, um
+      // eine eigene Aussage zu haben (gemeldet: "der kleine Fibonacci ist in dieser Ansicht
+      // unnoetig und verwirrend" -- ein Swing, der nur ein Teil der Gesamtbewegung am Rand ist,
+      // legt seine Level genau ueber die der Gesamtbewegung). Mindestens die Haelfte der
+      // Gesamtbewegung (in Log-Spanne), sonst bleibt nur die Gesamtbewegung.
+      const spanOf = f => f ? Math.abs(ln(f.to.price) - ln(f.from.price)) : 0;
+      const cand = fibSet('swing', A, B, lastClose, to, useLog);
+      if (cand && (!major || ((Math.abs(A.idx - major.from.idx) > 2 || Math.abs(B.idx - major.to.idx) > 2) && spanOf(cand) >= spanOf(major) * 0.5))) swing = cand;
+    }
+    return { major, swing };
+  }
+  // Fibonacci-Level, die zur laufenden Elliott-Welle gehoeren -- als eigener Satz mit
+  // Wellen-Bezug, damit das UI "Welle 3 · 1,618" statt nur "161,8 %" schreiben kann.
+  function elliottFib(E, useLog) {
+    if (!E || !E.points || E.points.length < 2) return null;
+    const pt = lab => E.points.find(p => p.label === lab);
+    const sign = E.dir === 'up' ? 1 : -1;
+    const proj = (fromP, a, b, mult, dirSign) => useLog ? Math.exp(ln(fromP.price) + dirSign * Math.abs(ln(b.price) - ln(a.price)) * mult) : fromP.price + dirSign * Math.abs(b.price - a.price) * mult;
+    const p0 = pt('0'), p1 = pt('1'), p2 = pt('2'), p3 = pt('3'), p4 = pt('4'), p5 = pt('5'), A = pt('A'), B = pt('B'), C = pt('C');
+    let levels = [], anchor = null, label = null;
+    const ph = E.phase;
+    if (E.kind === 'impulse') {
+      if (ph === 'wave2' && p0 && p1) { anchor = p1; label = '2'; levels = [0.382, 0.5, 0.618, 0.786].map(r => ({ r, wave: '2', price: proj(p1, p0, p1, r, -sign) })); }
+      else if (ph === 'wave3' && p0 && p1 && p2) { anchor = p2; label = '3'; levels = [1, 1.618, 2, 2.618].map(r => ({ r, wave: '3', price: proj(p2, p0, p1, r, sign) })); }
+      else if (ph === 'wave4' && p2 && p3) { anchor = p3; label = '4'; levels = [0.236, 0.382, 0.5].map(r => ({ r, wave: '4', price: proj(p3, p2, p3, r, -sign) })); }
+      else if (ph === 'wave5' && p0 && p1 && p3 && p4) { anchor = p4; label = '5'; levels = [{ r: 0.618, wave: '5', price: proj(p4, p0, p1, 0.618, sign) }, { r: 1, wave: '5', price: proj(p4, p0, p1, 1, sign) }, { r: 1.618, wave: '5', price: proj(p4, p0, p1, 1.618, sign) }, { r: 0.618, wave: '1–3', price: proj(p4, p0, p3, 0.618, sign) }]; }
+      else if (ph === 'impulseDone' && p0 && p5) { anchor = p5; label = 'A'; levels = [0.236, 0.382, 0.5, 0.618].map(r => ({ r, wave: '0–5', price: proj(p5, p0, p5, r, -sign) })); }
+      else if ((ph === 'waveA' || ph === 'waveB') && p5 && A) { anchor = A; label = 'B'; levels = [0.382, 0.5, 0.618, 0.786].map(r => ({ r, wave: 'A', price: proj(A, p5, A, r, sign) })); }
+      else if (ph === 'waveC' && p5 && A && B) { anchor = B; label = 'C'; levels = [0.618, 1, 1.272, 1.618].map(r => ({ r, wave: 'A', price: proj(B, p5, A, r, -sign) })); }
+    } else {
+      if (ph === 'waveC' && p0 && A && B) { anchor = B; label = 'C'; levels = [0.618, 1, 1.272, 1.618].map(r => ({ r, wave: 'A', price: proj(B, p0, A, r, sign) })); }
+      else if (ph === 'corrDone' && p0 && C) { anchor = C; label = '1'; levels = [0.382, 0.5, 0.618, 1].map(r => ({ r, wave: '0–C', price: proj(C, p0, C, r, -sign) })); }
+    }
+    if (!levels.length || !anchor) return null;
+    levels = levels.filter(l => Number.isFinite(l.price) && l.price > 0);
+    // WAHRSCHEINLICHKEIT JE STUFE (gefordert: "Welle 2 kann doch nicht nur ein Ziel haben ...
+    // Wahrscheinlichkeiten muessen klein zu sehen sein"): uebliche Verteilung nach Elliott-
+    // Faustregeln (Welle 2: meist 50-61,8 %, seltener 38,2 % oder 78,6 %; Welle 4: meist 38,2 %;
+    // Welle 3: meist 1,618 x). Bereits erreichte Stufen fallen spaeter heraus, der Rest wird auf
+    // 100 % verteilt (siehe rwFibWahrscheinlichkeit).
+    const GEW = { '2': { 0.382: 15, 0.5: 30, 0.618: 35, 0.786: 20 }, '4': { 0.236: 20, 0.382: 45, 0.5: 35 }, '3': { 1: 20, 1.618: 45, 2: 15, 2.618: 20 },
+                  B: { 0.382: 20, 0.5: 30, 0.618: 35, 0.786: 15 }, C: { 0.618: 20, 1: 45, 1.272: 15, 1.618: 20 }, '1': { 0.382: 35, 0.5: 30, 0.618: 25, 1: 10 }, A: { 0.236: 15, 0.382: 35, 0.5: 30, 0.618: 20 } };
+    const g = GEW[label] || null;
+    if (g) levels.forEach(l => { l.gewicht = g[l.r] || 0; });
+    return { id: 'elliott', anchor, label, phase: ph, levels, drawFromIdx: anchor.idx };
+  }
+  function rwFibWahrscheinlichkeit(fe, data) {
+    if (!fe || !fe.anchor || !Number.isFinite(fe.anchor.idx)) return;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = fe.anchor.idx + 1; i < data.length; i++) {
+      const d = data[i]; if (!d) continue;
+      const l = d.low != null ? d.low : d.value, h = d.high != null ? d.high : d.value;
+      if (Number.isFinite(l) && l < lo) lo = l;
+      if (Number.isFinite(h) && h > hi) hi = h;
+    }
+    const ap = fe.anchor.price;
+    fe.levels.forEach(l => { l.erreicht = l.price < ap ? lo <= l.price : hi >= l.price; });
+    const offen = fe.levels.filter(l => !l.erreicht && l.gewicht > 0);
+    const summe = offen.reduce((a, l) => a + l.gewicht, 0);
+    fe.levels.forEach(l => { l.prob = !l.erreicht && l.gewicht > 0 && summe > 0 ? Math.round(l.gewicht / summe * 100) : null; });
+  }
+  function fibConfluence(fibs, sr, tolLog) {
+    const items = [];
+    const push = (price, src) => items.push({ price, src });
+    for (const f of [fibs.major, fibs.swing]) if (f) for (const l of f.levels) if (l.r !== 0 && l.r !== 1) push(l.price, { set: f.id, r: l.r });
+    if (fibs.elliott) for (const l of fibs.elliott.levels) push(l.price, { set: 'elliott', r: l.r, wave: l.wave });
+    for (const z of [...sr.supports, ...sr.resistances, ...sr.inside]) push(z.price, { set: 'sr', touches: z.touches });
+    items.sort((a, b) => a.price - b.price);
+    const out = [];
+    let i = 0;
+    while (i < items.length) {
+      let j = i;
+      while (j + 1 < items.length && ln(items[j + 1].price) - ln(items[i].price) <= tolLog * 0.7) j++;
+      const grp = items.slice(i, j + 1);
+      const sets = new Set(grp.map(g => g.src.set));
+      if (sets.size >= 2) out.push({ price: Math.exp(grp.reduce((s, g) => s + ln(g.price), 0) / grp.length), sources: grp.map(g => g.src), strength: sets.size + grp.length * 0.25 });
+      i = j + 1;
+    }
+    return out.sort((a, b) => b.strength - a.strength).slice(0, 4);
+  }
+
+  // ---------------------------------------------------------------- Elliott-Wellen v2 -------
+  // Portiert aus btcorgtfo/ElliottWaveAnalyzer (MonoWave + WaveOptions): eine Welle darf
+  // kleinere Gegenbewegungen UEBERSPRINGEN -- ihr Ende ist nicht zwingend der naechste
+  // Wendepunkt, sondern kann jedes spaetere neue Extrem in Wellenrichtung sein ("skip"), solange
+  // dazwischen der Wellenanfang nicht unterschritten wird. Aus allen Kombinationen der fuenf
+  // Wellen (bis zu 4 Kandidaten je Welle) werden nur die behalten, die alle harten Regeln
+  // erfuellen; die beste nach Fibonacci-Richtlinien, Alternation, Volumen und Aktualitaet
+  // gewinnt. Vorher wurden nur direkt aufeinanderfolgende Wendepunkte betrachtet, dadurch
+  // fehlten fast alle Impulse, in denen Welle 3 oder 5 selbst Unterwellen hatte.
+  // Gedaechtnis der zuletzt gewaehlten Zaehlung je Reihe (fuer die Hysterese in detectElliott).
+  const EW_HYST = new Map();
+  const RW_EW_KONTEXT = new Map();   // Zwischenspeicher fuer die Gesamt-Zaehlung (grosses Bild)
+  // FIXIEREN = GENAU DIESE ZAEHLUNG (gemeldet per Video: "ich will das locken, aber es lockt sich
+  // dann etwas anderes"). Beim Fixieren werden die zuletzt gezeigten Zaehlungen hier eingefroren;
+  // solange fixiert ist, gewinnt immer der Kandidat, der sie fortsetzt -- egal wie knapp ein
+  // anderer besser waere. Lösen gibt wieder frei.
+  let EW_PIN = null;
+  function detectElliott(pivotSet, lastClose, lastIdx, useLog, volumes, opts) {
+    const P = pivotSet.pivots.slice();
+    const pend = pivotSet.pending;
+    const Q = pend ? P.concat([pend]) : P.slice();
+    const n = Q.length;
+    if (n < 3) return null;
+    const L = (a, b) => Math.abs(useLog ? ln(b.price) - ln(a.price) : b.price - a.price);
+    const near = (v, target, tol) => Math.abs(v - target) <= tol;
+    const dur = (a, b) => Math.max(1, Math.abs(b.idx - a.idx));
+    // WEICHE FIB-NAEHE (gemeldet: "die Elliott-Berechnung wirkt manchmal willkuerlich"): Bisher gab
+    // es Punkte nur in harten Stufen (z. B. +10, wenn W2 zwischen 38,2 und 78,6 % liegt). Ein
+    // Rueckgang von 38,1 % statt 38,3 % kostete so 10 Punkte -- eine neue Kerze konnte die ganze
+    // Zaehlung kippen. Jetzt waechst die Bewertung stetig mit der Naehe zum naechsten Idealwert
+    // (Glockenkurve im Log-Verhaeltnis; tol = Breite, 0,15 ~ +-16 %). Ergebnis 0..1.
+    const fibFit = (r, ideals, tol) => {
+      if (!(r > 0)) return 0;
+      let b = 0;
+      for (const x of ideals) { const d = Math.log(r / x) / tol; b = Math.max(b, Math.exp(-0.5 * d * d)); }
+      return b;
+    };
+    const vOf = p => (useLog ? ln(p.price) : p.price);
+    const avgVol = (a, b) => {
+      if (!volumes) return null;
+      let s = 0, c = 0;
+      for (let i = Math.min(a.idx, b.idx); i <= Math.max(a.idx, b.idx); i++) { const v = volumes[i]; if (v != null && Number.isFinite(v)) { s += v; c++; } }
+      return c ? s / c : null;
+    };
+    const SKIP = 4; // hoechstens 4 Kandidaten je Wellenende (= skip_n 3)
+
+    // Kandidaten fuer das Ende einer Welle ab Position `from` (exklusiv) in Richtung `up`:
+    // jedes neue Extrem in Wellenrichtung; Abbruch, sobald ein Gegen-Pivot den Wellenanfang
+    // (`floor`) verletzt. Genau die find_end()-Logik der MonoWaveUp/Down.
+    // startPrice: Preis am Wellenanfang -- ein Gegen-Pivot, der ihn durchbricht, beendet die
+    // Suche (die Welle waere ungueltig). limitPrice (optional): Grenze fuer die Wellenenden selbst,
+    // z.B. darf Welle 2 nicht unter den Start von Welle 1 (Regel 1).
+    const ends = (from, up, startPrice, limitPrice) => {
+      const out = [];
+      let best = null;
+      for (let i = from + 1; i < n && out.length < SKIP; i++) {
+        const p = Q[i];
+        if (up ? p.type === 'L' && p.price <= startPrice : p.type === 'H' && p.price >= startPrice) break;
+        if (up ? p.type === 'H' : p.type === 'L') {
+          if (limitPrice != null && (up ? p.price >= limitPrice : p.price <= limitPrice)) break;
+          if (best == null || (up ? p.price > best : p.price < best)) { best = p.price; out.push(i); }
+        }
+      }
+      return out;
+    };
+
+    const cands = [];
+    const evalImpulse = (idx, up, complete) => {
+      // idx: Positionen in Q fuer Punkte 0..k (k = 3..5)
+      const W = idx.map(i => Q[i]);
+      const [p0, p1, p2, p3, p4, p5] = W;
+      let truncated = false;
+      // WARUM SCHEITERT EINE ZAEHLUNG? Ohne diese Spur liesse sich nur raten, an welcher der
+      // rund zwanzig Bedingungen eine von Hand geprueft gueltige Punktfolge haengen bleibt.
+      // Aktiv nur, wenn ausdruecklich eine Spur angefordert wurde (evalTrace), also nie im
+      // Normalbetrieb.
+      const spur = (typeof evalTrace !== 'undefined' && evalTrace) ? evalTrace : null;
+      const nein = (grund, zahlen) => { if (spur) spur.push({ idx: W.map(p => p && p.idx), grund, zahlen }); return null; };
+      const w1 = L(p0, p1), w2 = L(p1, p2), w3 = p3 ? L(p2, p3) : 0, w4 = p4 ? L(p3, p4) : 0, w5 = p5 ? L(p4, p5) : 0;
+      // Regel 1: Welle 2 nie unter den Start von 1 (durch ends() bereits gesichert, hier doppelt)
+      if (up ? p2.price <= p0.price : p2.price >= p0.price) return nein('W2 haelt den Start nicht', [p2.price, p0.price]);
+      // MINDESTRUECKLAUF VON WELLE 2.
+      //
+      // Zwei Aenderungen (gemeldet: "Makro-Zaehlung startet am ATH statt am Tief 2019"; die
+      // Diagnose mit erklaereZaehlung fand dazu NICHTS):
+      //
+      // (a) Diese Ablehnung lief bisher ueber ein nacktes `return null` und tauchte deshalb in
+      //     keiner Spur auf -- genau die Zaehlung, nach der gefragt wurde, verschwand unsichtbar.
+      //     Jetzt ueber nein(), also mit Grund und Zahlen wie alle anderen Regeln auch.
+      // (b) Die Schwelle von 20 % ist kein Elliott-Gesetz, sondern eine Heuristik gegen Rauschen.
+      //     Auf Monatskerzen kostet sie die uebergeordnete Sicht: die Zwischenkorrektur der
+      //     Rally 2020/21 lief nur ~16 % von Welle 1 zurueck, womit die GANZE Aufwaertszaehlung
+      //     ab dem Tief ausfiel und nur noch eine Zaehlung ab dem ATH uebrig blieb. Fuer die
+      //     Makro-Sicht (forceStart) daher 12 %; im Normalbetrieb bleibt es bei 20 %.
+      const w2Min = (opts && opts.forceStart) ? 0.12 : 0.2;
+      if (w2 < w2Min * w1) return nein('W2 laeuft weniger als ' + Math.round(w2Min * 100) + ' % von W1 zurueck', [w2 / (w1 || 1e-9), w2Min]);
+      if (dur(p1, p2) > 9 * dur(p0, p1)) return nein('W2 dauert mehr als 9x W1', [dur(p1, p2), dur(p0, p1)]);
+      let diagonal = false, ueberdehnt = false;
+      if (p3) {
+        if (up ? p3.price <= p1.price : p3.price >= p1.price) return nein('W3 nicht ueber W1-Ende', [p3.price, p1.price]);
+        if (w3 < w1 / 3 || w3 <= w2) return nein('W3 zu kurz (< W1/3 oder <= W2)', [w3, w1, w2]);
+        // Welle 3 darf deutlich laenger dauern als Welle 1 -- bei RUNE (Monatschart) dauerte
+        // Welle 1 des Baerenmarkts 3 Monate, Welle 3 fast drei Jahre. 7x (WaveRules.py) war zu
+        // eng, 14x laesst solche Strukturen zu, blockt aber weiterhin absurde Verhaeltnisse.
+        if (dur(p2, p3) > 14 * dur(p0, p1)) return nein('W3 dauert mehr als 14x W1', [dur(p2, p3), dur(p0, p1)]);
+      }
+      if (p4) {
+        if (w4 < w2 / 3 || w4 > 0.95 * w3) return nein('W4 zu kurz oder fast so lang wie W3', [w4, w2, w3]);
+        // Regel 3: Welle 4 nie im Bereich von Welle 1 -- Ausnahme Diagonale (Keil), nur wenn
+        // die Bewegungswellen nachweislich schrumpfen (hobbit7771/rules_diagonal.py).
+        if (up ? p4.price <= p1.price : p4.price >= p1.price) {
+          // Kontrahierender Keil (Frost/Prechter): W3 < W1, W5 < W3 UND W4 < W2. Die letzte
+          // Bedingung fehlte -- ohne sie wurde jeder Overlap durchgewunken, solange die
+          // Bewegungswellen schrumpften.
+          // (Der erweiternde Keil wurde wieder entfernt: Er verdraengte bei RUNE/BTC im Tageschart den
+          // grossen Rahmen (A)(B)(C) -- gemeldet: "es wird trotzdem so gezaehlt obwohl abc". Die Altcoin-
+          // Paare laufen seit 2021 als grosse A-B-C-Korrektur, nicht als Keil.)
+          const kontrahierend = w3 < w1 && (!p5 || w5 < w3) && w4 < w2;
+          if (kontrahierend) diagonal = true; else return nein('W4 ueberlappt W1, kein gueltiger Keil', [w1, w2, w3, w4, w5]);
+        }
+      }
+      if (p5) {
+        // TRUNCATION (Frost/Prechter): Welle 5 erreicht das Ende von Welle 3 nicht. Selten, aber
+        // ausdruecklich erlaubt -- und ein wichtiges Warnsignal (Schwaeche vor der Umkehr).
+        // Bisher wurde jede solche Zaehlung verworfen; jetzt wird sie zugelassen, gekennzeichnet
+        // und im Punktwert abgewertet, damit eine regulaere Zaehlung vorgeht.
+        //
+        // Die Grenze: Welle 5 muss wenigstens ueber das Ende von Welle 4 hinausgehen (sonst ist
+        // es keine Welle 5) und darf hoechstens knapp unter Welle 3 enden (10 % im Log-Raum).
+        if (up ? p5.price <= p4.price : p5.price >= p4.price) return nein('W5 geht nicht ueber W4 hinaus', [p5.price, p4.price]);
+        if (up ? p5.price <= p3.price : p5.price >= p3.price) {
+          // "Usually by very slim margins" (Frost/Prechter). 10 % waren viel zu grosszuegig --
+          // damit verdraengte eine verkuerzte Welle 5 saubere Zaehlungen, bei denen das Hoch
+          // schlicht das Ende der Bewegung war. Jetzt hoechstens 3 % gemessen an Welle 3, und
+          // die Zaehlung wird deutlich abgewertet.
+          // KEINE VERKUERZTE WELLE 5 (gewuenscht: "sehe ich als falsch an"): Welle 5 muss ueber das
+          // Ende von Welle 3 hinausgehen, sonst wird die Zaehlung verworfen. Endet die Bewegung
+          // unter Welle 3, liest die Engine das hoehere Hoch als 3 und den Rueckgang als Welle 4.
+          return nein('W5 nicht ueber W3 (verkuerzte Welle 5 ausgeschlossen)', [L(p5, p3) / (w3 || 1e-9)]);
+        }
+        // Regel 2: Welle 3 nie die kuerzeste
+        if (w3 < w1 && w3 < w5) return nein('W3 ist die kuerzeste', [w1, w3, w5]);
+        // UEBERDEHNTE WELLE 5. Die Referenzimplementierung verwirft jede Zaehlung mit
+        // W5 >= 2 x W1 hart. Das ist zu streng: Eine verlaengerte fuenfte Welle ist ein
+        // anerkanntes Muster und tritt gerade in Schlussphasen auf -- man wuerde genau die
+        // Zaehlung verlieren, die eine Blase beschreibt. Deshalb kein Ausschluss, sondern
+        // eine Abwertung, damit eine unauffaellige Lesart bei sonst gleichem Befund vorgeht.
+        if (w5 > 2 * w1) ueberdehnt = true;
+      }
+      // BEWERTUNG NACH DEN RICHTLINIEN (Frost/Prechter, "Elliott Wave Principle"): Regeln
+      // streichen Zaehlungen, Richtlinien ordnen die uebrigen. Alle Richtlinien gehen stetig ein
+      // (fibFit), damit kleine Kursaenderungen nur kleine Bewertungsaenderungen bewirken.
+      let s = complete ? (diagonal ? 42 : 50) : 38 - (p4 ? 0 : 2);
+      if (ueberdehnt) s -= 6;
+      if (truncated) s -= 15; // regulaere Zaehlung geht klar vor
+      const r2 = w2 / (w1 || 1e-9);
+      // W2: typisch 50 / 61,8 % von W1 (tief, oft Zickzack)
+      s += 14 * fibFit(r2, [0.5, 0.618], 0.2);
+      if (p3) {
+        const r3 = w3 / (w1 || 1e-9);
+        if (r3 >= 1) s += 6;
+        // W3: 1,618 / 2,618 x W1 (haeufigste Verlaengerung)
+        s += 10 * fibFit(r3, [1.618, 2.618], 0.2);
+        // Wellen-Persoenlichkeit: W3 ist die steilste Welle (staerkstes Momentum)
+        if (w3 / dur(p2, p3) >= w1 / dur(p0, p1)) s += 3;
+      }
+      if (p4) {
+        const r4 = w4 / (w3 || 1e-9);
+        // W4: typisch 38,2 % von W3 (23,6-50 %)
+        s += 8 * fibFit(r4, [0.382, 0.236, 0.5], 0.2);
+        // Wechsel (Alternation): tiefe W2 -> flache W4 und umgekehrt; zusaetzlich zeitlich:
+        // die flache Korrektur dauert meist laenger.
+        const deep2 = r2 > 0.618, shallow2 = r2 < 0.382, deep4 = r4 > 0.618, shallow4 = r4 < 0.382;
+        if ((deep2 && deep4) || (shallow2 && shallow4)) s -= 5; else if ((deep2 && shallow4) || (shallow2 && deep4)) s += 5;
+        const tR = dur(p3, p4) / dur(p1, p2);
+        if (r4 < r2 && tR >= 1 && tR <= 4) s += 3;
+        // Kanal: W4 endet meist nahe der Parallelen zur Linie 1-3 durch 2 (Frost/Prechter)
+        const sl13 = (vOf(p3) - vOf(p1)) / (p3.idx - p1.idx || 1);
+        const d4 = Math.abs(vOf(p4) - (vOf(p2) + sl13 * (p4.idx - p2.idx))) / (w3 || 1e-9);
+        s += 4 * Math.exp(-0.5 * (d4 / 0.25) ** 2);
+      }
+      if (p5) {
+        const r5 = w5 / (w1 || 1e-9), w13 = L(p0, p3) || 1e-9;
+        // Verlaengerung: meist genau EINE der Wellen 1/3/5 deutlich laenger als die anderen
+        const lens = [w1, w3, w5].sort((a, b) => b - a);
+        const extW = lens[0] === w3 ? 3 : lens[0] === w5 ? 5 : 1;
+        if (lens[0] >= 1.35 * lens[1]) s += 5; else if (lens[0] < 1.1 * lens[1]) s -= 3;
+        // Gleichheit: bei verlaengerter 3 tendiert W5 zu W1 (oder 0,618 x W1); sonst W5 = 0,382 /
+        // 0,618 x (0-3), bei verlaengerter 5 auch 1,618 x (0-3)
+        const fit5 = extW === 3 ? fibFit(r5, [1, 0.618], 0.18)
+          : Math.max(fibFit(w5 / w13, [0.618, 0.382], 0.18), extW === 5 ? fibFit(w5 / w13, [1.618, 1], 0.2) : 0, fibFit(r5, [1, 0.618], 0.2) * 0.7);
+        s += 9 * fit5;
+        if (w3 >= w1 && w3 >= w5) s += 8; else if (w5 > w3) s -= 6;
+        if (r5 > 2.5 && extW !== 5) s -= 8;
+        // Kanal: W5 endet meist nahe der Parallelen zur Linie 2-4 durch 3 (Ueberschiessen erlaubt)
+        const sl24 = (vOf(p4) - vOf(p2)) / (p4.idx - p2.idx || 1);
+        const d5 = (vOf(p5) - (vOf(p3) + sl24 * (p5.idx - p3.idx))) * (up ? 1 : -1) / (w5 || 1e-9);
+        s += 4 * Math.exp(-0.5 * (Math.min(0, d5 + 0.1) / 0.35) ** 2) * (d5 > 0.6 ? 0.6 : 1);
+        // Persoenlichkeit: W5 schwaecher als W3 (Momentum), Volumen am groessten in W3
+        if (w5 / dur(p4, p5) < w3 / dur(p2, p3)) s += 3;
+        const v1 = avgVol(p0, p1), v3 = avgVol(p2, p3), v5 = avgVol(p4, p5);
+        if (v1 != null && v3 != null && v5 != null) { if (v3 > v1 && v3 > v5) s += 6; else if (v5 > v3 * 1.3) s -= 3; }
+      }
+      // GRAD-STIMMIGKEIT (gemeldet: RUNE Monat -- "warum endet Welle 3 erst dort? Welle 4 ist nicht
+      // sichtbar"): Die Korrekturen INNERHALB einer Welle gehoeren zum naechstkleineren Grad und
+      // muessen kleiner sein als die Korrekturwellen 2 und 4 selbst. Lag in "Welle 3" eine
+      // Gegenbewegung von +130 %, waehrend die "Welle 4" danach nur +70 % betrug, war die Zaehlung
+      // verschoben: die grosse Gegenbewegung IST Welle 4. Jetzt: Gegenbewegungen innerhalb von W3
+      // (und W5) groesser als W4 -- bzw. innerhalb von W1 groesser als W2 -- kosten Punkte.
+      const innenMax = (a, b) => {
+        let m = 0;
+        for (let k = a; k < b; k++) {
+          const d = (vOf(Q[k + 1]) - vOf(Q[k])) * (up ? 1 : -1);
+          if (d < 0) m = Math.max(m, -d);
+        }
+        return m;
+      };
+      const strafe = (innen, korr, gewicht) => (korr > 0 && innen > korr ? gewicht * Math.min(1, innen / korr - 1) + 3 : 0);
+      if (p2) s -= strafe(innenMax(idx[0], idx[1]), w2, 8);
+      if (p4) s -= strafe(innenMax(idx[2], idx[3]), w4, 14);
+      if (p5) s -= strafe(innenMax(idx[4], idx[5]), w4, 8);
+      // ZEIT-STIMMIGKEIT (Kontrolle 04.10.2026, RUNE Tag: Welle 3 und 5 lagen am selben Hoch, W4 und
+      // W5 dauerten zusammen ~4 Kerzen nach einer W1 von ~5 Wochen). Wellen DESSELBEN Grades sind
+      // zeitlich grob vergleichbar; eine W5 von wenigen Kerzen nach einer wochenlangen W1 ist fast
+      // immer nur ein Unterwellen-Zacken am Ende von W3 -- die Zaehlung ist um einen Grad
+      // verschoben. Bisher gab es nur OBERgrenzen (W2 <= 9x W1, W3 <= 14x W1), keine Untergrenze.
+      // Weich (Abwertung), nicht hart: Schlusswellen koennen kurz und heftig sein.
+      if (p4) { const rt = dur(p3, p4) / dur(p1, p2); if (rt < 0.25) s -= 6 * Math.min(1, (0.25 - rt) / 0.2) + 2; }
+      if (p5) { const rt = dur(p4, p5) / dur(p0, p1); if (rt < 0.2) s -= 10 * Math.min(1, (0.2 - rt) / 0.15) + 2; }
+      const spanPiv = idx[idx.length - 1] - idx[0];
+      s += Math.min(8, Math.max(0, spanPiv - (idx.length - 1)) * 1.5);
+      return { score: s, diagonal, truncated };
+    };
+
+    // A-B-C nach einem kompletten Impuls (Position e = Punkt 5), ebenfalls mit Skip.
+    const abcAfter = (e, up, p5) => {
+      const aOpts = ends(e, !up, p5.price, null).slice(0, 3);
+      let best = null;
+      for (const ai of aOpts) {
+        const a = Q[ai];
+        const bOpts = ends(ai, up, a.price, p5.price).slice(0, 3);
+        if (!bOpts.length) { const c = { pts: [ai], score: 1 }; if (!best || c.score > best.score) best = c; continue; }
+        for (const bi of bOpts) {
+          const b = Q[bi];
+          const rb = L(a, b) / (L(p5, a) || 1e-9);
+          if (rb > 1.3) continue;
+          const cOpts = ends(bi, !up, b.price, null).slice(0, 3);
+          if (!cOpts.length) { const c = { pts: [ai, bi], score: 2 + fibFit(rb, [0.5, 0.618, 0.382], 0.3) }; if (!best || c.score > best.score) best = c; continue; }
+          for (const ci of cOpts) {
+            const rc = L(b, Q[ci]) / (L(p5, a) || 1e-9);
+            // C = A (haeufigst), dann 1,618 x A bzw. 0,618 x A (Frost/Prechter)
+            const c = { pts: [ai, bi, ci], score: 3 + fibFit(rb, [0.5, 0.618, 0.382], 0.3) + Math.max(fibFit(rc, [1], 0.18), 0.8 * fibFit(rc, [1.618, 0.618], 0.18)) + (Q[ci].pending ? 0 : 0.5) };
+            if (!best || c.score > best.score) best = c;
+          }
+        }
+      }
+      const pts = best ? best.pts.map((pi, i) => ({ ...Q[pi], label: ['A', 'B', 'C'][i] })) : [];
+      pts.lastPos = best ? best.pts[best.pts.length - 1] : null;
+      return pts;
+    };
+
+    // forceStart (fuer die uebergeordnete Sicht): Die Zaehlung MUSS beim ersten Wendepunkt des
+    // Fensters beginnen. Ohne das waehlt die Bewertung die Zaehlung am rechten Rand, weil sie
+    // besser zum aktuellen Geschehen passt -- fuer eine Makro-Sicht ist aber genau der linke
+    // Rand der Ausgangspunkt.
+    // Nicht stur der allererste Wendepunkt: Die ersten drei sind erlaubt. Sonst scheitert die
+    // Makro-Sicht daran, dass ausgerechnet der aeusserste Punkt keine regelkonforme Zaehlung
+    // traegt -- und dann gaebe es gar keine uebergeordnete Sicht.
+    const s0Max = (opts && opts.forceStart) ? Math.min(3, n - 2) : n - 2;
+    for (let s0 = 0; s0 < s0Max; s0++) {
+      for (const up of [true, false]) {
+        const p0 = Q[s0];
+        if (up ? p0.type !== 'L' : p0.type !== 'H') continue;
+        for (const i1 of ends(s0, up, p0.price, null)) {
+          for (const i2 of ends(i1, !up, Q[i1].price, p0.price)) {
+            // 1-2 (vorlaeufig): Punkt 2 ist das letzte oder unbestaetigte Extrem
+            if (i2 >= n - 1) { const r = evalImpulse([s0, i1, i2], up, false); if (r) cands.push({ type: 'impulse', up, idx: [s0, i1, i2], points: [s0, i1, i2].map(i => Q[i]), complete: false, score: r.score - 8, diagonal: false, coveredTo: i2 }); }
+            for (const i3 of ends(i2, up, Q[i2].price, null)) {
+              if (i3 >= n - 1) { const r = evalImpulse([s0, i1, i2, i3], up, false); if (r) cands.push({ type: 'impulse', up, idx: [s0, i1, i2, i3], points: [s0, i1, i2, i3].map(i => Q[i]), complete: false, score: r.score, diagonal: r.diagonal, truncated: r.truncated, coveredTo: i3 }); }
+              for (const i4 of ends(i3, !up, Q[i3].price, Q[i2].price)) {
+                if (i4 >= n - 1) { const r = evalImpulse([s0, i1, i2, i3, i4], up, false); if (r) cands.push({ type: 'impulse', up, idx: [s0, i1, i2, i3, i4], points: [s0, i1, i2, i3, i4].map(i => Q[i]), complete: false, score: r.score, diagonal: r.diagonal, truncated: r.truncated, coveredTo: i4 }); }
+                for (const i5 of ends(i4, up, Q[i4].price, null)) {
+                  const idx = [s0, i1, i2, i3, i4, i5];
+                  const complete = !Q[i5].pending;
+                  const r = evalImpulse(idx, up, complete);
+                  if (!r) continue;
+                  const abc = complete ? abcAfter(i5, up, Q[i5]) : [];
+                  const coveredTo = abc.length ? abc.lastPos : i5;
+                  // Eine Zaehlung muss die AKTUELLE Position beschreiben: Impuls + Korrektur
+                  // muessen bis an den letzten oder vorletzten Wendepunkt reichen.
+                  //
+                  // NICHT fuer die Makro-Sicht (forceStart): dort ist genau das Gegenteil
+                  // gefragt. Eine uebergeordnete Zaehlung ab dem Tief 2019 endet mit ihrer
+                  // A-B-C im Baerenmarkt-Tief -- alles danach ist die NAECHSTE Struktur, nicht
+                  // ein Mangel dieser. Die Regel verwarf sie deshalb still (kein nein(), also
+                  // auch in der Diagnose unsichtbar) und liess nur Zaehlungen uebrig, die nahe
+                  // am rechten Rand beginnen -- daher der Start am ATH.
+                  if (!(opts && opts.forceStart) && n - 1 - coveredTo > 1) continue;
+                  cands.push({ type: 'impulse', up, idx, points: idx.map(i => Q[i]), complete, score: r.score + (coveredTo === n - 1 ? 8 : 4), diagonal: r.diagonal, truncated: r.truncated, abc, coveredTo });
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    // Reine A-B-C-Korrektur am Ende (Zickzack/Flat), ebenfalls mit Skip auf A und C.
+    // Bei forceStart (Makro-Sicht) ebenfalls nur ab dem ersten Wendepunkt.
+    const corrFrom = (opts && opts.forceStart) ? 0 : Math.max(0, n - 8);
+    const corrTo = (opts && opts.forceStart) ? Math.min(3, n - 2) : n - 2;
+    for (let s0 = corrFrom; s0 < corrTo; s0++) {
+      for (const down of [true, false]) {
+        const p0 = Q[s0];
+        if (down ? p0.type !== 'H' : p0.type !== 'L') continue;
+        const up = !down; // Richtung, in die die Korrektur laeuft (= Richtung von A und C)
+        // A laeuft in Korrekturrichtung, B dagegen, C wieder in Korrekturrichtung.
+        for (const ai of ends(s0, up, p0.price, null)) {
+          const a = Q[ai];
+          for (const bi of ends(ai, !up, a.price, null)) {
+            const b = Q[bi];
+            // B darf den Anfang der Korrektur (p0) nicht ueberschreiten
+            if (up ? b.price <= p0.price : b.price >= p0.price) continue;
+            const wa = L(p0, a), wb = L(a, b);
+            const rb = wb / (wa || 1e-9);
+            if (rb < 0.2 || rb > 1.3) continue;
+            // Sehr grosse "Welle A" (mehr als 3,3-fach, 1,2 im Log-Raum): auf dem Gesamtchart
+            // legitim -- der Absturz 2021-22 (-94 %) IST die Welle A der grossen Korrektur, und
+            // genau diese A-B-C will man auf dem grossen Zeitraum sehen. Was NICHT passieren
+            // darf: dass C = A daraus ein 60x-Ziel ableitet. Deshalb wird der Kandidat behalten,
+            // aber (a) leicht abgestuft, damit bei gleichwertiger Impuls-Lesart der Impuls
+            // gewinnt, und (b) die fuer die Ziele verwendete A-Laenge auf 1,2 (Log) gedeckelt
+            // (siehe Zielberechnung unten).
+            if (useLog && wa > 1.2 && wa > 2.5) continue; // jenseits ~12x ist es kein A mehr
+            if (dur(a, b) > 10 * dur(p0, a)) continue;
+            for (const ci of ends(bi, up, b.price, null)) {
+              if (n - 1 - ci > 1) continue;
+              const c = Q[ci];
+              const wc = L(b, c), rc = wc / (wa || 1e-9);
+              if (!c.pending && (rc < 0.6 || rc > 2.61)) continue;
+              // DAUER VON WELLE C begrenzen -- fehlte bisher komplett. Fuer B galt die Grenze
+              // bereits (10x A), fuer C nicht, obwohl die Referenzimplementierung sie fuer
+              // beide setzt. Ohne sie konnte eine jahrelange Seitwaertsbewegung als "Welle C"
+              // einer viel kuerzeren A durchgehen.
+              if (dur(b, c) > 10 * dur(p0, a)) continue;
+              const corrType = rb <= 0.786 ? 'zigzag' : rb >= 0.9 ? 'flat' : 'unknown';
+              // Zickzack: B 38,2-78,6 % von A, C = A (oder 1,618 / 0,618 x A); Flat: B ~ 100 %,
+              // C ~ A. Stetig bewertet (fibFit) statt in Stufen.
+              const bFit = corrType === 'flat' ? fibFit(rb, [1, 0.9], 0.1) : fibFit(rb, [0.5, 0.618, 0.382], 0.3);
+              const cFit = Math.max(fibFit(rc, [1], 0.18), 0.8 * fibFit(rc, [1.618, 0.618], 0.18));
+              const score = 34 + 10 * bFit + (corrType === 'flat' ? 8 * fibFit(rc, [1], 0.15) : 0) + 10 * cFit + (c.pending ? 0 : 4) + (corrType === 'unknown' ? -4 : 0) + (ci === n - 1 ? 2 : 0);
+              cands.push({ type: 'corrective', up, idx: [s0, ai, bi, ci], points: [p0, a, b, c], complete: !c.pending, score, ratios: { rb, rc }, corrType, coveredTo: ci });
+            }
+          }
+        }
+      }
+    }
+    if (!cands.length) return null;
+    // Optionale Vorgaben der Grad-Wahl: mindestens so viele Punkte, und der Beginn mindestens so
+    // weit vor dem Ende -- damit auf dem Gesamtchart die grosse, weitgehend fertige Struktur
+    // gewinnt und nicht eine vorlaeufige 1-2 mit drei Punkten am rechten Rand.
+    if (opts && (opts.minPoints || opts.minSpan)) {
+      // HARTE ZUSATZREGEL (gemeldet: "die large-Zaehlung sieht komisch aus" -- Welle 3 lief von
+      // $13,40 auf $0,59 und enthielt dabei die komplette Erholung auf ~$10):
+      //
+      // Eine Antriebswelle (1, 3, 5, A, C) darf INNERHALB ihrer selbst nicht nahezu vollstaendig
+      // zurueckgelaufen sein. Passiert das doch, ist die Struktur in Wahrheit mehrteilig und man
+      // haette an dieser Stelle teilen muessen -- die Skip-Kombinatorik ueberspringt den Punkt
+      // sonst stillschweigend und behauptet eine Welle, die es so nicht gibt. Grenze: 61,8 %
+      // (Fibonacci) -- wer mehr zurueckliefe, waere nach Elliott keine einzelne Welle mehr.
+      const reihe = opts.data;
+      const LN = v => Math.log(Math.max(v, 1e-9));
+      const internOk = (c) => {
+        if (!reihe) return true;
+        const antrieb = c.type === 'impulse' ? [0, 2, 4] : [0, 2]; // Segmente 0→1, 2→3, 4→5
+        for (const k of antrieb) {
+          const a2 = c.points[k], b2 = c.points[k + 1];
+          if (!a2 || !b2) continue;
+          const runter = b2.price < a2.price;
+          const ganz = Math.abs(LN(a2.price) - LN(b2.price));
+          if (ganz <= 0) continue;
+          // Nur pruefen, wenn die Welle lang genug ist, um ueberhaupt ein inneres Retracement
+          // zu zeigen. Auf Monatskerzen besteht eine Welle oft aus drei, vier Kerzen -- dort
+          // misst die Regel Rauschen und verwarf zuletzt JEDE Zaehlung (siehe Diagnose:
+          // "keine gueltige Zaehlung" auf allen Stufen).
+          if (b2.idx - a2.idx < 5) continue;
+          // Laufendes Extrem mitfuehren und an JEDER Stelle fragen: wie viel der bis dahin
+          // gelaufenen Strecke wurde gerade zurueckerobert? Erst ab 20 % gelaufener Strecke
+          // messen -- ganz am Anfang ist der Nenner naturgemaess winzig.
+          let lauf = a2.price, maxR = 0;
+          for (let i = a2.idx; i <= b2.idx && i < reihe.length; i++) {
+            const hi = reihe[i].high != null ? reihe[i].high : reihe[i].value;
+            const lo = reihe[i].low != null ? reihe[i].low : reihe[i].value;
+            if (runter) { if (lo < lauf) lauf = lo; } else { if (hi > lauf) lauf = hi; }
+            const gelaufen = Math.abs(LN(a2.price) - LN(lauf));
+            if (gelaufen < 0.2 * ganz) continue;
+            const gegen = runter ? hi : lo;
+            const r = Math.abs(LN(gegen) - LN(lauf)) / gelaufen;
+            if (r > maxR) maxR = r;
+          }
+          if (maxR > 0.618) return false;
+        }
+        return true;
+      };
+      // EINHEITENFEHLER (gemeldet: "wieso liegt der Fokus bei so einem grossen Zeitraum auf den
+      // letzten kleinen Wellen?"): Hier stand `lastIdx - c.idx[0]`. c.idx[0] ist aber die
+      // POSITION im Pivot-Array (0, 1, 2 ...), lastIdx dagegen ein KERZEN-Index (z. B. 71). Die
+      // Differenz war damit fast immer die halbe Historie, die Huerde ging IMMER auf -- und schon
+      // auf der groebsten Stufe rutschte eine Zaehlung am rechten Rand durch, die nur ein Viertel
+      // des Charts umspannt. Richtig ist der Kerzen-Index des ersten Punktes.
+      const spanVon = c => lastIdx - c.points[0].idx;
+      const gef = cands.filter(c => (!opts.minPoints || c.points.length >= opts.minPoints) && (!opts.minSpan || spanVon(c) >= opts.minSpan) && internOk(c));
+      if (!gef.length) return null;
+      cands.length = 0; cands.push(...gef);
+      // FIX (gemeldet: "immer noch klein gezaehlt"): Der reine Bestwert waehlte oft eine SPAETERE
+      // Struktur, die die Huerde zwar erfuellt, aber nur die halbe Historie umfasst -- etwa eine
+      // Zaehlung ab dem Hoch 2024 statt ab dem Hoch 2021. Auf dem grossen Zeitraum will man die
+      // GROESSTE Struktur sehen. Deshalb: unter allen Kandidaten, die nah am Bestwert liegen
+      // (hoechstens 12 Punkte darunter), gewinnt der mit dem FRUEHESTEN Start.
+      let bestScore = -Infinity;
+      for (const c of cands) if (c.score > bestScore) bestScore = c.score;
+      // 'coarse' (Nutzer hat "gross" gewaehlt) heisst: die FRUEHESTE gueltige Struktur, ohne
+      // Ruecksicht auf den Punktwert -- genau das will jemand sehen, der "die grosse Zaehlung"
+      // verlangt. Bei 'auto' bleibt es bei der Naehe zum Bestwert (hoechstens 12 Punkte darunter),
+      // damit die Automatik keine schwache Zaehlung nur wegen ihres fruehen Starts nimmt.
+      const nah = opts.preferEarliest ? cands.slice() : cands.filter(c => c.score >= bestScore - 12);
+      nah.sort((x, y) => x.idx[0] - y.idx[0] || y.score - x.score);
+      // AM AEUSSERSTEN WENDEPUNKT BEGINNEN (gemeldet: "faengt die erste Welle nicht schon bei den
+      // 29 Cent an?"): Liegt das tiefste Tief (bzw. hoechste Hoch) der Wendepunkte VOR dem Start der
+      // gewaehlten Zaehlung, und gibt es einen gueltigen Kandidaten, der genau dort beginnt und nicht
+      // mehr als 20 Punkte schlechter ist, gewinnt dieser. Ein Impuls beginnt am Extrem der Bewegung
+      // davor -- nicht irgendwo danach.
+      if (!opts.preferEarliest && nah.length && pivotSet && Array.isArray(pivotSet.pivots) && pivotSet.pivots.length) {
+        const pv = pivotSet.pivots;
+        const tief = pv.reduce((m, q) => (q.type === 'L' && (!m || q.price < m.price) ? q : m), null);
+        const hoch = pv.reduce((m, q) => (q.type === 'H' && (!m || q.price > m.price) ? q : m), null);
+        const amExtrem = cands.filter(c => {
+          const p0 = c.points[0];
+          const ext = c.up ? tief : hoch;
+          return ext && p0.idx === ext.idx && c.score >= bestScore - 20;
+        }).sort((x, y) => y.score - x.score);
+        const erster = nah[0];
+        if (amExtrem.length && erster && erster.points[0].idx > amExtrem[0].points[0].idx) {
+          const k = nah.indexOf(amExtrem[0]);
+          if (k > 0) nah.splice(k, 1);
+          if (k !== 0) nah.unshift(amExtrem[0]);
+        }
+      }
+      cands.length = 0; cands.push(...nah);
+    }
+    cands.sort((x, y) => (opts && (opts.minPoints || opts.minSpan)) ? 0 : y.score - x.score);
+    // Dasselbe fuer die feine Zaehlung (Rueckfall ohne Grad-Vorgaben): beginnt ein gueltiger,
+    // hoechstens 20 Punkte schlechterer Kandidat am aeussersten Wendepunkt VOR dem Start des
+    // besten, gewinnt er (siehe "AM AEUSSERSTEN WENDEPUNKT BEGINNEN").
+    if (!(opts && (opts.minPoints || opts.minSpan || opts.forceStart || opts.preferEarliest)) && cands.length > 1 && pivotSet && Array.isArray(pivotSet.pivots)) {
+      const pv = pivotSet.pivots, top = cands[0];
+      const tief = pv.reduce((m, q) => (q.type === 'L' && (!m || q.price < m.price) ? q : m), null);
+      const hoch = pv.reduce((m, q) => (q.type === 'H' && (!m || q.price > m.price) ? q : m), null);
+      const ext = top.up ? tief : hoch;
+      if (ext && top.points[0].idx > ext.idx) {
+        const alt = cands.filter(c => c.up === top.up && c.points[0].idx === ext.idx && c.score >= top.score - 20).sort((x, y) => y.score - x.score)[0];
+        if (alt) { cands.splice(cands.indexOf(alt), 1); cands.unshift(alt); }
+      }
+    }
+    // HYSTERESE (gemeldet: "willkuerlich" -- mit jeder neuen Kerze konnte eine ganz andere Zaehlung
+    // gewinnen, wenn sie nur knapp besser war). Die zuletzt gezeigte Zaehlung derselben Reihe wird
+    // gemerkt (Datum ihrer bestaetigten Punkte). Gibt es einen Kandidaten, der sie FORTSETZT (alle
+    // bestaetigten Punkte an derselben Stelle, gleiche Richtung und Art) und hoechstens 8 Punkte
+    // schlechter ist, bleibt es bei ihr. Erst ein klar besserer Kandidat loest den Umbau aus.
+    let best = cands[0];
+    const hystKey = opts && opts.data && opts.data.length > 1
+      ? [opts.data[0].date, opts.data[0].value, opts.data[1].date - opts.data[0].date, useLog ? 'L' : 'N', opts.minPoints || 0, opts.preferEarliest ? 'E' : '', pivotSet.pct || ''].join('|') : null;
+    if (hystKey && best) {
+      const vorher = EW_HYST.get(hystKey);
+      const dat = i => (opts.data[i] ? opts.data[i].date : null);
+      const fest = EW_PIN && EW_PIN.get(hystKey);
+      const ziel = fest || vorher;
+      if (ziel && !(ziel.type === best.type && ziel.up === best.up && ziel.dates.every((d, k) => best.points[k] && dat(best.points[k].idx) === d))) {
+        const fort = cands.find(c => c.type === ziel.type && c.up === ziel.up && ziel.dates.length <= c.points.length && ziel.dates.every((d, k) => dat(c.points[k].idx) === d));
+        if (fort && (fest || fort.score >= best.score - 8)) best = fort;
+      }
+      EW_HYST.set(hystKey, { type: best.type, up: best.up, dates: best.points.filter(p => !p.pending).map(p => dat(p.idx)) });
+      if (EW_HYST.size > 200) EW_HYST.delete(EW_HYST.keys().next().value);
+    }
+    const alt = cands.find(c => c !== best && (c.up !== best.up || c.type !== best.type || Math.abs(c.idx[0] - best.idx[0]) >= 2) && c.score >= 42) || null;
+
+    const labelsImp = ['0', '1', '2', '3', '4', '5'];
+    const labelsCor = ['0', 'A', 'B', 'C'];
+    let points = [], phase = null, targets = [], dir = best.up ? 'up' : 'down', kind = best.type;
+    const sign = best.up ? 1 : -1;
+    const proj = (fromP, lenLog, mult) => useLog ? Math.exp(ln(fromP.price) + sign * lenLog * mult) : fromP.price + sign * lenLog * mult;
+    const back = (fromP, lenLog, mult) => useLog ? Math.exp(ln(fromP.price) - sign * lenLog * mult) : fromP.price - sign * lenLog * mult;
+    const refLen = (a, b) => ({ abs: Math.abs(b.price - a.price), pct: Math.abs(b.price / a.price - 1) * 100 });
+    const T = (key, price, fromP, fromLabel, factor, refA, refB, refLabel, s) => ({ key, price, explain: { fromLabel, fromPrice: fromP.price, factor, refLabel, ref: refLen(refA, refB), sign: (s == null ? sign : s) > 0 ? '+' : '−' } });
+    // ZIEL-LEITER (gemeldet: "Welle 3 bei 0,733, obwohl wir schon ueber 80 Cent sind"): Die Ziele
+    // der LAUFENDEN Welle waren feste Fib-Vielfache (W3 = 1,618 x W1, C = 1 x A, ...), auch wenn
+    // der Kurs sie laengst hinter sich hatte -- die Projektion lief dann rueckwaerts. Jetzt gilt:
+    // Ziel ist das erste Vielfache der Leiter, das JENSEITS des bisherigen Extrems der Welle
+    // liegt (hoechster/tiefster Pivot seit dem Startpunkt, laufender Pivot, letzter Schluss).
+    // Ist die ganze Leiter ueberschritten, steht das Ziel am Extrem selbst.
+    const weiter = (x, y, s) => (useLog ? ln(x) - ln(y) : x - y) * s > 0;
+    const extSeit = (fromP, s) => {
+      let e = null;
+      for (const q of Q) if (q.idx > fromP.idx && Number.isFinite(q.price) && (e == null || weiter(q.price, e, s))) e = q.price;
+      if (Number.isFinite(lastClose) && (e == null || weiter(lastClose, e, s))) e = lastClose;
+      return e != null && weiter(e, fromP.price, s) ? e : null;
+    };
+    const leiter = (key, keyB, fromP, fromLabel, lenLog, ratios, refA, refB, refLabel, s) => {
+      if (!(lenLog > 0)) return [];
+      const mv = r => (useLog ? Math.exp(ln(fromP.price) + s * lenLog * r) : fromP.price + s * lenLog * r);
+      const ext = extSeit(fromP, s);
+      // ZIEL GETROFFEN, NICHT UEBERSCHRITTEN (gemeldet: "C war 0,699 und wurde perfekt mit der
+      // Wick getroffen -- jetzt steht ein anderes Ziel da"). Bisher sprang die Leiter auf die
+      // naechste Stufe, sobald das Extrem die Zielstufe auch nur um einen Tick passiert hatte.
+      // Ein Docht knapp ueber das Ziel, nach dem der Kurs wieder auf die alte Seite schliesst,
+      // ist aber ein Treffer: Diese Stufe bleibt das Ziel (mit Haken), die naechste wird nur
+      // Erweiterung. Knapp = hoechstens 5 % der Referenzlaenge jenseits der Stufe.
+      const tolG = lenLog * 0.05;
+      // ERWEITERT (gewuenscht): Auch ein tieferer Docht zaehlt als Treffer, solange seit dem
+      // Start der Welle KEIN Schlusskurs jenseits der Stufe lag -- erst ein Schluss darunter (bzw.
+      // darueber) schiebt die Leiter zur naechsten Stufe. (Gemeldet: C-Ziel sprang auf
+      // 2,618 x A, obwohl nur ein Docht unter 1,618 x A war und der Kurs wieder darueber stand.)
+      const reiheL = opts && opts.data;
+      const schlussJenseits = z => {
+        if (!reiheL || !fromP || !Number.isFinite(fromP.idx)) return true;
+        for (let i = fromP.idx + 1; i < reiheL.length; i++) { const c = reiheL[i] && reiheL[i].value; if (Number.isFinite(c) && weiter(c, z, s)) return true; }
+        return false;
+      };
+      // NOCH WEITER GEFASST (gemeldet: "genau gleich geblieben" -- ein einzelner Tagesschluss lag
+      // kurz unter 1,618 x A, der Kurs steht aber wieder darueber): Massgeblich ist die TIEFSTE
+      // (aeusserste) Stufe, die das Extrem erreicht hat. Steht der AKTUELLE Schluss wieder
+      // diesseits dieser Stufe, gilt sie als Treffer -- die Welle hat dort gedreht. Erst solange
+      // der Kurs jenseits der Stufe bleibt, ist die naechste Stufe das Ziel.
+      void schlussJenseits;
+      const getroffen = ext == null ? null : (() => {
+        const erreichte = ratios.filter(r => ((useLog ? ln(ext) - ln(mv(r)) : ext - mv(r)) * s) >= 0);
+        if (!erreichte.length) return null;
+        const r = erreichte[erreichte.length - 1];
+        const z = mv(r);
+        if (Number.isFinite(lastClose) && weiter(lastClose, z, s)) return null;
+        return r;
+      })();
+      if (getroffen != null) {
+        const out = [{ ...T(key, mv(getroffen), fromP, fromLabel, getroffen, refA, refB, refLabel, s), hit: true }];
+        const naechste = ratios.find(r => r > getroffen);
+        if (keyB && naechste != null) out.push(T(keyB, mv(naechste), fromP, fromLabel, naechste, refA, refB, refLabel, s));
+        return out;
+      }
+      const offen = ratios.filter(r => ext == null || weiter(mv(r), ext, s));
+      const out = [];
+      if (offen.length) {
+        out.push(T(key, mv(offen[0]), fromP, fromLabel, offen[0], refA, refB, refLabel, s));
+        if (keyB && offen[1] != null) out.push(T(keyB, mv(offen[1]), fromP, fromLabel, offen[1], refA, refB, refLabel, s));
+      } else if (ext != null) {
+        const f = (useLog ? Math.abs(ln(ext) - ln(fromP.price)) : Math.abs(ext - fromP.price)) / lenLog;
+        out.push(T(key, ext, fromP, fromLabel, +f.toFixed(3), refA, refB, refLabel, s));
+      }
+      return out;
+    };
+    if (best.type === 'impulse') {
+      points = best.points.map((p, i) => ({ ...p, label: labelsImp[i] }));
+      const [p0, p1, p2, p3, p4, p5] = best.points;
+      // Referenzlaengen fuer die ZIELE im Log-Raum gedeckelt (1,2 = 3,3-fach): bei einer Welle 1
+      // von -95 % (2021-22) ergaebe "Welle 5 = Welle 1" ein Ziel bei drei Cent. Die Zaehlung
+      // bleibt, die Ziele bleiben in einem Bereich, den ein Analyst so hinschreiben wuerde.
+      const w1 = useLog ? Math.min(L(p0, p1), 1.2) : L(p0, p1), w3 = p3 ? (useLog ? Math.min(L(p2, p3), 1.2) : L(p2, p3)) : 0;
+      const k = best.points.length;
+      const lastPending = best.points[k - 1].pending;
+      if (k === 3) {
+        if (p2.pending) { phase = 'wave2'; targets.push(...leiter('ewTargetW2', null, p1, '1', w1, [0.618, 0.786], p0, p1, '1', -sign)); }
+        else phase = 'wave3';
+        targets.push(...leiter('ewTargetW3', null, p2, '2', w1, [1.618, 2, 2.618, 3.618], p0, p1, '1', sign));
+      } else if (k === 4) { phase = 'wave3'; targets.push(...leiter('ewTargetW3', 'ewTargetW3b', p2, '2', w1, [1.618, 2, 2.618, 3.618], p0, p1, '1', sign)); }
+      else if (k === 5) {
+        phase = lastPending ? 'wave4' : 'wave5';
+        if (lastPending) targets.push(...leiter('ewTargetW4', null, p3, '3', w3, [0.382, 0.5], p2, p3, '3', -sign), T('ewTargetW5', proj(p4, w1, 1), p4, '4', 1, p0, p1, '1'));
+        else targets.push(T('ewTargetW4', useLog ? Math.exp(ln(p3.price) - sign * w3 * 0.382) : p3.price - sign * w3 * 0.382, p3, '3', 0.382, p2, p3, '3', -sign), ...leiter('ewTargetW5', null, p4, '4', w1, [1, 1.618, 2.618], p0, p1, '1', sign));
+      }
+      else {
+        if (lastPending) {
+          phase = 'wave5';
+          targets.push(...leiter('ewTargetW5', null, p4, '4', w1, [1, 1.618, 2.618], p0, p1, '1', sign));
+          const w5b = proj(p4, L(p0, p3), 0.618), e5 = extSeit(p4, sign);
+          if (e5 == null || weiter(w5b, e5, sign)) targets.push(T('ewTargetW5b', w5b, p4, '4', 0.618, p0, p3, '1–3'));
+        }
+        else {
+          let abc = best.abc || [];
+          // A-B-C SCHON IN DER STRECKE 5 -> A? (gemeldet: "ABC ist schon gebildet" -- RUNE 4H). Die
+          // Pivot-Suche war fuer den Ruecksetzer in der Mitte zu grob: Sie zaehlte das tiefste Tief als A
+          // und den jetzigen Gegenlauf als B. Hier wird die Strecke 5 -> A noch einmal Kerze fuer Kerze
+          // geprueft (Regeln wie bei der Nachlauf-Zaehlung): ein Zwischen-Extrem a mit Gegenbewegung b
+          // (>= 23,6 % von a, nicht ueber 5 hinaus), danach das Extrem jenseits von a als c (>= 61,8 % von
+          // a), a >= 30 % der ganzen Strecke. Holt der Kurs seit c schon 23,6 % zurueck, ist die
+          // Korrektur fertig (A-B-C), sonst laeuft C.
+          try {
+            if (abc.length === 2 && abc[1].pending && p5 && abc[0] && abc[0].idx > p5.idx + 2) {
+              const korrRunter = sign > 0; // nach Aufwaerts-Impuls laeuft die Korrektur abwaerts
+              // Kerzen kommen ueber opts.data (nicht jeder Aufruf reicht sie mit); sonst die Wendepunkte selbst.
+              const kd = opts && Array.isArray(opts.data) ? opts.data : null;
+              const hi = d => (d.high != null ? d.high : d.value), lo = d => (d.low != null ? d.low : d.value);
+              const reihe = kd ? null : Q.filter(q => q && q.idx > p5.idx && q.idx < abc[0].idx).sort((x, y) => x.idx - y.idx);
+              const Lx = (a, b) => Math.abs(useLog ? ln(a) - ln(b) : a - b);
+              const ges = Lx(abc[0].price, p5.price);
+              let lauf = null, fund = null;
+              const schritte = kd ? Array.from({ length: Math.max(0, abc[0].idx - p5.idx - 1) }, (_, k) => p5.idx + 1 + k) : reihe.map(q => q.idx);
+              for (let si = 0; si < schritte.length; si++) {
+                const i = schritte[si];
+                const d = kd ? kd[i] : null;
+                const q = kd ? null : reihe[si];
+                if (kd && !d) continue;
+                const ext = kd ? (korrRunter ? lo(d) : hi(d)) : ((korrRunter ? q.type === 'L' : q.type === 'H') ? q.price : NaN);
+                const geg = kd ? (korrRunter ? hi(d) : lo(d)) : ((korrRunter ? q.type === 'H' : q.type === 'L') ? q.price : NaN);
+                if (ext > 0 && (!lauf || (korrRunter ? ext < lauf.price : ext > lauf.price))) lauf = { idx: i, price: ext };
+                if (!lauf || !(geg > 0) || (kd ? i <= lauf.idx + 1 : i <= lauf.idx)) continue;
+                const lA = Lx(lauf.price, p5.price);
+                if (!(lA > 0) || lA < 0.3 * ges) continue;
+                if (korrRunter ? geg >= p5.price : geg <= p5.price) continue;
+                const rueck = Lx(lauf.price, geg) / lA, lC = Lx(abc[0].price, geg);
+                if (rueck >= 0.236 && rueck < 1 && lC >= 0.618 * lA && (!fund || rueck > fund.rueck)) fund = { a: { ...lauf }, b: { idx: i, price: geg }, rueck };
+              }
+              if (fund) {
+                const tA = abc[0].type, tB = tA === 'H' ? 'L' : 'H';
+                const seitC = Lx(abc[1].price, abc[0].price) / ges;
+                abc = [
+                  { idx: fund.a.idx, price: fund.a.price, type: tA, label: 'A', pending: false },
+                  { idx: fund.b.idx, price: fund.b.price, type: tB, label: 'B', pending: false },
+                  { ...abc[0], label: 'C', pending: !(seitC >= 0.236) },
+                ];
+              }
+            }
+          } catch (x) {}
+          const full = L(p0, p5);
+          // BUGFIX ("Welle A steht bei 0,634, obwohl wir schon ueber 80 Cent sind"): Das A-Ziel war
+          // fest das 38,2-%-Niveau der Welle 0-5 -- auch wenn die laufende Gegenbewegung seit 5
+          // laengst darueber hinaus ist. Die Projektion lief dann vom aktuellen Kurs RUECKWAERTS
+          // zu diesem A. Jetzt zaehlt das bisherige Extrem seit 5 (laufender Pivot bzw. letzter
+          // Schluss): Ziel ist das naechste Fib-Niveau (38,2 / 50 / 61,8 / 78,6 %) JENSEITS davon,
+          // das zweite Ziel das darauf folgende. Ist selbst 78,6 % schon ueberschritten, gilt das
+          // Extrem als A (danach folgen B und C).
+          const corrZiele = () => {
+            const jenseits = (x, y) => (useLog ? ln(x) - ln(y) : x - y) * -sign > 0; // x weiter in Korrekturrichtung als y
+            let ext = null;
+            if (pend && pend.idx > p5.idx && jenseits(pend.price, p5.price)) ext = pend.price;
+            if (Number.isFinite(lastClose) && jenseits(lastClose, p5.price) && (ext == null || jenseits(lastClose, ext))) ext = lastClose;
+            const stufen = [0.382, 0.5, 0.618, 0.786];
+            const offen = ext == null ? stufen : stufen.filter(r => jenseits(back(p5, full, r), ext));
+            const r1 = offen[0], r2 = offen[1] != null ? offen[1] : null;
+            if (r1 != null) targets.push(T('ewTargetCorr', back(p5, full, r1), p5, '5', r1, p0, p5, '0–5', -sign));
+            else if (ext != null) targets.push(T('ewTargetCorr', ext, p5, '5', +(L(p5, { price: ext }) / full).toFixed(3), p0, p5, '0–5', -sign));
+            // Zweites Ziel: ohne Ueberschreitung wie bisher 61,8 %, sonst das naechste offene Niveau.
+            const rB = r1 == null ? null : r1 === 0.382 ? 0.618 : (r2 != null ? r2 : null);
+            if (rB != null) targets.push(T('ewTargetCorrB', back(p5, full, rB), p5, '5', rB, p0, p5, '0–5', -sign));
+          };
+          // EIN EINZELNES "A" WIRD NICHT BESCHRIFTET (gemeldet: "da steht nur a ohne b und c").
+          //
+          // Mit nur einem bestaetigten Korrekturpunkt laesst sich gar nicht sagen, DASS es ein A
+          // ist: dieselbe eine Bewegung kann die Welle 1 eines neuen Impulses sein, eine Welle B,
+          // oder der erste Teil einer laufenden Korrektur. Das Label behauptete also eine
+          // Einordnung, die die Daten noch nicht hergeben -- und im Chart stand ein A, hinter dem
+          // nie ein B und C kamen. Erst ab ZWEI bestaetigten Punkten (A und B) ist die Korrektur
+          // als solche lesbar; vorher bleibt es bei "Impuls fertig" und die Korrektur erscheint
+          // vollstaendig als gestrichelte A-B-C-Projektion.
+          if (abc.length >= 2) {
+            points = points.concat(abc);
+            if (abc.length === 2) { phase = abc[1].pending ? 'waveB' : 'waveC'; targets.push(...(phase === 'waveC' ? leiter('ewTargetC', null, abc[1], 'B', L(p5, abc[0]), [1, 1.272, 1.618, 2.618], p5, abc[0], 'A', -sign) : [T('ewTargetC', back(abc[1], L(p5, abc[0]), 1), abc[1], 'B', 1, p5, abc[0], 'A', -sign)])); }
+            else { phase = abc[2].pending ? 'waveC' : 'corrDone'; if (abc[2].pending) targets.push(...leiter('ewTargetC', null, abc[1], 'B', L(p5, abc[0]), [1, 1.272, 1.618, 2.618], p5, abc[0], 'A', -sign)); else { const lc = L(p5, abc[2]); targets.push(T('ewTargetNewImpulse', proj(abc[2], lc, 0.382), abc[2], 'C', 0.382, p5, abc[2], '5→C'), T('ewTargetNewImpulseB', proj(abc[2], lc, 0.618), abc[2], 'C', 0.618, p5, abc[2], '5→C')); } }
+          } else {
+            phase = 'impulseDone';
+            corrZiele();
+          }
+        }
+      }
+    } else {
+      points = best.points.map((p, i) => ({ ...p, label: labelsCor[i] }));
+      const [p0, a, b, c] = best.points;
+      phase = c.pending ? 'waveC' : 'corrDone';
+      // A-Laenge fuer die Ziele gedeckelt (1,2 im Log-Raum = 3,3-fach): "C = A" bei einer
+      // 15-fachen Welle A ergaebe Fantasieziele -- die Struktur bleibt, das Ziel wird zahm.
+      const la = useLog ? Math.min(L(p0, a), 1.2) : L(p0, a);
+      if (c.pending) targets.push(...leiter('ewTargetC', 'ewTargetCb', b, 'B', la, [1, 1.272, 1.618, 2.618], p0, a, 'A', sign));
+      else {
+        // Korrektur fertig: Ziele des neuen Impulses als 38,2 % / 61,8 % Rueckeroberung der
+        // ganzen Korrektur (0 -> C). Das "Niveau von 0" als Ziel war auf dem Gesamtchart ein
+        // 30x-Versprechen -- Elliott sagt zwar, dass ein neuer Impuls den Korrekturstart
+        // irgendwann uebertrifft, aber als naechstes Ziel taugt das nicht.
+        const lc = L(p0, c);
+        targets.push(T('ewTargetNewImpulse', back(c, lc, 0.382), c, 'C', 0.382, p0, c, '0→C', -sign), T('ewTargetNewImpulseB', back(c, lc, 0.618), c, 'C', 0.618, p0, c, '0→C', -sign));
+      }
+    }
+    // ERWARTETER VERLAUF (gemeldet: "Ziele als gestrichelte zukuenftige Bewegung zeichnen, damit
+    // man sieht, wohin das fuehrt"): aus der laufenden Phase die naechsten 1-3 Wellen als
+    // Punkte in der Zukunft -- Preis aus den Fibonacci-Richtwerten, Zeit aus der Dauer der
+    // analogen Welle (Welle 4 ~ Welle 2, Welle 5 ~ Welle 1, Welle 3 ~ 1,6 x Welle 1 usw.).
+    // dIdx = Kerzen nach der aktuellen Kerze.
+    const projection = [];
+    {
+      const durOf = (a, b) => a && b ? Math.max(2, Math.abs(b.idx - a.idx)) : null;
+      const lab = l => points.find(p => p.label === l);
+      const P0 = lab('0'), P1 = lab('1'), P2 = lab('2'), P3 = lab('3'), P4 = lab('4'), P5 = lab('5'), PA = lab('A'), PB = lab('B'), PC = lab('C');
+      const avgDur = points.length >= 2 ? Math.max(2, Math.round((points[points.length - 1].idx - points[0].idx) / (points.length - 1))) : 8;
+      const d1 = durOf(P0, P1) || avgDur, d2 = durOf(P1, P2) || Math.round(avgDur * 0.7), d3 = durOf(P2, P3) || Math.round(d1 * 1.6), dA = durOf(P5, PA) || d2;
+      const tgt = k => { const x = targets.find(t => t.key === k); return x ? x.price : null; };
+      const lenL = (a, b) => useLog ? Math.abs(ln(b) - ln(a)) : Math.abs(b - a);
+      const move = (fromPrice, lenLog, mult, s) => useLog ? Math.exp(ln(fromPrice) + s * lenLog * mult) : fromPrice + s * lenLog * mult;
+      const w1 = P0 && P1 ? lenL(P0.price, P1.price) : null;
+      let acc = 0;
+      const trefferPreise = targets.filter(x => x.hit).map(x => x.price);
+      const push = (label, price, d) => { if (!Number.isFinite(price) || price <= 0) return; acc += Math.max(2, Math.round(d)); projection.push({ label, price, dIdx: acc, hit: trefferPreise.includes(price) || undefined }); };
+      // WELLE 1 LAEUFT SCHON (gemeldet: "Welle 1 immer noch nicht angepasst"): Nach fertigem (C)
+      // wurde stur ein "1" bei 38,2 % der Korrektur in die ZUKUNFT gesetzt -- auch wenn der Kurs
+      // seit (C) laengst darueber hinaus gelaufen war. Dann ist diese Bewegung selbst Welle 1 (oder
+      // ihr Grossteil). Projektion dann: (2) = 61,8 % Rueckholung von 1, (3) = 1,618 x Welle 1.
+      const extremSeitC = dir => {
+        if (!PC) return null;
+        let ext = null;
+        for (const q of (Q || [])) {
+          if (!q || !(q.idx > PC.idx) || !Number.isFinite(q.price)) continue;
+          if (!ext || (dir > 0 ? q.price > ext.price : q.price < ext.price)) ext = { idx: q.idx, price: q.price };
+        }
+        if (Number.isFinite(lastClose) && (!ext || (dir > 0 ? lastClose > ext.price : lastClose < ext.price))) ext = { idx: lastIdx, price: lastClose };
+        return ext;
+      };
+      const welle1Laeuft = (dir, ziel1) => {
+        const ext = extremSeitC(dir);
+        if (!ext || !Number.isFinite(ziel1) || !(dir > 0 ? ext.price >= ziel1 : ext.price <= ziel1)) return false;
+        const w = lenL(PC.price, ext.price);
+        const d1n = Math.max(2, ext.idx - PC.idx), rest = Math.max(0, lastIdx - ext.idx);
+        const t2 = move(ext.price, w, 0.618, -dir);
+        push('2', t2, Math.max(2, d1n * 0.6 - rest));
+        push('3', move(t2, w, 1.618, dir), d1n * 1.6);
+        return true;
+      };
+      // C-ZIEL SCHON UEBERSCHRITTEN (gemeldet: "C" bei $0,699 ueber dem aktuellen Kurs $0,631,
+      // die Projektion lief erst HOCH zu C): Liegt der Kurs schon jenseits des Standardziels
+      // (C = A), gilt die naechste Fib-Ausdehnung (1,618 x A, dann 2,618 x A); ist auch die
+      // ueberschritten, laeuft C noch -- dann steht C beim aktuellen Kurs statt in der Vergangenheit.
+      const cZiel = (cStd, corrDir, PBx, laengeA) => {
+        if (!Number.isFinite(cStd) || !Number.isFinite(lastClose)) return cStd;
+        const jenseits = z => corrDir > 0 ? lastClose >= z : lastClose <= z;
+        if (!jenseits(cStd)) return cStd;
+        if (PBx && Number.isFinite(laengeA) && laengeA > 0) {
+          for (const f of [1.618, 2.618]) { const z = move(PBx.price, laengeA, f, corrDir); if (Number.isFinite(z) && z > 0 && !jenseits(z)) return z; }
+        }
+        return lastClose;
+      };
+      // KORREKTUR NACH DEM GANZEN IMPULS: Zeit nach dem GRAD skaliert (Kontrolle 04.10.2026).
+      // Bisher kam die Dauer von Welle 2 (bzw. 0,8-1x davon je Schritt) -- W2 ist aber eine Stufe
+      // KLEINER als die A-B-C, die den ganzen Impuls 0-5 korrigiert. Nach einem steilen W2-
+      // Einbruch von wenigen Kerzen lag dadurch die komplette A-B-C in den naechsten 6 Kerzen.
+      // Jetzt: Korrektur ~ 50 % der Impulsdauer (Richtwert 38-62 %), aufgeteilt A 36 % / B 28 % /
+      // C 36 %; mindestens so lang wie die laengere der Wellen 2 und 4.
+      const korrDauer = endIdx => {
+        const imp = P0 && endIdx != null ? Math.abs(endIdx - P0.idx) : null;
+        const d4 = durOf(P3, P4) || 0;
+        return Math.max(6, Math.round((imp || d1 * 3) * 0.5), d2, d4);
+      };
+      if (best.type === 'impulse') {
+        if (phase === 'wave2') { const t2 = tgt('ewTargetW2'); push('2', t2, d2 * 0.6); if (t2 && w1) push('3', move(t2, w1, 1.618, sign), d3); }
+        else if (phase === 'wave3') { const t3 = tgt('ewTargetW3'); const remain = P3 ? d3 * 0.4 : d3 * 0.7; push('3', t3, remain); if (t3 && P2 && w1) { const w3p = lenL(P2.price, t3); const t4 = move(t3, w3p, 0.382, -sign); push('4', t4, d2); push('5', move(t4, w1, 1, sign), d1); } }
+        else if (phase === 'wave4') { const t4 = tgt('ewTargetW4'); push('4', t4, d2 * 0.6); if (t4 && w1) push('5', move(t4, w1, 1, sign), d1); }
+        else if (phase === 'wave5') { const t5 = tgt('ewTargetW5'); push('5', t5, d1 * 0.6); if (t5 && P0) { const tk = korrDauer((P4 ? P4.idx : P0.idx) + d1); push('A', move(t5, lenL(P0.price, t5), 0.382, -sign), tk * 0.36); } }
+        else if (phase === 'impulseDone') { const a = tgt('ewTargetCorr'); const tk = korrDauer(P5 ? P5.idx : null); push('A', a, tk * 0.36); if (a && P5) { const b = move(a, lenL(P5.price, a), 0.618, sign); push('B', b, tk * 0.28); push('C', move(b, lenL(P5.price, a), 1, -sign), tk * 0.36); } }
+        else if (phase === 'waveA') { const b = tgt('ewTargetB'); if (PA) { push('A', PA.price, Math.round(dA * 0.4)); } if (b && PA && P5) { push('B', b, Math.round(dA * 0.8)); push('C', move(b, lenL(P5.price, PA.price), 1, -sign), dA); } }
+        else if (phase === 'waveB') { const b = tgt('ewTargetB'); const c = tgt('ewTargetC'); if (b && !PB) push('B', b, Math.round(dA * 0.6)); if (c) push('C', c, dA); else if (b && PA && P5) push('C', move(b, lenL(P5.price, PA.price), 1, -sign), dA); }
+        else if (phase === 'waveC') { push('C', cZiel(tgt('ewTargetC'), -sign, PB, PA && P5 ? lenL(P5.price, PA.price) : null), Math.round(dA * 0.6)); }
+        else if (phase === 'corrDone' && P5 && PC) { const z1 = move(PC.price, lenL(P5.price, PC.price), 0.382, sign); if (!welle1Laeuft(sign, z1)) push('1', z1, Math.round(d1 * 1.2)); }
+      } else {
+        // Nach einer fertigen Korrektur: Welle 1 des neuen Impulses erobert typischerweise
+        // 38,2 % der Korrektur zurueck -- NICHT das ganze Ausgangsniveau (das war zu
+        // aggressiv, besonders auf Monatsbasis).
+        if (phase === 'waveC') { const c = cZiel(tgt('ewTargetC'), sign, PB, PA && P0 ? lenL(P0.price, PA.price) : null); push('C', c, Math.round(dA * 0.6)); if (c && P0) push('1', move(c, lenL(P0.price, c), 0.382, -sign), Math.round(d1 * 1.2)); }
+        else if (phase === 'corrDone' && P0 && PC) { const z1 = move(PC.price, lenL(P0.price, PC.price), 0.382, -sign); if (!welle1Laeuft(-sign, z1)) push('1', z1, Math.round(d1 * 1.2)); }
+      }
+    }
+    // UNGUELTIGKEIT: der Preis, dessen Bruch die Zaehlung nach den harten Regeln faellt. Das
+    // ist die Verzweigung zwischen den Szenarien -- solange er haelt, gilt die Zaehlung.
+    let invalidation = null;
+    // C SCHON FERTIG MOEGLICH? (gemeldet: "C koennte doch theoretisch jetzt schon fertig sein" und
+    // "der Satz mit invalid waere dann falsch"). Richtig: Die einzige Pflicht fuer C ist, ueber das
+    // Ende von A hinauszulaufen. Ist das geschafft, ist "C fertig" ein gueltiges Szenario -- ein
+    // Anstieg ueber B widerlegt dann nicht die Zaehlung, sondern BESTAETIGT, dass C vorbei ist.
+    // Die harte Grenze liegt dann woanders: Die ganze Korrektur ist Welle (2) des groesseren Grads
+    // und darf den Start des Impulses (0) nicht unterschreiten. B wird zur Weiche zwischen
+    // "C laeuft noch" und "C ist fertig".
+    let cMinimum = null, weiche = null;
+    {
+      const lab = l => points.find(p => p.label === l);
+      const PA = lab('A'), PB = lab('B');
+      const reihe = opts && opts.data;
+      if (phase === 'waveC' && PA && PB && reihe && reihe.length > PB.idx + 1) {
+        const abwaerts = best.type === 'impulse' ? best.up : !best.up; // Richtung von C
+        let ext = null, extIdx = null;
+        for (let i = PB.idx + 1; i < reihe.length; i++) {
+          const v = abwaerts ? (reihe[i].low != null ? reihe[i].low : reihe[i].value) : (reihe[i].high != null ? reihe[i].high : reihe[i].value);
+          if (!Number.isFinite(v)) continue;
+          if (ext == null || (abwaerts ? v < ext : v > ext)) { ext = v; extIdx = i; }
+        }
+        const P0x = lab('0');
+        const startA = best.type === 'impulse' ? lab('5') : P0x;
+        if (ext != null && (abwaerts ? ext < PA.price : ext > PA.price) && startA) {
+          const lenA = Math.abs(useLog ? ln(PA.price) - ln(startA.price) : PA.price - startA.price);
+          const lenC = Math.abs(useLog ? ln(ext) - ln(PB.price) : ext - PB.price);
+          cMinimum = { price: ext, idx: extIdx, ratio: lenA > 0 ? lenC / lenA : null, down: abwaerts };
+        }
+      }
+    }
+    {
+      const lab = l => points.find(p => p.label === l);
+      const P0 = lab('0'), P1 = lab('1'), P2 = lab('2'), P4 = lab('4'), P5 = lab('5'), PA = lab('A');
+      const below = best.up; // Impuls aufwaerts -> Ungueltigkeit UNTER dem Niveau
+      if (best.type === 'impulse') {
+        if (phase === 'wave2' || phase === 'wave3') { if (P0) invalidation = { price: P0.price, below, ruleKey: 'proInvRule1' }; }
+        else if (phase === 'wave4') { if (P1) invalidation = { price: P1.price, below, ruleKey: 'proInvRule3' }; }
+        else if (phase === 'wave5') { if (P4) invalidation = { price: P4.price, below, ruleKey: 'proInvW5' }; }
+        else if (phase === 'impulseDone' || phase === 'waveA' || phase === 'waveB') { if (P5) invalidation = { price: P5.price, below: !below, ruleKey: 'proInvBeyondEnd' }; }
+        else if (phase === 'waveC' && lab('B')) {
+          if (cMinimum && P0) {
+            invalidation = { price: P0.price, below, ruleKey: 'proInvW2Grad' };
+            weiche = { price: lab('B').price, below: !below, key: 'proSwitchCDone' };
+          } else invalidation = { price: lab('B').price, below: !below, ruleKey: 'proInvC' };
+        }
+        else if (phase === 'corrDone' && lab('C')) { invalidation = { price: lab('C').price, below, ruleKey: 'proInvNewImpulse' }; }
+      } else {
+        // Korrektur: B darf den Start (0) nicht ueberschreiten (Zickzack) bzw. nur begrenzt (Flat)
+        // Aufwaerts-Korrektur (A steigt): Start 0 ist ein Tief -> ungueltig UNTER 0; abwaerts umgekehrt
+        if (phase === 'waveC' && P0) {
+          invalidation = { price: P0.price, below: best.up, ruleKey: 'proInvCorrStart' };
+          if (cMinimum && lab('B')) weiche = { price: lab('B').price, below: best.up, key: 'proSwitchCDone' };
+        }
+        // Nach einer fertigen Korrektur laeuft der neue Impuls ENTGEGEN der Korrektur: A-B-C abwaerts
+        // -> neuer Impuls aufwaerts -> ungueltig UNTER (C). Vorher stand hier best.up (Richtung der
+        // Korrektur selbst) -- gemeldet als "invalid above" unter dem Kurs.
+        else if (phase === 'corrDone' && lab('C')) invalidation = { price: lab('C').price, below: !best.up, ruleKey: 'proInvNewImpulse' };
+      }
+      if (invalidation && !(Number.isFinite(invalidation.price) && invalidation.price > 0)) invalidation = null;
+    }
+    // SZENARIEN NACH DEM ZIEL (gefragt: "Was passiert, nachdem das Ziel erreicht wurde? Welche
+    // Moeglichkeiten? Was muss passieren? Wie hoch sind die Wahrscheinlichkeiten?"): je Phase
+    // 2-3 Verzweigungen mit Ausloeser (Schluss ueber/unter X) und Ziel. Die Basis-Prozente sind
+    // Elliott-Richtwerte (z.B. C = A in ~60 % der Zickzacks, C = 1,618 A ~25 %, Truncation
+    // ~15 %), in analyze() werden sie um groesseren Grad, Indikatoren und S/R korrigiert -- ein
+    // Modell, keine Statistik, und so wird es auch beschriftet.
+    const scenarios = [];
+    {
+      const lab = l => points.find(p => p.label === l);
+      const lenL = (a, b) => useLog ? Math.abs(ln(b) - ln(a)) : Math.abs(b - a);
+      const mv = (fromPrice, lenLog, mult, sg) => useLog ? Math.exp(ln(fromPrice) + sg * lenLog * mult) : fromPrice + sg * lenLog * mult;
+      const P0 = lab('0'), P1 = lab('1'), P2 = lab('2'), P3 = lab('3'), P4 = lab('4'), P5 = lab('5'), PA = lab('A'), PB = lab('B');
+      const tgt = k => { const x = targets.find(t => t.key === k); return x ? x.price : null; };
+      const push = (key, dirUp, prob, trigger, target) => { if (target != null && !(Number.isFinite(target) && target > 0)) target = null; scenarios.push({ key, dir: dirUp ? 'up' : 'down', prob, trigger, target }); };
+      const s = sign; // +1 Impuls aufwaerts
+      if (best.type === 'impulse') {
+        const w1 = P0 && P1 ? lenL(P0.price, P1.price) : null;
+        if (phase === 'wave2' || phase === 'wave4') {
+          const t = tgt(phase === 'wave2' ? 'ewTargetW2' : 'ewTargetW4');
+          const nextT = tgt(phase === 'wave2' ? 'ewTargetW3' : 'ewTargetW5');
+          push('scenResume', s > 0, 60, { price: t, below: s > 0 }, nextT);
+          push('scenDeeper', s < 0, 25, { price: t, below: s > 0, beyond: true }, t != null && w1 ? mv(t, w1, 0.2, -s) : null);
+          if (invalidation) push('scenFail', s < 0, 15, { price: invalidation.price, below: invalidation.below }, null);
+        } else if (phase === 'wave3' || phase === 'wave5') {
+          const t = tgt(phase === 'wave3' ? 'ewTargetW3' : 'ewTargetW5');
+          const after = phase === 'wave3' ? (t != null && P2 && w1 ? mv(t, lenL(P2.price, t), 0.382, -s) : null) : (t != null && P0 ? mv(t, lenL(P0.price, t), 0.382, -s) : null);
+          push('scenNext', s < 0, 60, { price: t, below: s < 0 }, after);
+          push('scenExtend', s > 0, 25, { price: t, below: s < 0, beyond: true }, tgt(phase === 'wave3' ? 'ewTargetW3b' : 'ewTargetW5b') || (t != null && w1 ? mv(t, w1, 0.618, s) : null));
+          if (invalidation) push('scenFail', s < 0, 15, { price: invalidation.price, below: invalidation.below }, null);
+        } else if (phase === 'impulseDone') {
+          const a = tgt('ewTargetCorr'), b = tgt('ewTargetCorrB');
+          push('scenCorrection', s < 0, 65, { price: P5 ? P5.price : null, below: s > 0 }, a);
+          push('scenExtend', s > 0, 20, { price: P5 ? P5.price : null, below: s < 0, beyond: true }, P5 && w1 ? mv(P5.price, w1, 0.618, s) : null);
+          push('scenDeeper', s < 0, 15, { price: a, below: s > 0, beyond: true }, b);
+        } else if (phase === 'waveA' || phase === 'waveB' || phase === 'waveC') {
+          // Korrektur nach dem Impuls: C-Ziel, danach Fortsetzung des Impulstrends.
+          // ZIEL DANACH (gefragt: "wohin genau geht es nach C?"): Der fertige Impuls 0-5 wird zu Welle (1)
+          // des naechsthoeheren Grades, A-B-C zu Welle (2) -- die Fortsetzung ist Welle (3). Richtwert:
+          // Welle (3) = 1,618 x Welle (1), ab dem Ende von C (Frost/Prechter). Vorher: nur 61,8 % des
+          // Wegs zurueck zu Welle 5 -- also nicht einmal ein neues Hoch, obwohl die Fortsetzung eines
+          // Impulstrends per Definition ueber Welle 5 hinausgeht.
+          const c = tgt('ewTargetC') || tgt('ewTargetB');
+          const cont = c != null && P0 && P5 ? mv(c, lenL(P0.price, P5.price), 1.618, s) : null;
+          // C kann schon fertig sein, sobald sie das Ende von A ueberschritten hat. Gewicht nach der
+          // bisherigen Laenge von C relativ zu A (Richtwert: C endet meist bei 1,0 x A; deutlich
+          // kuerzere C sind selten). Die uebrigen Szenarien werden anteilig kleiner.
+          const pDone = phase === 'waveC' && cMinimum ? (cMinimum.ratio >= 1 ? 45 : cMinimum.ratio >= 0.786 ? 35 : cMinimum.ratio >= 0.618 ? 25 : 15) : 0;
+          const f = (100 - pDone) / 100;
+          if (pDone) {
+            const contDone = P0 && P5 ? mv(cMinimum.price, lenL(P0.price, P5.price), 1.618, s) : null;
+            push('scenCDone', s > 0, pDone, { price: PB ? PB.price : null, below: s < 0, cLow: cMinimum.price }, contDone);
+          }
+          push('scenContinue', s > 0, Math.round(50 * f), { price: PB ? PB.price : (PA ? PA.price : null), below: s < 0, after: c }, cont);
+          push('scenExtend', s < 0, Math.round(30 * f), { price: c, below: s > 0, beyond: true }, c != null && P5 && PA ? mv(PB ? PB.price : c, lenL(P5.price, PA.price), 1.618, -s) : null);
+          if (!pDone) push('scenFail', s > 0, 20, { price: PB ? PB.price : null, below: s < 0, before: c }, P5 ? P5.price : null);
+          else if (invalidation) push('scenFail', s < 0, Math.max(0, 100 - pDone - Math.round(50 * f) - Math.round(30 * f)), { price: invalidation.price, below: invalidation.below }, null);
+        } else if (phase === 'corrDone') {
+          const cP = lab('C');
+          push('scenNewImpulse', s > 0, 55, { price: PB ? PB.price : null, below: s < 0 }, P5 && cP ? mv(cP.price, lenL(P5.price, cP.price), 0.618, s) : null);
+          push('scenCorrCont', s < 0, 30, { price: cP ? cP.price : null, below: s > 0, beyond: true }, cP && PA && P5 ? mv(cP.price, lenL(P5.price, PA.price), 0.618, -s) : null);
+          if (invalidation) push('scenFail', s < 0, 15, { price: invalidation.price, below: invalidation.below }, null);
+        }
+      } else {
+        const A = lab('A'), B = lab('B'), C = lab('C');
+        const corrUp = best.up; // Richtung der Korrektur (A)
+        if (phase === 'waveC') {
+          const c = tgt('ewTargetC');
+          const cont = c != null && P0 ? mv(c, lenL(P0.price, c), 0.618, corrUp ? -1 : 1) : null;
+          const pDone = cMinimum ? (cMinimum.ratio >= 1 ? 45 : cMinimum.ratio >= 0.786 ? 35 : cMinimum.ratio >= 0.618 ? 25 : 15) : 0;
+          const f = (100 - pDone) / 100;
+          if (pDone) push('scenCDone', !corrUp, pDone, { price: B ? B.price : null, below: corrUp, cLow: cMinimum.price },
+            P0 ? mv(cMinimum.price, lenL(P0.price, cMinimum.price), 0.618, corrUp ? -1 : 1) : null);
+          push('scenContinue', !corrUp, Math.round(50 * f), { price: B ? B.price : null, below: corrUp, after: c }, cont);
+          push('scenExtend', corrUp, Math.round(30 * f), { price: c, below: !corrUp, beyond: true }, tgt('ewTargetCb'));
+          push('scenFail', !corrUp, Math.max(0, 100 - pDone - Math.round(50 * f) - Math.round(30 * f)), { price: B ? B.price : null, below: corrUp, before: c }, P0 ? P0.price : null);
+        } else if (phase === 'corrDone') {
+          push('scenNewImpulse', !corrUp, 55, { price: B ? B.price : null, below: corrUp }, P0 && C ? mv(C.price, lenL(P0.price, C.price), 0.618, corrUp ? -1 : 1) : null);
+          push('scenCorrCont', corrUp, 30, { price: C ? C.price : null, below: !corrUp, beyond: true }, C && P0 && A ? mv(C.price, lenL(P0.price, A.price), 0.618, corrUp ? 1 : -1) : null);
+          if (invalidation) push('scenFail', corrUp, 15, { price: invalidation.price, below: invalidation.below }, null);
+        }
+      }
+    }
+    // UNTERTEILUNG DER KORREKTUR -- 5-3-5 oder 3-3-5?
+    //
+    // Gemeldet: "Wir haben doch hier 5-3-5, ist das nicht typisch fuer A-B-C? Wieso sehe ich das
+    // nicht." Vollkommen richtig: Der Zickzack ist 5-3-5 (A fuenfteilig, B dreiteilig, C
+    // fuenfteilig), der Flat 3-3-5. Genau daran unterscheidet man die beiden -- die Engine hat
+    // bisher nur ueber die LAENGENVERHAELTNISSE geraten (B-Ruecklauf <= 78,6 % = Zickzack).
+    //
+    // Jetzt wird jede Teilwelle auf feineren Wendepunkten nachgezaehlt: Wie viele Segmente liegen
+    // zwischen ihrem Anfang und Ende? Fuenf oder mehr -> fuenfteilig (Antriebswelle), drei ->
+    // dreiteilig (Korrekturwelle). Passt das Muster nicht zu der aus den Laengen abgeleiteten
+    // Einordnung, gewinnt das MUSTER: es ist das staerkere Merkmal.
+    let subdivision = null;
+    if (best.type === 'corrective' && opts && opts.data) {
+      const reihe = opts.data;
+      const feinPct = Math.max(0.03, (pivotSet.pct || 0.2) * 0.34);
+      const fein = zigzagUpTo(reihe, lastIdx, feinPct);
+      const teile = (a, b) => {
+        const innen = fein.pivots.filter(p => p.idx > a.idx && p.idx < b.idx);
+        const n = innen.length + 1; // Segmente = innere Wendepunkte + 1
+        return n >= 5 ? 5 : n >= 3 ? 3 : n;
+      };
+      const [q0, qa, qb, qc] = best.points;
+      if (q0 && qa && qb && qc) {
+        const nA = teile(q0, qa), nB = teile(qa, qb), nC = teile(qb, qc);
+        // Weniger als drei Segmente heisst: die Teilwelle ist auf dieser Feinheit nicht
+        // aufgeloest -- dann wird nichts behauptet, statt "1-1-1" anzuzeigen.
+        if (nA >= 3 && nB >= 3 && nC >= 3) {
+          subdivision = { a: nA, b: nB, c: nC, text: `${nA}-${nB}-${nC}` };
+          if (nA === 5 && nC === 5 && nB === 3) subdivision.pattern = 'zigzag';
+          else if (nA === 3 && nB === 3 && nC === 5) subdivision.pattern = 'flat';
+        }
+      }
+    }
+    // REGELPRUEFUNG (auf Wunsch: "ueberpruef doch"): Die Zaehlung weist sich selbst aus. Jede
+    // harte Elliott-Regel wird fuer die ANGEZEIGTE Zaehlung nachgerechnet und mit den konkreten
+    // Zahlen belegt -- so muss niemand glauben, dass die Engine sich an ihre Regeln haelt.
+    const checks = [];
+    {
+      const P = l => points.find(p => p.label === l);
+      const f = v => v == null ? '–' : (v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(4));
+      const p0 = P('0'), p1 = P('1'), p2 = P('2'), p3 = P('3'), p4 = P('4'), p5 = P('5');
+      const A = P('A'), B = P('B'), C = P('C');
+      const auf = best.up;
+      if (best.type === 'impulse') {
+        if (p1 && p2) checks.push({ key: 'ruleW2', ok: auf ? p2.price > p0.price : p2.price < p0.price, detail: `W2 ${f(p2.price)} ${auf ? '>' : '<'} 0 ${f(p0.price)}` });
+        if (p3) { const w1 = L(p0, p1), w3 = L(p2, p3), w5 = p5 ? L(p4, p5) : null;
+          checks.push({ key: 'ruleW3', ok: !(w5 != null && w3 < w1 && w3 < w5), detail: `W1 ${(w1 * 100).toFixed(0)} · W3 ${(w3 * 100).toFixed(0)}${w5 != null ? ' · W5 ' + (w5 * 100).toFixed(0) : ''}` }); }
+        if (p4 && p1) checks.push({ key: 'ruleW4', ok: auf ? p4.price > p1.price : p4.price < p1.price, detail: `W4 ${f(p4.price)} ${auf ? '>' : '<'} W1 ${f(p1.price)}` + (best.diagonal ? ' ◺' : '') });
+        // Welle 5 ueber das Ende von Welle 3 -- Ausnahme Truncation (erlaubt, aber selten und
+        // ein Warnzeichen). Deshalb kein Regelbruch, sondern als solche ausgewiesen.
+        if (p5 && p3) checks.push({ key: best.truncated ? 'ruleW5trunc' : 'ruleW5', ok: !best.truncated, detail: `W5 ${f(p5.price)} ${auf ? (best.truncated ? '<' : '>') : (best.truncated ? '>' : '<')} W3 ${f(p3.price)}` });
+        if (p2 && p1 && p0) { const r2 = L(p1, p2) / (L(p0, p1) || 1e-9); checks.push({ key: 'fibW2', ok: true, detail: `W2 / W1 = ${(r2 * 100).toFixed(0)} %` }); }
+        if (p3 && p2) { const r3 = L(p2, p3) / (L(p0, p1) || 1e-9); checks.push({ key: 'fibW3', ok: true, detail: `W3 / W1 = ${r3.toFixed(2)}×` }); }
+        if (p4 && p3) { const r4 = L(p3, p4) / (L(p2, p3) || 1e-9); checks.push({ key: 'fibW4', ok: true, detail: `W4 / W3 = ${(r4 * 100).toFixed(0)} %` }); }
+        if (p5 && p4) { const r5 = L(p4, p5) / (L(p0, p1) || 1e-9); checks.push({ key: 'fibW5', ok: true, detail: `W5 / W1 = ${r5.toFixed(2)}×` }); }
+      } else if (A && B && C) {
+        checks.push({ key: 'ruleB', ok: best.up ? B.price > p0.price : B.price < p0.price, detail: `B ${f(B.price)} ${best.up ? '>' : '<'} 0 ${f(p0.price)}` });
+        const rb = L(A, B) / (L(p0, A) || 1e-9), rc = L(B, C) / (L(p0, A) || 1e-9);
+        checks.push({ key: 'fibB', ok: true, detail: `B / A = ${(rb * 100).toFixed(0)} %` });
+        checks.push({ key: 'fibC', ok: true, detail: `C / A = ${rc.toFixed(2)}×` });
+      }
+    }
+    return {
+      kind, dir, phase, points, checks, targets: targets.filter(t => Number.isFinite(t.price) && t.price > 0),
+      projection, invalidation, weiche, cMinimum, scenarios, subdivision,
+      diagonal: !!best.diagonal, truncated: !!best.truncated,
+      corrType: (subdivision && subdivision.pattern) || best.corrType || null,
+      confidence: clamp(Math.round(best.score), 25, 92), rawScore: best.score, complete: best.complete, ratios: best.ratios || null,
+      alt: alt ? { kind: alt.type, dir: alt.up ? 'up' : 'down', confidence: clamp(Math.round(alt.score), 25, 92), pointsCount: alt.points.length } : null
+    };
+  }
+
+  // ---------------------------------------------------------------- Indikatoren -------------
+  function evalIndicators(data, from, to, ma200Override, fine) {
+    const closes = data.map(d => d.value);
+    const N = data.length;
+    const i = to;
+    const c = closes[i];
+    const out = [];
+    const pct = (a, b) => (a / b - 1) * 100;
+    // SMA 200
+    let sma200 = null;
+    // BUGFIX: den MA200-Wert ZUM Ende des Ausschnitts nehmen (letzter Punkt mit Datum <= Kerze i),
+    // nicht immer den neuesten -- beim Blick in die Vergangenheit stand sonst der heutige Wert da.
+    if (ma200Override && ma200Override.length) {
+      const tI = data[i] && data[i].date;
+      let pick = null;
+      for (let j = ma200Override.length - 1; j >= 0; j--) { const q = ma200Override[j]; if (tI == null || q.date == null || q.date <= tI) { pick = q; break; } }
+      sma200 = pick && Number.isFinite(pick.value) ? pick.value : null;
+    }
+    // BUGFIX: massgeblich ist die Kerze i (Ende des Ausschnitts), nicht die Laenge der Reihe --
+    // beim Blick in die Vergangenheit (i < 199) lief die Summe sonst in negative Indizes (NaN).
+    else if (i >= 199) { let s = 0; for (let j = i - 199; j <= i; j++) s += closes[j]; sma200 = s / 200; }
+    if (sma200 != null) {
+      const d = pct(c, sma200);
+      out.push({ key: 'sma200', value: sma200, delta: d, verdict: d > 1 ? 'bull' : d < -1 ? 'bear' : 'neutral', textKey: d > 1 ? 'indSma200Above' : d < -1 ? 'indSma200Below' : 'indSma200At' });
+    } else out.push({ key: 'sma200', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    // EMA 20
+    const ema20 = emaArr(closes, 20);
+    if (ema20[i] != null) {
+      const d = pct(c, ema20[i]);
+      const slope = ema20[i - 3] != null ? pct(ema20[i], ema20[i - 3]) : 0;
+      out.push({ key: 'ema20', value: ema20[i], delta: d, verdict: d > 0.3 && slope >= 0 ? 'bull' : d < -0.3 && slope <= 0 ? 'bear' : 'neutral', textKey: d > 0.3 ? 'indEma20Above' : d < -0.3 ? 'indEma20Below' : 'indEma20At' });
+    } else out.push({ key: 'ema20', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    // Bollinger 20/2
+    const sma20 = smaArr(closes, 20);
+    if (sma20[i] != null) {
+      let v = 0; for (let j = i - 19; j <= i; j++) v += (closes[j] - sma20[i]) ** 2;
+      const sd = Math.sqrt(v / 20);
+      const upper = sma20[i] + 2 * sd, lower = sma20[i] - 2 * sd;
+      const pos = (c - lower) / ((upper - lower) || 1e-9); // 0..1
+      const widthPct = (upper - lower) / sma20[i] * 100;
+      // Squeeze: Bandbreite im unteren Fuenftel der letzten 60 Kerzen
+      let sqz = false;
+      if (i >= 79) {
+        const widths = [];
+        for (let j = i - 59; j <= i; j++) { let vv = 0; for (let k = j - 19; k <= j; k++) vv += (closes[k] - sma20[j]) ** 2; widths.push(4 * Math.sqrt(vv / 20) / sma20[j]); }
+        const sortedW = widths.slice().sort((a, b) => a - b);
+        sqz = widths[widths.length - 1] <= sortedW[Math.floor(sortedW.length * 0.2)];
+      }
+      out.push({ key: 'bb', value: pos, upper, lower, widthPct, verdict: pos > 1 ? 'bear' : pos < 0 ? 'bull' : pos > 0.8 ? 'bull' : pos < 0.2 ? 'bear' : 'neutral', textKey: sqz ? 'indBbSqueeze' : pos > 1 ? 'indBbAboveUpper' : pos < 0 ? 'indBbBelowLower' : pos > 0.8 ? 'indBbUpper' : pos < 0.2 ? 'indBbLower' : 'indBbMiddle' });
+    } else out.push({ key: 'bb', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    // VWAP (verankert am Start des sichtbaren Zeitraums)
+    let pv = 0, vol = 0;
+    for (let j = from; j <= i; j++) { const v = data[j].volume; if (v != null && Number.isFinite(v)) { pv += (hiOf(data[j]) + loOf(data[j]) + closes[j]) / 3 * v; vol += v; } }
+    if (vol > 0) {
+      const vwap = pv / vol; const d = pct(c, vwap);
+      out.push({ key: 'vwap', value: vwap, delta: d, verdict: d > 0.5 ? 'bull' : d < -0.5 ? 'bear' : 'neutral', textKey: d > 0.5 ? 'indVwapAbove' : d < -0.5 ? 'indVwapBelow' : 'indVwapAt' });
+    } else out.push({ key: 'vwap', value: null, verdict: 'neutral', textKey: 'indNoVolume' });
+    // RSI 14 + Divergenz auf den letzten beiden Pivots
+    const rsi = rsiArr(closes, 14);
+    if (rsi[i] != null) {
+      const r = rsi[i];
+      let div = null;
+      const Hs = fine.pivots.filter(p => p.type === 'H'), Ls = fine.pivots.filter(p => p.type === 'L');
+      try { const dv = detectDivergenzen(data, Math.max(0, i - 150), i).find(d => d.art === 'regulaer' && d.aktiv !== false && i - d.b.idx <= 8); if (dv) div = dv.richtung; } catch (e) {}
+      if (!div && Ls.length >= 2) { const a = Ls[Ls.length - 2], b = Ls[Ls.length - 1]; if (b.price < a.price && rsi[b.idx] != null && rsi[a.idx] != null && rsi[b.idx] > rsi[a.idx] + 2) div = 'bull'; }
+      if (!div && Hs.length >= 2) { const a = Hs[Hs.length - 2], b = Hs[Hs.length - 1]; if (b.price > a.price && rsi[b.idx] != null && rsi[a.idx] != null && rsi[b.idx] < rsi[a.idx] - 2) div = 'bear'; }
+      out.push({ key: 'rsi', value: r, divergence: div, verdict: div === 'bull' ? 'bull' : div === 'bear' ? 'bear' : r >= 70 ? 'bear' : r <= 30 ? 'bull' : r > 55 ? 'bull' : r < 45 ? 'bear' : 'neutral', textKey: div === 'bull' ? 'indRsiBullDiv' : div === 'bear' ? 'indRsiBearDiv' : r >= 70 ? 'indRsiOverbought' : r <= 30 ? 'indRsiOversold' : r > 55 ? 'indRsiBullish' : r < 45 ? 'indRsiBearish' : 'indRsiNeutral' });
+    } else out.push({ key: 'rsi', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    // MACD 12/26/9
+    if (N >= 35) {
+      const e12 = emaArr(closes, 12), e26 = emaArr(closes, 26);
+      const macd = closes.map((_, j) => e12[j] != null && e26[j] != null ? e12[j] - e26[j] : null);
+      const firstValid = macd.findIndex(v => v != null);
+      const sig = emaArr(macd.slice(firstValid), 9);
+      const sigAt = j => sig[j - firstValid];
+      const m = macd[i], s = sigAt(i);
+      if (m != null && s != null) {
+        const hist = m - s;
+        let cross = null;
+        for (let j = i; j > Math.max(firstValid + 9, i - 5); j--) { const h0 = macd[j] - sigAt(j), h1 = macd[j - 1] - sigAt(j - 1); if (h1 <= 0 && h0 > 0) { cross = 'bull'; break; } if (h1 >= 0 && h0 < 0) { cross = 'bear'; break; } }
+        const histRising = macd[i - 1] != null && sigAt(i - 1) != null ? hist > macd[i - 1] - sigAt(i - 1) : false;
+        out.push({ key: 'macd', value: m, signal: s, hist, cross, aboveZero: m > 0, verdict: cross === 'bull' ? 'bull' : cross === 'bear' ? 'bear' : hist > 0 ? 'bull' : hist < 0 ? 'bear' : 'neutral', textKey: cross === 'bull' ? 'indMacdBullCross' : cross === 'bear' ? 'indMacdBearCross' : hist > 0 ? (histRising ? 'indMacdBullStrong' : 'indMacdBullWeakening') : (histRising ? 'indMacdBearWeakening' : 'indMacdBearStrong') });
+      } else out.push({ key: 'macd', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    } else out.push({ key: 'macd', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    // Stochastic 14/3/3
+    const st = stochArr(data, 14, 3, 3);
+    if (st.k[i] != null && st.d[i] != null) {
+      const k = st.k[i], d = st.d[i];
+      const kPrev = st.k[i - 1], dPrev = st.d[i - 1];
+      const crossUp = kPrev != null && dPrev != null && kPrev <= dPrev && k > d;
+      const crossDn = kPrev != null && dPrev != null && kPrev >= dPrev && k < d;
+      out.push({ key: 'stoch', value: k, d, verdict: k <= 20 && crossUp ? 'bull' : k >= 80 && crossDn ? 'bear' : k >= 80 ? 'bear' : k <= 20 ? 'bull' : k > d ? 'bull' : 'bear', textKey: k <= 20 && crossUp ? 'indStochBullCross' : k >= 80 && crossDn ? 'indStochBearCross' : k >= 80 ? 'indStochOverbought' : k <= 20 ? 'indStochOversold' : k > d ? 'indStochBullish' : 'indStochBearish' });
+    } else out.push({ key: 'stoch', value: null, verdict: 'neutral', textKey: 'indNotEnoughData' });
+    // Volumen: letzte Kerze vs. Schnitt der 20 davor
+    const vols = [];
+    for (let j = Math.max(0, i - 20); j < i; j++) if (data[j].volume != null && Number.isFinite(data[j].volume)) vols.push(data[j].volume);
+    const vNow = data[i].volume;
+    if (vols.length >= 5 && vNow != null && Number.isFinite(vNow)) {
+      const ratio = vNow / (avg(vols) || 1e-9);
+      const upBar = data[i].value >= (data[i].open != null ? data[i].open : closes[Math.max(0, i - 1)]);
+      // Trend im Volumen: letzte 5 vs. die 15 davor
+      const rec = avg(vols.slice(-5)), older = avg(vols.slice(0, -5));
+      out.push({ key: 'volume', value: vNow, ratio, upBar, verdict: ratio > 1.5 ? (upBar ? 'bull' : 'bear') : 'neutral', textKey: ratio > 1.8 ? (upBar ? 'indVolSpikeUp' : 'indVolSpikeDown') : ratio < 0.6 ? 'indVolLow' : older && rec / older > 1.3 ? 'indVolRising' : older && rec / older < 0.75 ? 'indVolFalling' : 'indVolNormal' });
+    } else out.push({ key: 'volume', value: null, verdict: 'neutral', textKey: 'indNoVolume' });
+    return out;
+  }
+
+  // ---------------------------------------------------------------- Gesamtbild --------------
+  function scoreAll(trend, sr, elliott, fib, indicators, lastClose) {
+    let bull = 0, bear = 0;
+    const add = (b, w) => { if (b === 'bull') bull += w; else if (b === 'bear') bear += w; };
+    add(trend.dir === 'up' ? 'bull' : trend.dir === 'down' ? 'bear' : null, 2 + Math.min(2, trend.strength / 3));
+    if (elliott) {
+      const upPhase = ['wave3', 'wave5'].includes(elliott.phase) && elliott.kind === 'impulse';
+      const corrPhase = ['waveA', 'waveB', 'waveC', 'impulseDone'].includes(elliott.phase);
+      // Gewicht auf 40 % gesenkt (Walk-forward: Richtung nicht besser als Zufall, 46 %) -- die
+      // Muster-Ziele und Indikatoren tragen die Wertung, Elliott nur noch als leichte Tendenz.
+      const w = (1 + elliott.confidence / 60) * 0.4;
+      if (elliott.kind === 'impulse') {
+        if (upPhase) add(elliott.dir === 'up' ? 'bull' : 'bear', w);
+        else if (corrPhase || elliott.phase === 'wave4') add(elliott.dir === 'up' ? 'bear' : 'bull', w * 0.7);
+        else if (elliott.phase === 'corrDone') add(elliott.dir === 'up' ? 'bull' : 'bear', w * 0.8);
+      } else add(elliott.phase === 'corrDone' ? (elliott.dir === 'down' ? 'bull' : 'bear') : (elliott.dir === 'down' ? 'bear' : 'bull'), w * 0.6);
+    }
+    for (const ind of indicators) if (ind.value != null) add(ind.verdict, ind.key === 'sma200' ? 1.5 : ind.key === 'volume' ? 0.6 : 1);
+    if (sr.inside.length) { /* mitten in einer Zone: neutral */ }
+    else {
+      const ns = sr.supports[0], nr = sr.resistances[0];
+      if (ns && nr) {
+        const room = (ln(nr.price) - ln(lastClose)) / ((ln(nr.price) - ln(ns.price)) || 1e-9); // 1 = am Support, 0 = am Widerstand
+        if (room > 0.7) add('bull', 1); else if (room < 0.3) add('bear', 1);
+      }
+    }
+    const total = bull + bear || 1;
+    const bullPct = Math.round(bull / total * 100);
+    const verdict = bullPct >= 62 ? 'bull' : bullPct <= 38 ? 'bear' : 'neutral';
+    return { bull, bear, bullPct, verdict };
+  }
+
+  // ---------------------------------------------------------------- Einstieg ----------------
+  // AUSREISSER-DOCHTE ENTSCHAERFEN (gemeldet: "Welle 3 muesste schon frueher aufhoeren", im
+  // Vergleichs-Chart RUNE/ETH). Ein einzelner Docht weit unter (bzw. ueber) allem davor und
+  // danach -- typisch fuer duenne Handelspaare wie RUNEETH auf Binance oder Flash-Crashs --
+  // wurde zum Wellenende, obwohl der Markt dort nie wirklich gehandelt hat. Fuer die ANALYSE
+  // (nicht fuer die gezeichneten Kerzen) wird ein solcher Docht auf das Niveau von Schlusskurs
+  // bzw. Nachbarkerzen gekuerzt. Kriterium (auf der Log-Skala, robust ueber die typische
+  // Kerzenspanne der 20 Kerzen davor, Median): Docht > 4 Spannen lang UND > 3 Spannen jenseits
+  // beider Nachbarkerzen. Normale lange Dochte bleiben unangetastet.
+  function rwDochtFilter(data) {
+    const N = data.length;
+    if (N < 25) return data;
+    const lg = v => Math.log(v);
+    const hi = i => (data[i].high != null ? data[i].high : data[i].value), lo = i => (data[i].low != null ? data[i].low : data[i].value);
+    let out = null;
+    for (let i = 21; i < N - 1; i++) {
+      const d = data[i];
+      if (!(d && d.value > 0 && lo(i) > 0 && hi(i) > 0)) continue;
+      const spannen = [];
+      for (let k = i - 20; k < i; k++) { const h = hi(k), l = lo(k); if (h > 0 && l > 0) spannen.push(lg(h) - lg(l)); }
+      if (spannen.length < 10) continue;
+      spannen.sort((a, b) => a - b);
+      const sp = Math.max(1e-6, spannen[Math.floor(spannen.length / 2)]);
+      const bodyLo = Math.min(d.value, data[i - 1].value), bodyHi = Math.max(d.value, data[i - 1].value);
+      const nbLo = Math.min(lo(i - 1), lo(i + 1)), nbHi = Math.max(hi(i - 1), hi(i + 1));
+      let neuLo = null, neuHi = null;
+      if (lg(bodyLo) - lg(lo(i)) > 4 * sp && lg(nbLo) - lg(lo(i)) > 3 * sp) neuLo = Math.min(bodyLo, nbLo);
+      if (lg(hi(i)) - lg(bodyHi) > 4 * sp && lg(hi(i)) - lg(nbHi) > 3 * sp) neuHi = Math.max(bodyHi, nbHi);
+      // FEHLAUSBRUCH (gemeldet: "dort nicht als Welle beachten, koennte ein Fake-Out gewesen sein"
+      // -- RUNE 27.08.2026: Hoch 0,631, Schluss 0,507, Nachbarn 0,506/0,524): Ein einzelner Docht,
+      // der > 60 % der Kerze ausmacht, > 1,2 typische Spannen lang ist und von beiden Nachbarkerzen
+      // nicht einmal bis zur Haelfte erreicht wird, zaehlt fuer die Analyse nicht als Wendepunkt.
+      {
+        const hI = hi(i), lI = lo(i), spanne = lg(hI) - lg(lI);
+        const kHi = Math.max(d.open != null ? d.open : d.value, d.value), kLo = Math.min(d.open != null ? d.open : d.value, d.value);
+        const dOben = lg(hI) - lg(kHi), dUnten = lg(kLo) - lg(lI);
+        if (neuHi == null && spanne > 0 && dOben > 0.6 * spanne && dOben > 1.2 * sp && hi(i - 1) < Math.exp(lg(kHi) + dOben * 0.5) && hi(i + 1) < Math.exp(lg(kHi) + dOben * 0.5)) neuHi = Math.max(kHi, nbHi);
+        if (neuLo == null && spanne > 0 && dUnten > 0.6 * spanne && dUnten > 1.2 * sp && lo(i - 1) > Math.exp(lg(kLo) - dUnten * 0.5) && lo(i + 1) > Math.exp(lg(kLo) - dUnten * 0.5)) neuLo = Math.min(kLo, nbLo);
+      }
+      if (neuLo == null && neuHi == null) continue;
+      if (!out) out = data.slice();
+      out[i] = { ...d, ...(neuLo != null ? { low: neuLo, dochtGekuerzt: true } : {}), ...(neuHi != null ? { high: neuHi, dochtGekuerzt: true } : {}) };
+    }
+    return out || data;
+  }
+  // DIVERGENZEN (gewuenscht: "Divergenz-Erkennung in die Engine einbauen, wie im Bild" -- Kurs
+  // macht tiefere Tiefs entlang einer fallenden Linie, der RSI dagegen hoehere Tiefs).
+  // Vier Arten, je zwischen zwei Wendepunkten (3 Kerzen links und rechts, der juengste darf noch
+  // "in Bildung" sein -- sonst fiele genau die aktuell entstehende Divergenz wie im Bild weg):
+  //   regulaer bullisch:   Kurs tieferes Tief,  RSI hoeheres Tief  -> Verkaufsdruck laesst nach
+  //   regulaer baerisch:   Kurs hoeheres Hoch,  RSI tieferes Hoch  -> Kaufdruck laesst nach
+  //   versteckt bullisch:  Kurs hoeheres Tief,  RSI tieferes Tief  -> Aufwaertstrend intakt
+  //   versteckt baerisch:  Kurs tieferes Hoch,  RSI hoeheres Hoch  -> Abwaertstrend intakt
+  // Gueltig nur, wenn dazwischen weder Kurs noch RSI deutlich jenseits der Verbindungslinie lagen
+  // (sonst ist die Linie keine echte Verbindung zweier Extreme) und der RSI am ersten Punkt in
+  // der passenden Zone stand (bullisch unter 55, baerisch ueber 45).
+  function detectDivergenzen(data, from, to) {
+    const n = data.length;
+    if (n < 40 || to - from < 20) return [];
+    const closes = data.map(d => d.value);
+    const rsi = rsiArr(closes, 14);
+    const K = 5, start = Math.max(15, from - 80);
+    const lo = i => loOf(data[i]), hi = i => hiOf(data[i]);
+    // RSI-Extrem nahe am Kurs-Extrem (der RSI dreht oft eine Kerze frueher oder spaeter)
+    const rx = (typ, i) => { let v = null; for (let j = Math.max(0, i - 1); j <= Math.min(to, i + 1); j++) { const r = rsi[j]; if (r == null) continue; if (v == null || (typ === 'L' ? r < v : r > v)) v = r; } return v; };
+    const pivots = typ => {
+      const out = [];
+      for (let i = start; i <= to; i++) {
+        const v = typ === 'L' ? lo(i) : hi(i);
+        if (!Number.isFinite(v) || rsi[i] == null) continue;
+        let ok = true;
+        for (let j = Math.max(start, i - K); j <= Math.min(to, i + K); j++) {
+          if (j === i) continue;
+          const w = typ === 'L' ? lo(j) : hi(j);
+          if (typ === 'L' ? w < v : w > v) { ok = false; break; }
+        }
+        if (!ok) continue;
+        if (out.length && i - out[out.length - 1].idx <= 1) continue; // Plateau
+        out.push({ idx: i, price: v, pending: i + K > to });
+      }
+      return out;
+    };
+    const res = [];
+    const pruefe = typ => {
+      const P = pivots(typ);
+      for (let k = P.length - 1; k >= 1; k--) {
+        const b = P[k];
+        if (to - b.idx > 80) break;
+        let best = null;
+        for (let m = k - 1; m >= 0; m--) {
+          const a = P[m], dist = b.idx - a.idx;
+          if (dist < 8) continue;
+          if (dist > 90) break;
+          const rA = rx(typ, a.idx), rB = rx(typ, b.idx);
+          if (rA == null || rB == null) continue;
+          const weiter = typ === 'L' ? b.price < a.price : b.price > a.price;
+          const rsiBesser = typ === 'L' ? rB > rA + 1.5 : rB < rA - 1.5;
+          const rsiSchlechter = typ === 'L' ? rB < rA - 1.5 : rB > rA + 1.5;
+          let art = null;
+          if (weiter && rsiBesser) art = 'regulaer';
+          else if (!weiter && rsiSchlechter) art = 'versteckt';
+          else continue;
+          if (art === 'regulaer' && (typ === 'L' ? rA > 55 : rA < 45)) continue;
+          // Versteckte nur bei deutlichem RSI-Unterschied -- sonst entstehen sie in jeder kleinen
+          // Gegenbewegung und ueberdecken die wichtigen regulaeren.
+          if (art === 'versteckt' && Math.abs(rB - rA) < 5) continue;
+          let frei = true;
+          for (let j = a.idx + 1; j < b.idx && frei; j++) {
+            const f = (j - a.idx) / dist;
+            const pl = a.price + (b.price - a.price) * f, rl = rA + (rB - rA) * f;
+            const pj = typ === 'L' ? lo(j) : hi(j), rj = rsi[j];
+            if (typ === 'L' ? (pj < pl * 0.995 || (rj != null && rj < rl - 1)) : (pj > pl * 1.005 || (rj != null && rj > rl + 1))) frei = false;
+          }
+          if (!frei) continue;
+          const staerke = Math.abs(rB - rA);
+          // ABGESCHLOSSEN (gemeldet: "abgeschlossene Divergenzen nicht zeigen"): Eine Divergenz gilt als
+          // erledigt, sobald (1) danach ein neuer Wendepunkt derselben Art entstanden ist -- dann ist
+          // sie nicht mehr die aktuelle -- oder (2) sie sich ausgespielt hat: bullisch, wenn der Kurs
+          // seit b ueber das hoechste Hoch zwischen a und b gestiegen ist; baerisch, wenn er unter
+          // das tiefste Tief dazwischen gefallen ist.
+          const neuerPunkt = k < P.length - 1;
+          let gegen = typ === 'L' ? -Infinity : Infinity;
+          for (let j = a.idx; j <= b.idx; j++) { const v = typ === 'L' ? hi(j) : lo(j); if (Number.isFinite(v)) gegen = typ === 'L' ? Math.max(gegen, v) : Math.min(gegen, v); }
+          let ausgespielt = false;
+          for (let j = b.idx + 1; j <= to && !ausgespielt; j++) { const v = typ === 'L' ? hi(j) : lo(j); if (Number.isFinite(v) && (typ === 'L' ? v > gegen : v < gegen)) ausgespielt = true; }
+          const kand = { richtung: typ === 'L' ? 'bull' : 'bear', art, a: { idx: a.idx, price: a.price, rsi: rA }, b: { idx: b.idx, price: b.price, rsi: rB, pending: b.pending }, staerke: +staerke.toFixed(1),
+            aktiv: !neuerPunkt && !ausgespielt, ausgespielt };
+          if (!best || (art === 'regulaer' && best.art !== 'regulaer') || (art === best.art && staerke > best.staerke)) best = kand;
+        }
+        if (best) res.push(best);
+      }
+    };
+    pruefe('L'); pruefe('H');
+    // Gleicher Startpunkt mehrfach (a -> b1, a -> b2 ...): nur die juengste behalten.
+    const neu = [];
+    res.sort((x, y) => y.b.idx - x.b.idx).forEach(d => { if (!neu.some(e => e.richtung === d.richtung && e.art === d.art && e.a.idx === d.a.idx)) neu.push(d); });
+    // Regulaere zuerst (die wichtigeren), jeweils die juengsten vorn.
+    return [...neu.filter(d => d.art === 'regulaer'), ...neu.filter(d => d.art !== 'regulaer')].slice(0, 6);
+  }
+  // ZIEL VON WELLE 3 ABGLEICHEN (zuerst gemeldet: "Wo ist die Prognose?" -- RUNE/ETH Woche, Welle 3 laeuft,
+  // der Kurs stand schon kurz vor dem Ziel). Einige Sonderfaelle der Zaehlung projizieren nur das
+  // Ende von Welle 3. Liegt der Kurs schon nah daran, ist die gestrichelte Linie dann nur ein paar
+  // Pixel lang und verschwindet hinter den Kerzen -- es sieht aus, als gaebe es keine Prognose.
+  // Ergaenzt werden deshalb die naechsten Schritte nach den ueblichen Richtwerten (Frost/Prechter):
+  //   Welle 4 = 38,2 % Ruecklauf von Welle 3
+  //   Welle 5 = so lang wie Welle 1 (Gleichheit, haeufigster Fall bei verlaengerter Welle 3)
+  // Nur wenn die Zaehlung 0, 1 und 2 kennt und die Projektion genau aus "3" besteht.
+  // NEUER TREND NACH DER GROSSEN KORREKTUR (gemeldet bei RUNE/AVAX: "die Zaehlung ist falsch" --
+  // \"es ist eine A-B-C-Korrektur seit Anfang an ... C ist fertig, jetzt neuer Aufwaertstrend\").
+  // Die Engine zaehlte nach dem Tief eine kleine A-B-C NACH OBEN, deren B noch tiefer fiel als ihr
+  // Start (\"erweiterte flache Korrektur\"), und erwartete danach wieder einen Fall. Liegt dieses B
+  // aber am tiefsten Punkt nach einem grossen Rueckgang, ist es plausibler das ENDE der grossen
+  // Welle C -- und der Anstieg danach der Beginn eines neuen Trends (Welle 1).
+  // Bedingungen (alle):
+  //   - Zaehlung ist eine Korrektur 0-A-B(-C) gegen die vorige grosse Richtung,
+  //   - B ist ueber den Start 0 hinausgelaufen (neues Extrem),
+  //   - B ist das Extrem des ganzen sichtbaren Bereichs,
+  //   - davor gab es eine grosse Bewegung in B-Richtung (Rueckgang um mindestens zwei Drittel bzw.
+  //     Verdopplung bei einer Korrektur nach unten),
+  //   - seit B hat sich der Kurs deutlich entfernt (mindestens 61,8 % von A).
+  // Dann: 0 = B, laufende Welle 1 bis zum Extrem seit B, keine Projektion fuer Welle 1
+  // (Welle 1 hat keine Bezugswelle), ungueltig jenseits von B.
+  function neuerTrendNachKorrektur(E, data, from, to, lastClose, useLog, fibs) {
+    try {
+      if (!E || E.kind !== 'corrective' || !Array.isArray(E.points)) return;
+      const lab = l => E.points.find(q => String(q.label) === l);
+      const P0 = lab('0'), PA = lab('A'), PB = lab('B');
+      if (!P0 || !PA || !PB || PB.pending || !(P0.price > 0 && PA.price > 0 && PB.price > 0)) return;
+      const auf = PA.price > P0.price;                      // Korrektur aufwaerts = neuer Trend aufwaerts
+      // Fall 1: B lief ueber den Start hinaus -> B ist das Ende der grossen Welle C.
+      // Fall 2 (gemeldet: "keine Aenderung" bei RUNE/AVAX -- B endete knapp UEBER dem Start, ein
+      // Doppelboden): Dann ist 0 das Ende der grossen Korrektur, und A-B-C heisst 1-2-3.
+      const bJenseits = auf ? PB.price < P0.price : PB.price > P0.price;
+      const tief = bJenseits ? PB : P0;
+      const Lg = v => useLog ? Math.log(v) : v;
+      let ext = null, vorher = null;
+      for (let i = Math.max(0, from); i <= to; i++) {
+        const d = data[i]; if (!d) continue;
+        const v = auf ? (d.low != null ? d.low : d.value) : (d.high != null ? d.high : d.value);
+        const w = auf ? (d.high != null ? d.high : d.value) : (d.low != null ? d.low : d.value);
+        if (Number.isFinite(v) && (ext == null || (auf ? v < ext : v > ext))) ext = v;
+        if (i < P0.idx && Number.isFinite(w) && (vorher == null || (auf ? w > vorher : w < vorher))) vorher = w;
+      }
+      if (ext == null || Math.abs(Lg(ext) - Lg(tief.price)) > (useLog ? 0.03 : tief.price * 0.03)) return;   // Extrem des Bereichs (3 % Spielraum)
+      if (!(vorher > 0) || (auf ? vorher / tief.price < 3 : tief.price / vorher < 2)) return;             // grosser Rueckgang davor (mind. -67 % bzw. Verdopplung)
+      if (!bJenseits) {
+        abcAlsImpulsUmbenennen(E, fibs, P0, auf); E.neuerTrendNachKorrektur = true;
+        if (Array.isArray(E.grossMarken) && E.grossMarken.length) {
+          const gm = E.grossMarken.map(q => ({ ...q, pending: false }));
+          const kC = gm.findIndex(q => /\(C\)/.test(String(q.text || '')));
+          const cNeu = { idx: P0.idx, price: P0.price, type: auf ? 'L' : 'H', text: '(C)', pending: false };
+          if (kC >= 0) gm[kC] = cNeu; else if (gm.length === 2) gm.push(cNeu);
+          E.grossMarken = gm;
+        }
+        return;
+      }
+      // Extrem seit B (laufende Welle 1)
+      let w1 = null;
+      for (let i = PB.idx + 1; i <= to; i++) {
+        const d = data[i]; if (!d) continue;
+        const v = auf ? (d.high != null ? d.high : d.value) : (d.low != null ? d.low : d.value);
+        if (Number.isFinite(v) && (!w1 || (auf ? v > w1.price : v < w1.price))) w1 = { idx: i, price: v };
+      }
+      const lenA = Math.abs(Lg(PA.price) - Lg(P0.price));
+      if (!w1 || Math.abs(Lg(w1.price) - Lg(PB.price)) < 0.618 * lenA) return;
+      E.points = [
+        { idx: PB.idx, price: PB.price, type: auf ? 'L' : 'H', label: '0', pending: false },
+        { idx: w1.idx, price: w1.price, type: auf ? 'H' : 'L', label: '1', pending: true },
+      ];
+      E.kind = 'impulse';
+      E.dir = auf ? 'up' : 'down';
+      E.phase = 'wave1';
+      E.projection = [];
+      E.invalidation = { price: PB.price, below: auf, ruleKey: 'proInvNewImpulse' };
+      E.weiche = null;
+      E.scenarios = [];
+      E.neuerTrendNachKorrektur = true;
+      if (E.sub) E.sub = { ...E.sub, anchorLabel: '0' };
+      // Grosse Marke (C) an das neue Extrem setzen, falls die grosse Korrektur markiert ist.
+      if (Array.isArray(E.grossMarken) && E.grossMarken.length) {
+        const gm = E.grossMarken.map(q => ({ ...q }));
+        const kC = gm.findIndex(q => /\(C\)/.test(String(q.text || '')));
+        const cNeu = { idx: PB.idx, price: PB.price, type: auf ? 'L' : 'H', text: '(C)', pending: false };
+        if (kC >= 0) gm[kC] = cNeu; else if (gm.length === 2) gm.push(cNeu);
+        E.grossMarken = gm;
+      }
+    } catch (e) {}
+  }
+  // A-B-C (gegen den alten Trend) als 1-2-3 des neuen Trends beschriften. Gemeinsamer Teil fuer
+  // die Faelle "nach grosser (C)" und "nach grossem Rueckgang".
+  function abcAlsImpulsUmbenennen(E, fibs, p0, auf) {
+      const map = { A: '1', B: '2', C: '3' };
+      const um = q => (map[String(q.label)] ? { ...q, label: map[String(q.label)] } : q);
+      E.points = E.points.map(um);
+      // Nur Ziele der umbenannten Wellen behalten: Die alte Zaehlung erwartete nach C einen neuen
+      // Fall ("1" bei 0,066 im Bild) -- im neuen Trend ergibt "3 -> 1" keinen Sinn.
+      E.projection = (E.projection || []).filter(q => map[String(q.label)]).map(um);
+      if (E.zwischenziel && map[String(E.zwischenziel.wave)]) E.zwischenziel = { ...E.zwischenziel, wave: map[String(E.zwischenziel.wave)] };
+      const ph = { waveA: 'wave1', waveB: 'wave2', waveC: 'wave3', corrDone: 'wave4' };
+      E.phase = ph[E.phase] || E.phase;
+      E.kind = 'impulse';
+      E.dir = auf ? 'up' : 'down';
+      E.corrType = null;
+      E.invalidation = { price: p0.price, below: auf, ruleKey: E.phase === 'wave1' ? 'proInvNewImpulse' : 'proInvRule1' };
+      E.weiche = null;
+      E.scenarios = [];
+      E.umbenanntNachGrossC = true;
+      // Fibonacci-Stufen der Korrektur (\"c = 1,618 x a\") werden zu Stufen der Welle 3 (\"wave 3 x 1,618\")
+      if (fibs) for (const k of ['elliott', 'elliottWeiter']) {
+        const F = fibs[k];
+        if (F && String(F.label) === 'C') { fibs[k] = null; continue; }
+        const fl = F ? map[String(F.label)] : null;
+        if (F && Array.isArray(F.levels)) fibs[k] = { ...F, label: fl || F.label,
+          levels: F.levels.filter(l => !l.cExt).map(l => (fl ? { ...l, wave: fl } : map[String(l.wave)] ? { ...l, wave: map[String(l.wave)] } : l)) };
+      }
+  }
+  // NACH EINER FERTIGEN GROSSEN (C) ZAEHLT DIE NEUE BEWEGUNG 1-2-3, NICHT A-B-C (gemeldet bei
+  // RUNE/BTC: (A)(B)(C) fertig, darunter \"II\" -- der Anstieg danach hiess trotzdem A-B-C und die
+  // Bewertung war baerisch). Ist die grosse Korrektur abgeschlossen, beginnt ein neuer Trend; seine
+  // ersten Wellen heissen 1, 2, 3. Die Kursmarken bleiben gleich, nur die Namen (Punkte, Projektion,
+  // Fibonacci-Stufen) und damit Phase, Richtung und Bewertung werden richtig.
+  function abcNachGrossCAlsImpuls(E, fibs) {
+    try {
+      if (!E || !Array.isArray(E.points) || !Array.isArray(E.grossMarken)) return false;
+      // (C) darf als "laufend" markiert sein (gemeldet: "ich sehe keine Aenderungen" -- die Engine
+      // markiert (C) als laufend, solange ihre eigene Phase nicht "impulseDone" ist, also gerade
+      // dann, wenn danach schon A-B gezaehlt wird). Massgeblich ist, dass das Ende von 5 fest steht
+      // und die Bewegung danach schon begonnen hat.
+      const gC = E.grossMarken.find(q => /\(C\)/.test(String(q.text || '')));
+      if (!gC) return false;
+      // Fall 2: Zaehlung ...3-4-5 (= Inneres der grossen (C)) und danach A-B(-C) -- wie im Bild von
+      // RUNE/BTC. Die Wellen nach 5 werden zur eigenen Zaehlung ab 0 = Ende von 5 = Ende von (C).
+      if (E.kind === 'impulse') {
+        const k5 = E.points.findIndex(q => String(q.label) === '5' && !q.pending);
+        if (k5 < 0) return false;
+        const p5 = E.points[k5];
+        if (Math.abs(p5.idx - gC.idx) > 3 && Math.abs(Math.log(p5.price / gC.price)) > 0.02) return false;
+        const nach = E.points.slice(k5 + 1);
+        if (!nach.length || !nach.every(q => /^[ABC]$/.test(String(q.label)))) return false;
+        var grossStart = E.points.find(q => String(q.label) === '0') || null;
+        E.points = [{ ...p5, label: '0', pending: false }, ...nach];
+        E.kind = 'corrective';
+      }
+      if (E.kind !== 'corrective') return false;
+      const p0 = E.points.find(q => String(q.label) === '0'), pA = E.points.find(q => String(q.label) === 'A');
+      if (!gC || !p0 || !pA || !(gC.price > 0) || !(p0.price > 0)) return false;
+      if (Math.abs(p0.idx - gC.idx) > 3 && Math.abs(Math.log(p0.price / gC.price)) > 0.02) return false;   // startet am Ende von (C)
+      const auf = pA.price > p0.price;
+      if ((gC.type === 'L') !== auf) return false;                                                       // Richtung gegen die grosse Korrektur
+      abcAlsImpulsUmbenennen(E, fibs, p0, auf);
+      // EINE LESART STATT GEMISCHT (gemeldet: "Warum abc und die Wellenzaehlung gemischt? Fuer abc
+      // entscheiden"): Die grosse Korrektur steht jetzt als A-B-C in der Hauptzaehlung --
+      // 0 (Start) - A - B - C -- und der neue Trend schliesst als 1-2-3 an. Die Zahlen 1-5 innerhalb
+      // der Korrektur und die getrennten (A)(B)(C)-Marken entfallen.
+      const gA = E.grossMarken.find(q => /\(A\)/.test(String(q.text || '')));
+      const gB = E.grossMarken.find(q => /\(B\)/.test(String(q.text || '')));
+      const st = (typeof grossStart !== 'undefined' && grossStart) || (E.grossTop && E.grossTop.idx != null ? { idx: E.grossTop.idx, price: E.grossTop.price, type: auf ? 'H' : 'L' } : null);
+      if (gA && gB && st && st.idx < gA.idx && gA.idx < gB.idx && gB.idx < p0.idx) {
+        const tA = auf ? 'L' : 'H', tB = auf ? 'H' : 'L';
+        const neu0 = E.points[0];
+        E.points = [
+          // Start ohne Beschriftung: "0" bezeichnet in der Engine den Start der LAUFENDEN Zaehlung
+          // (hier der neue Trend ab C) -- zwei "0" wuerden Berechnungen wie Welle-1-Laengen verfaelschen.
+          { idx: st.idx, price: st.price, type: tB, label: '', pending: false },
+          { idx: gA.idx, price: gA.price, type: tA, label: 'A', pending: false },
+          { idx: gB.idx, price: gB.price, type: tB, label: 'B', pending: false },
+          { ...neu0, label: 'C', pending: false },
+          ...E.points.slice(1),
+        ];
+        E.grossMarken = [];
+        E.abcEinheitlich = true;
+      } else {
+        E.grossMarken = E.grossMarken.map(q => ({ ...q, pending: false }));
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+  // GROSSE A-B-C AUS DEN KERZEN (gemeldet bei RUNE/ETH: \"nicht gut\" -- mit den echten Daten
+  // nachgestellt: Die Engine zaehlte 2021-2026 als Impuls 0-5 und uebersah dabei den grossen
+  // Anstieg 2024 mitten in Welle 3; der Rahmen aus dem Wochenchart lieferte deshalb nach dem Tief
+  // 2026 ein A-B-C nach oben). Laeuft die aktuelle Bewegung seit einem tiefen Extrem C (Start einer
+  // Gegenbewegung bzw. Ende einer Welle 5), wird der Weg davor direkt aus den Kerzen als grosse
+  // Korrektur gelesen:
+  //   Start = aeusserstes Extrem im Ausschnitt vor C (z. B. Hoch 2021),
+  //   B     = groesste Gegenbewegung dazwischen (38,2-100 % Ruecklauf von Start->A),
+  //   A     = Extrem zwischen Start und B,
+  //   C     muss jenseits von A liegen, und der ganze Rueckgang muss gross sein (Faktor 3).
+  // Passt das, heisst die Hauptzaehlung: Start - A - B - C und danach 1-2-3 des neuen Trends.
+  // PROJEKTION/ZUVERLAESSIGKEIT NACH EINER UMDEUTUNG NEU BEWERTEN (gemeldet: "Wo ist die Prognose
+  // hin?" -- das Panel zeigte "Projection hidden ... target reached 31 %" -- das sind die Werte der
+  // Phase B: Ausgeblendet wurde VOR der Umdeutung, als die Engine noch "Welle B" zaehlte; nach der
+  // Umbenennung in "Welle 2" blieb die Prognose versteckt).
+  function projektionHolen(E) {
+    if (E && (!Array.isArray(E.projection) || !E.projection.length) && Array.isArray(E.projectionVersteckt) && E.projectionVersteckt.length) {
+      E.projection = E.projectionVersteckt; E.projectionVersteckt = null;
+    }
+  }
+  function phaseNeuBewerten(E) {
+    if (!E) return;
+    E.zuverl = RW_EW_ZUVERL[E.phase] || null;
+    if (RW_EW_OHNE_PROJEKTION.includes(E.phase) && Array.isArray(E.projection) && E.projection.length) { E.projectionVersteckt = E.projection; E.projection = []; }
+    else if (!RW_EW_OHNE_PROJEKTION.includes(E.phase)) E.projectionVersteckt = null;
+  }
+  function grosseKorrekturAusDaten(E, data, from, to, useLog, fibs) {
+    try {
+      if (!E || !Array.isArray(E.points) || !E.points.length || !data || !data.length) return false;
+      const Lg = v => useLog ? Math.log(v) : v;
+      const L_ = i => { const d = data[i]; return d ? (d.low != null ? d.low : d.value) : NaN; };
+      const H_ = i => { const d = data[i]; return d ? (d.high != null ? d.high : d.value) : NaN; };
+      // Ganze Historie (nicht nur der Ausschnitt): Die grosse Korrektur beginnt oft weit links.
+      let iMin = -1, iMax = -1;
+      for (let i = 0; i <= to; i++) { const l = L_(i), h = H_(i); if (Number.isFinite(l) && (iMin < 0 || l < L_(iMin))) iMin = i; if (Number.isFinite(h) && (iMax < 0 || h > H_(iMax))) iMax = i; }
+      if (iMin < 0 || iMax < 0) return false;
+      // C = fester Punkt der Zaehlung am Extrem der Historie (3 % Spielraum), NACH dem Gegen-Extrem.
+      const nahe = (a, b) => Math.abs(Math.log(a / b)) <= 0.03;
+      let auf = null, kC = -1;
+      E.points.forEach((q, k) => {
+        if (q.pending || !(q.price > 0)) return;
+        if (iMin > iMax && nahe(q.price, L_(iMin)) && Math.abs(q.idx - iMin) <= 3) { auf = true; kC = k; }
+        else if (iMax > iMin && nahe(q.price, H_(iMax)) && Math.abs(q.idx - iMax) <= 3) { auf = false; kC = k; }
+      });
+      if (kC < 0) return false;
+      const Cp = E.points[kC];
+      const mitT = auf ? L_ : H_, gegen = auf ? H_ : L_;
+      const tiefer = (x, y) => auf ? x < y : x > y;
+      const c = Cp.idx;
+      let s0 = -1;
+      for (let i = 0; i < c; i++) { const v = gegen(i); if (Number.isFinite(v) && (s0 < 0 || (auf ? v > gegen(s0) : v < gegen(s0)))) s0 = i; }
+      if (s0 < 0 || c - s0 < 20) return false;
+      const S = gegen(s0), Cpr = Cp.price;
+      if (!(S > 0) || (auf ? S / Cpr < 3 : Cpr / S < 3)) return false;      // grosse Korrektur (Faktor 3)
+      let best = null;
+      for (let b = s0 + 4; b < c - 4; b++) {
+        const v = gegen(b); if (!Number.isFinite(v)) continue;
+        let lokal = true; for (let j = b - 3; j <= b + 3; j++) if (j !== b && (auf ? gegen(j) > v : gegen(j) < v)) { lokal = false; break; }
+        if (!lokal) continue;
+        let ai = -1; for (let j = s0 + 1; j < b; j++) { const w = mitT(j); if (Number.isFinite(w) && (ai < 0 || tiefer(w, mitT(ai)))) ai = j; }
+        if (ai < 0) continue;
+        const A = mitT(ai), lenA = Math.abs(Lg(S) - Lg(A)), lenB = Math.abs(Lg(v) - Lg(A));
+        if (!(lenA > 0)) continue;
+        const r = lenB / lenA;
+        if (r < 0.382 || r >= 1 || !tiefer(Cpr, A)) continue;
+        let sauber = true; for (let j = b + 1; j < c; j++) if (auf ? gegen(j) > v : gegen(j) < v) { sauber = false; break; }
+        if (!sauber) continue;
+        if (!best || lenB > best.lenB) best = { ai, A, bi: b, B: v, lenB };
+      }
+      if (!best) return false;
+      // Alles nach C ist der neue Trend: der Reihe nach 1, 2, 3 ... (egal wie es vorher hiess).
+      // Zuordnung alt -> neu merken, damit die Projektion dieselben Namen bekommt.
+      const altNeu = {};
+      // NACH DER 5 KOMMT A-B-C (gemeldet: "Warum gibt es Welle 6 und 7?" -- es wurde stur weitergezaehlt).
+      // Reihenfolge eines Zyklus: 1-2-3-4-5, dann die Korrektur A-B-C, danach wieder von vorn.
+      const SEQ = ['1', '2', '3', '4', '5', 'A', 'B', 'C'];
+      const lab8 = k => SEQ[((k % 8) + 8) % 8];
+      let nach = E.points.slice(kC + 1).map((q, k) => { altNeu[String(q.label)] = lab8(k); return { ...q, label: lab8(k) }; });
+      if (!nach.length) {
+        let ex = null;
+        for (let i = c + 1; i <= to; i++) { const v = gegen(i); if (Number.isFinite(v) && (!ex || (auf ? v > ex.price : v < ex.price))) ex = { idx: i, price: v }; }
+        if (ex && Math.abs(Math.log(ex.price / Cpr)) >= Math.log(1.2)) nach = [{ idx: ex.idx, price: ex.price, type: auf ? 'H' : 'L', label: '1', pending: true }];
+      }
+      const letzter = nach[nach.length - 1];
+      const laufendNr = !nach.length ? 1 : letzter.pending ? nach.length : nach.length + 1;
+      const alteProj = (E.projection || []).filter(q => q && q.price > 0);
+      // Projektion behalten, solange sie den neuen Trend nicht bricht (gemeldet: "Welle 2 wird immer noch
+      // nicht angezeigt" -- vorher musste das erste Ziel in Trendrichtung liegen; das Ziel einer
+      // Welle 2 liegt aber naturgemaess DARUNTER und fiel deshalb weg). Verworfen wird sie nur, wenn
+      // ein Ziel jenseits von C laege -- das waere keine Welle des neuen Trends mehr.
+      const passt = alteProj.length > 0 && alteProj.every(q => (auf ? q.price > Cpr : q.price < Cpr));
+      // Fuer Welle 1 keine Projektion (keine Bezugswelle -- so auch sonst in der Engine).
+      // PROJEKTION RICHTIG NUMMERIEREN (gemeldet: "Warum Welle 2 und nicht Welle 3???" -- das Ziel von
+      // Welle 3 hiess "2"): Ein Projektionspunkt, der zu einem schon vorhandenen Punkt gehoert (Ziel
+      // der laufenden Welle), bekommt dessen neuen Namen; alle weiteren zaehlen ab dem hoechsten
+      // vergebenen Namen weiter. Vorher wurde stur ab der laufenden Nummer gezaehlt -- lief Welle 2
+      // noch und die Projektion zeigte schon auf 3, wurde aus der 3 eine 2.
+      // Waren die alten Namen schon Zahlen, bleibt der Abstand erhalten (alte "3" nach alter "1" ist
+      // auch neu die "3", selbst wenn die "2" als Punkt noch fehlt).
+      const altLetzt = E.points[E.points.length - 1];
+      const versatz = (altLetzt && /^\d$/.test(String(altLetzt.label)) && nach.length) ? Number(altLetzt.label) - nach.length : null;
+      let naechsteNr = nach.length + 1;
+      const neuProj = alteProj.map(q => {
+        const n0 = altNeu[String(q.label)];
+        if (n0) return { ...q, label: n0 };
+        if (versatz != null && /^\d$/.test(String(q.label))) { const nr = Number(q.label) - versatz; naechsteNr = Math.max(naechsteNr, nr + 1); return { ...q, label: lab8(nr - 1) }; }
+        const nr = lab8(naechsteNr - 1); naechsteNr++;
+        return { ...q, label: nr };
+      });
+      E.projection = passt && laufendNr > 1 ? neuProj.filter(q => SEQ.includes(String(q.label))) : [];
+      // Laeuft eine Korrekturwelle (2 oder 4) ohne eigenen Punkt und ohne eigenes Ziel, wenigstens ihr
+      // bisheriges Extrem als laufenden Punkt zeigen -- sonst ist die Welle im Chart gar nicht zu sehen.
+      if (nach.length && !nach[nach.length - 1].pending && laufendNr % 2 === 0 && !E.projection.some(q => String(q.label) === lab8(laufendNr - 1))) {
+        const v1 = nach[nach.length - 1];
+        let ex = null;
+        for (let i = v1.idx + 1; i <= to; i++) { const v = mitT(i); if (Number.isFinite(v) && (!ex || (auf ? v < ex.price : v > ex.price))) ex = { idx: i, price: v }; }
+        if (ex && (auf ? ex.price < v1.price : ex.price > v1.price)) nach.push({ idx: ex.idx, price: ex.price, type: auf ? 'L' : 'H', label: lab8(laufendNr - 1), pending: true });
+      }
+      const tA = auf ? 'L' : 'H', tB = auf ? 'H' : 'L';
+      E.points = [
+        { idx: s0, price: S, type: tB, label: '', pending: false },
+        { idx: best.ai, price: best.A, type: tA, label: 'A', pending: false },
+        { idx: best.bi, price: best.B, type: tB, label: 'B', pending: false },
+        { ...Cp, type: tA, label: 'C', pending: false },
+        ...nach,
+      ];
+      // Phase passend zur Reihenfolge: nach der 5 laeuft die Korrektur (waveA/B/C, kind corrective)
+      { const lb = lab8(laufendNr - 1); const korr = /^[ABC]$/.test(lb); E.phase = 'wave' + lb; E.kind = korr ? 'corrective' : 'impulse'; }
+      E.dir = auf ? 'up' : 'down';
+      E.corrType = null;
+      E.invalidation = { price: Cpr, below: auf, ruleKey: laufendNr <= 1 ? 'proInvNewImpulse' : 'proInvRule1' };
+      E.weiche = null;
+      E.scenarios = [];
+      E.grossMarken = [];
+      E.zwischenziel = E.projection.length ? { ...(E.zwischenziel || {}), wave: E.projection[0].label, price: E.projection[0].price } : null;
+      E.umbenanntNachGrossC = true;
+      E.abcAusDaten = true;
+      // Feinzaehlung der laufenden Welle: In treibenden Wellen (1, 3, 5) heissen die Teile i-ii-iii,
+      // nicht a-b-c (die Feinzaehlung entstand noch unter der alten, korrigierenden Lesart).
+      if (E.sub && Array.isArray(E.sub.points) && laufendNr % 2 === 1) {
+        const m = { a: 'i', b: 'ii', c: 'iii', d: 'iv', e: 'v' };
+        E.sub = { ...E.sub, kind: 'impulse', points: E.sub.points.map(q => (m[String(q.label)] ? { ...q, label: m[String(q.label)] } : q)) };
+      }
+      if (fibs) {
+        // Fib-Stufen der alten Lesart passen nicht mehr zur neuen Zaehlung -- nur behalten, was zur
+        // laufenden Welle gehoert (gleiche Nummer), sonst weglassen.
+        for (const k of ['elliott', 'elliottWeiter']) {
+          const F = fibs[k];
+          if (F && Array.isArray(F.levels)) {
+            const map = { A: '1', B: '2', C: '3' };
+            // Die Stufen heissen nach der Welle, die GERADE ENTSTEHT (F.label) -- in der Korrektur
+            // tragen Ruecklauf-Stufen aber den Namen der zurueckgelaufenen Welle ("A x 0,618" fuer B).
+            // Vorher wurde daraus "wave 1 x 0,618" statt "wave 2", und die Ziel-Auswahl fand keine
+            // passenden Stufen mehr (gemeldet: "Welle 2 laesst sich nicht mehr aendern").
+            // Stufen fuer die alte Welle C ("c = r x a") ganz verwerfen: Aus C wird Welle 3, und die wird
+            // mit eigenen Verhaeltnissen gemessen (siehe ergaenzeProjektion).
+            if (String(F.label) === 'C') { fibs[k] = null; continue; }
+            const fl = map[String(F.label)];
+            // C-Verlaengerungen ("c = 1 x a") NICHT als Welle-3-Stufen uebernehmen (gemeldet: "das ist doch
+            // nicht 1,618 fuer Welle 3" -- als Ziel stand c = 1 x a): Eine Welle 3 wird mit eigenen
+            // Verhaeltnissen gemessen (1 / 1,618 / 2 / 2,618, Schwerpunkt 1,618) -- die erzeugt
+            // ergaenzeProjektion, sobald keine Stufen fuer Welle 3 da sind.
+            fibs[k] = { ...F, label: fl || F.label, levels: F.levels.filter(l => !l.cExt).map(l => (fl ? { ...l, wave: fl } : map[String(l.wave)] ? { ...l, wave: map[String(l.wave)] } : l)) };
+          }
+        }
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+  // RAHMEN IN DIE HAUPTZAEHLUNG (gleiches Bild wie bei RUNE/ETH): Beginnt der neue Impuls genau an
+  // der grossen (C), stehen Start - A - B - C und danach 1-2-3 in EINER Zaehlung statt getrennter
+  // (A)(B)(C)-Marken neben einer eigenen 0-1-2-3.
+  function rahmenInZaehlung(E, data, from) {
+    try {
+      if (!E || E.kind !== 'impulse' || !Array.isArray(E.points) || !Array.isArray(E.grossMarken)) return false;
+      const g = t => E.grossMarken.find(q => new RegExp('\\(' + t + '\\)').test(String(q.text || '')));
+      const gA = g('A'), gB = g('B'), gC = g('C');
+      const p0 = E.points[0];
+      if (!gA || !gB || !gC || !p0 || String(p0.label) !== '0' || Math.abs(p0.idx - gC.idx) > 3) return false;
+      const auf = E.dir === 'up';
+      const gegen = i => { const d = data[i]; return d ? (auf ? (d.high != null ? d.high : d.value) : (d.low != null ? d.low : d.value)) : NaN; };
+      let s0 = -1;
+      for (let i = Math.max(0, from); i < gA.idx; i++) { const v = gegen(i); if (Number.isFinite(v) && (s0 < 0 || (auf ? v > gegen(s0) : v < gegen(s0)))) s0 = i; }
+      if (s0 < 0) return false;
+      const tA = auf ? 'L' : 'H', tB = auf ? 'H' : 'L';
+      E.points = [
+        { idx: s0, price: gegen(s0), type: tB, label: '', pending: false },
+        { idx: gA.idx, price: gA.price, type: tA, label: 'A', pending: false },
+        { idx: gB.idx, price: gB.price, type: tB, label: 'B', pending: false },
+        { ...p0, label: 'C', pending: false },
+        ...E.points.slice(1),
+      ];
+      E.grossMarken = [];
+      E.abcEinheitlich = true;
+      return true;
+    } catch (e) { return false; }
+  }
+  function ergaenzeProjektion(E, useLog, fibs) {
+    try {
+      if (!E || !Array.isArray(E.projection) || !E.projection.length) return;
+      // WELLE-3-ZIEL OHNE EIGENE FIB-STUFEN (gemeldet: "Warum ist die Welle 3 so kurz?" -- nach der
+      // Umdeutung A-B-C -> 1-2-3 stammte das Ziel noch aus der alten Lesart "C = 1 x A", also nur
+      // so lang wie Welle 1). Fehlen Stufen fuer Welle 3, werden sie hier nach den ueblichen
+      // Verhaeltnissen ab dem Ende von Welle 2 erzeugt (1 / 1,618 / 2 / 2,618 x Welle 1, Gewichte wie
+      // sonst in der Engine) und das Ziel auf 1,618 gesetzt.
+      // ZIEL DER LAUFENDEN KORREKTURWELLE ERGAENZEN (gemeldet: "Ich kann nicht mehr anpassen, zu
+      // welcher Fib die Welle 2 gehen koennte"): Laeuft Welle 2 als offener Punkt und die Projektion
+      // zeigt schon auf 3, fehlte ihr eigenes Ziel -- ohne Ziel gab es keine Auswahl. Jetzt steht
+      // das Ziel auf der wahrscheinlichsten offenen Fib-Stufe dieser Welle, wie sonst auch.
+      {
+        const P = E.points || [], letzt = P[P.length - 1];
+        const L = letzt && letzt.pending && /^\d$/.test(String(letzt.label)) ? String(letzt.label) : null;
+        if (L && fibs && !E.projection.some(q => String(q.label) === L)) {
+          const st = [...((fibs.elliott && fibs.elliott.levels) || []), ...((fibs.elliottWeiter && fibs.elliottWeiter.levels) || [])]
+            .filter(l => l && String(l.wave) === L && !l.erreicht && !l.cExt && !l.jetzt && l.price > 0 && Number.isFinite(l.prob));
+          if (st.length) {
+            const best = st.reduce((a, b) => (b.prob > a.prob ? b : a));
+            const d0 = Math.max(2, Math.round(((E.projection[0] && E.projection[0].dIdx) || 12) * 0.25));
+            E.projection = [{ label: L, price: best.price, dIdx: d0 }, ...E.projection.map(q => ({ ...q, dIdx: (q.dIdx || 0) + d0 }))];
+          }
+        }
+      }
+      const k3 = E.projection.findIndex(q => String(q.label) === '3');
+      if (k3 >= 0 && fibs) {
+        const hat3 = [...((fibs.elliott && fibs.elliott.levels) || []), ...((fibs.elliottWeiter && fibs.elliottWeiter.levels) || [])].some(l => l && String(l.wave) === '3');
+        const pts = E.points || [];
+        const i1 = pts.findIndex(q => String(q.label) === '1');
+        const p1 = i1 > 0 ? pts[i1] : null, p0 = i1 > 0 ? pts[i1 - 1] : null;
+        const p2 = E.projection.find(q => String(q.label) === '2') || pts.find(q => String(q.label) === '2');
+        if (!hat3 && p0 && p1 && p2 && p0.price > 0 && p1.price > 0 && p2.price > 0) {
+          const auf = p1.price > p0.price ? 1 : -1;
+          const Lg = v => useLog ? Math.log(v) : v, Eg = v => useLog ? Math.exp(v) : v;
+          const w1 = Math.abs(Lg(p1.price) - Lg(p0.price));
+          const gew = { 1: 20, 1.618: 45, 2: 15, 2.618: 20 };
+          const stufen = [1, 1.618, 2, 2.618].map(r => ({ r, wave: '3', price: Eg(Lg(p2.price) + auf * r * w1), prob: gew[r] })).filter(l => l.price > 0);
+          fibs.elliottWeiter = { id: 'elliottWeiter', label: '3', vonPreis: p2.price, drawFromIdx: (Number.isInteger(p2.idx) ? p2.idx : (pts[pts.length - 1] || {}).idx) || 0, levels: stufen };
+          const alt = E.projection[k3].price, neu = stufen.find(l => l.r === 1.618).price;
+          if (alt > 0 && neu > 0) {
+            const f = neu / alt, d = neu - alt;
+            E.projection = E.projection.map((q, k) => k < k3 ? q : ({ ...q, price: k === k3 ? neu : (useLog ? q.price * f : q.price + d) }));
+            if (E.zwischenziel && String(E.zwischenziel.wave) === '3') E.zwischenziel = { ...E.zwischenziel, price: neu, r: 1.618 };
+          }
+        }
+      }
+      if (String(E.projection[0].label) !== '3') return;
+      // ZIEL VON WELLE 3 = DIE WAHRSCHEINLICHSTE FIB-STUFE (gemeldet: "Welle 3 muesste doch bis
+      // 1,618 laufen" -- der Kreis "3" stand bei 3,231e-4, die Linien zeigten 1,618 = 3,772e-4 mit
+      // 56 %). Einige Sonderfaelle der Zaehlung rechnen das Ziel anders als die gezeichneten
+      // Stufen; dann widersprachen sich Kreis und Linien. Jetzt gewinnt die offene Stufe mit der
+      // hoechsten Wahrscheinlichkeit, weitere Projektionspunkte wandern mit.
+      if (fibs) {
+        const stufen = [...((fibs.elliott && fibs.elliott.levels) || []), ...((fibs.elliottWeiter && fibs.elliottWeiter.levels) || [])]
+          .filter(l => l && String(l.wave) === '3' && !l.erreicht && !l.cExt && !l.jetzt && l.price > 0 && Number.isFinite(l.prob));
+        if (stufen.length) {
+          const best = stufen.reduce((a, b) => (b.prob > a.prob ? b : a));
+          const alt = E.projection[0].price;
+          if (alt > 0 && Math.abs(Math.log(best.price / alt)) > 0.01) {
+            const f = best.price / alt, d = best.price - alt;
+            E.projection = E.projection.map((q, k) => ({ ...q, price: k === 0 ? best.price : (useLog ? q.price * f : q.price + d) }));
+            if (E.zwischenziel && String(E.zwischenziel.wave) === '3') E.zwischenziel = { ...E.zwischenziel, price: best.price, r: best.r };
+          }
+        }
+      }
+      // Keine Ergaenzung um Welle 4 und 5 mehr (gemeldet: "Warum wird 4 und 5 angezeigt? Welle 3
+      // hat sich noch nicht ausgebildet"). Solange Welle 3 laeuft, zeigt die Prognose nur ihr Ende.
+    } catch (e) {}
+  }
+  function altTrunc5(E3, data, lastClose, useLog) {
+    try {
+      if (E3) {
+        E3.alt5 = null;
+        if (Array.isArray(E3.scenarios)) E3.scenarios = E3.scenarios.filter(x => x.key !== 'scenTrunc5');
+      }
+      if (E3 && E3.kind === 'impulse' && (E3.phase === 'wave4' || E3.phase === 'wave5') && lastClose > 0 && Array.isArray(E3.points)) {
+        const lab = l => E3.points.find(q => String(q.label) === l);
+        const P0 = lab('0'), P3 = lab('3'), P4 = lab('4');
+        if (P3 && P4 && Number.isInteger(P4.idx) && P3.price > 0 && P4.price > 0) {
+          const sg = E3.dir === 'up' ? 1 : -1;
+          const dL = (a, b) => useLog ? Math.log(a) - Math.log(b) : a - b;
+          let exI = -1, exP = null;
+          for (let i = P4.idx + 1; i < data.length; i++) {
+            const v = sg > 0 ? hiOf(data[i]) : loOf(data[i]);
+            if (Number.isFinite(v) && v > 0 && (exP == null || dL(v, exP) * sg > 0)) { exP = v; exI = i; }
+          }
+          if (exP != null && exI < data.length - 5) {
+            const vorbei = dL(exP, P3.price) * sg;                  // > 0: ueber Welle 3 hinaus
+            const nah = useLog ? Math.log(1.10) : P3.price * 0.10;
+            const w5 = dL(exP, P4.price) * sg;                      // Laenge der moeglichen Welle 5
+            const zurueck = dL(lastClose, exP) * -sg;               // Gegenbewegung seither
+            if (vorbei <= 0 && vorbei >= -nah && w5 > 0 && zurueck >= 0.618 * w5) {
+              const ganz = P0 ? Math.abs(dL(P0.price, exP)) : Math.abs(dL(P4.price, exP));
+              const stufe = r => useLog ? exP * Math.exp(-sg * ganz * r) : exP - sg * ganz * r;
+              // A-Ziel: 38,2 / 50 / 61,8 % des ganzen Impulses -- die erste Stufe jenseits von Kurs UND
+              // Welle 4 (der Ausloeser ist ein Schluss jenseits von Welle 4, das Ziel muss dahinter liegen).
+              const ziele = [0.382, 0.5, 0.618].map(stufe).filter(z => Number.isFinite(z) && z > 0);
+              const ziel = ziele.find(z => dL(z, lastClose) * -sg > 0 && dL(z, P4.price) * -sg > 0) || null;
+              const bestaetigt = dL(lastClose, P4.price) * -sg > 0;   // schon jenseits von Welle 4
+              E3.alt5 = { idx: exI, price: exP, type: sg > 0 ? 'H' : 'L', trigger: P4.price, target: ziel, bestaetigt };
+              if (Array.isArray(E3.scenarios)) {
+                const sc = E3.scenarios;
+                sc.push({ key: 'scenTrunc5', dir: sg > 0 ? 'down' : 'up', prob: bestaetigt ? 55 : 28, trigger: { price: P4.price, below: sg > 0 }, target: ziel });
+                // Neu auf 100 % verteilen (die uebrigen anteilig kleiner), absteigend sortiert.
+                const summe = sc.reduce((a, x) => a + (x.prob || 0), 0) || 1;
+                sc.forEach(x => { x.prob = Math.max(1, Math.round((x.prob || 0) / summe * 100)); });
+                sc.sort((x, y) => y.prob - x.prob);
+                const rest = 100 - sc.reduce((a, x) => a + x.prob, 0);
+                if (sc.length) sc[0].prob += rest;
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  function analyze({ data: rohDaten, viewStart, viewEnd, logScale, ma200Override, degreeMode, dochtFilter, kontextExtern = null }) {
+    // Dochtfilter jetzt IMMER (nicht nur im Vergleichs-Chart): Fehlausbrueche sollen in keinem
+    // Zeitraum eine Welle erfinden. Gezeichnet werden weiterhin die echten Kerzen.
+    const data = rohDaten && rohDaten.length && dochtFilter !== false ? rwDochtFilter(rohDaten) : rohDaten;
+    const N = data ? data.length : 0;
+    if (N < 12) return null;
+    const to = clamp(Math.floor(viewEnd != null ? viewEnd : N - 1), 0, N - 1);
+    const from = clamp(Math.floor(viewStart != null ? viewStart : 0), 0, to);
+    if (to - from < 8) return null;
+    // Log-Mathematik erzwingen, wenn der analysierte Bereich mehr als das 3-fache ueberspannt
+    // (Wochen-/Monatschart ueber Jahre): Fibonacci-Verhaeltnisse in Dollar-Schritten sind dort
+    // falsch (0,382 von "20 -> 0,35" waere linear 7,86, im Log-Raum 1,65) -- unabhaengig davon,
+    // ob der Nutzer die Log-Skala gerade eingeschaltet hat.
+    let useLog = !!logScale;
+    {
+      // Bereich = sichtbares Fenster PLUS Kontext (bis 4x refSpan davor), denn die Zaehlung
+      // greift auf Wendepunkte vor dem Fenster zurueck -- sonst rechnet ein enges Fenster am
+      // Ende einer 50x-Bewegung linear, obwohl die Punkte der Zaehlung 20 und 0,35 heissen.
+      const span0 = pow2Span(to - from + 1);
+      const c0 = clamp(to - 4 * span0, 0, from);
+      let mx = -Infinity, mn = Infinity;
+      for (let i = c0; i <= to; i++) { const v = data[i].value; if (v > mx) mx = v; if (v < mn) mn = v; }
+      if (mn > 0 && mx / mn > 3) useLog = true;
+    }
+    const atr = atrSeries(data, 14);
+    const atrAbs = atr[to] != null ? atr[to] : avg(data.slice(from, to + 1).map(d => hiOf(d) - loOf(d))) || data[to].value * 0.02;
+    const lastClose = data[to].value;
+    const atrPct = atrAbs / Math.max(lastClose, 1e-9);
+    const len = to - from + 1;
+    // Kontext in Zweierpotenz-Schritten der Fensterbreite (siehe pivotsAuto): der linke Rand
+    // des Kontexts wandert dadurch NICHT mit jedem Verschieben um eine Kerze mit -- sonst
+    // kippte eine Elliott-Zaehlung am Kontextrand um, obwohl im Bild nichts passiert ist.
+    const refSpan = pow2Span(len);
+    const ctxFrom = clamp(to - 2 * refSpan, 0, from);
+    const ctxCoarse = clamp(to - 3 * refSpan, 0, from);
+
+    // Schwellen aus der Volatilitaet, aber gedeckelt: bei Wochen-/Monatskerzen liegt die ATR
+    // selbst bei 30-60 % -- das Vielfache davon wuerde fast jeden Wendepunkt verschlucken
+    // (gemeldet am Monats-Chart: "nur ein Muster" ueber sechs Jahre).
+    const medium = pivotsAuto(data, ctxFrom, to, 24, 5, Math.min(0.22, atrPct * 1.8), len);
+    const mediumInView = { pivots: medium.pivots.filter(p => p.idx >= from), pending: medium.pending };
+    const coarse = pivotsAuto(data, ctxCoarse, to, 12, 4, Math.min(0.35, atrPct * 2.6), len);
+    const fineForRsi = pivotsAuto(data, from, to, 24, 6, Math.min(0.15, atrPct * 1.3), len);
+    const trend = detectTrend(data, from, to, atrPct, mediumInView.pivots);
+    const sr = detectSR(data, ctxFrom, to, atrAbs, lastClose, atrPct);
+    const fibs = detectFib(data, from, to, coarse, lastClose, useLog);
+    const tolLog = Math.max(Math.log(1.025), 0.8 * atrPct); // mind. 2,5 %: Krypto-Hochs sind selten auf den Prozent gleich
+    // Trendlinien ueber die GROBEN Wendepunkte: Die wichtigen Linien verbinden die grossen
+    // Hochs und Tiefs, nicht jede Zwischenzacke. Toleranz etwas grosszuegiger als bei
+    // waagerechten Marken, weil eine schraege Linie nie auf den Punkt genau trifft.
+    // Grobe UND mittlere Wendepunkte zusammen: Die groben allein waren fuer ruhige Trends zu
+    // grob -- bei einem gleichmaessigen Aufwaertstrend lag dort ein einziger Punkt vor, aus dem
+    // sich keine Linie bilden laesst. Die Bewertung waehlt ohnehin die staerkste Linie, mehr
+    // Kandidaten schaden also nicht.
+    const tlPivots = (() => {
+      const m = new Map();
+      for (const p of [...coarse.pivots, ...medium.pivots]) if (!m.has(p.idx)) m.set(p.idx, p);
+      return [...m.values()].sort((a, b) => a.idx - b.idx);
+    })();
+    const tlErgebnis = detectTrendlines(data, ctxCoarse, to, tlPivots, useLog, tolLog * 1.4, lastClose);
+    const trendlines = tlErgebnis.gewichtet;
+    const trendlinesTouch = tlErgebnis.beruehrung;
+
+    const volumes = data.some(d => d.volume != null && Number.isFinite(d.volume)) ? data.map(d => d.volume) : null;
+    // Elliott laeuft jetzt auf den MITTLEREN Pivots (mit Skip ueber Unterwellen, siehe
+    // detectElliott) -- die groben allein liessen zu viele Strukturen aus.
+    const fineCtx = pivotsAuto(data, ctxFrom, to, 60, 6, Math.min(0.15, atrPct * 1.3), len);
+    const ewSet = { pivots: medium.pivots, pending: medium.pending };
+    // GRAD-WAHL (gemeldet: "auf dem grossen Zeitraum wird keine Elliott-Theorie angewendet --
+    // es wird zu klein betrachtet"): Bisher zaehlte die Engine immer die LETZTEN Wendepunkte
+    // einer festen Feinheit. Auf 300 Wochenkerzen ist das zwangslaeufig die kleine Struktur am
+    // Ende, egal wie weit man herauszoomt. Der Grad muss mit dem Zeitraum wachsen.
+    //
+    // Deshalb bei weitem Fenster (>= 120 Kerzen): von grob nach fein probieren (60 %, 40 %,
+    // 28 %, 20 % Umkehrschwelle). Die GROEBSTE Stufe, deren Zaehlung mindestens 35 % des
+    // Fensters ueberspannt und wenigstens vier Punkte hat, wird die Hauptzaehlung -- auf dem
+    // Gesamtchart also z. B. Impuls 2020-21, dann A-B-C 2021-25 statt der 1-2-3-4-5 der
+    // letzten Monate. Die feine Zaehlung bleibt als Unterwellen (Ebene "sub") erhalten.
+    let elliott = null;
+    let degreePivots = null;
+    // DIAGNOSE (gemeldet: "trotz large keine Veraenderung"): Auf echten Daten laesst sich von
+    // aussen nicht sehen, ob die Grad-Wahl ueberhaupt greift. Dieser Verlauf wird im Panel
+    // angezeigt, wenn der Modus nicht 'auto' ist -- so ist nachvollziehbar, welche Stufe
+    // geprueft wurde und woran sie gescheitert ist.
+    const degreeLog = [];
+    {
+      const winLen = to - from + 1;
+      // degreeMode: 'auto' (Standard), 'coarse' (Grad erzwingen -- auch bei kleinerem Fenster und
+      // ohne die 35-%-Huerde), 'fine' (immer die feine Zaehlung wie frueher).
+      const modus = degreeMode || 'auto';
+      degreeLog.push('Fenster ' + winLen + ' Kerzen, Modus ' + modus);
+      // Schwelle 60 statt 120 Kerzen: Der Monatschart hat ueber die ganze RUNE-Historie nur rund
+      // 70 Kerzen -- mit 120 waere die Grad-Wahl dort NIE aktiv geworden, obwohl gerade dort die
+      // grosse Struktur gefragt ist.
+      if (modus !== 'fine' && (winLen >= 60 || modus === 'coarse')) {
+        const feinste = Math.min(0.22, atrPct * 1.8);
+        // GRAD-WAHL NACH QUALITAET (gemeldet: "willkuerlich"): Bisher gewann die GROBSTE Stufe, die
+        // ueberhaupt eine Zaehlung hergab -- egal wie schlecht sie passte. Ein einziger Wendepunkt,
+        // der auf der groben Stufe auftauchte oder verschwand, liess die ganze Zaehlung auf einen
+        // anderen Grad springen (z. B. den ganzen Impuls als "Welle 1"). Jetzt werden in 'auto' alle
+        // Stufen bewertet; es gewinnt die beste Zaehlung, groebere Stufen bekommen einen kleinen
+        // Vorsprung (die grosse Struktur bleibt bevorzugt, wenn sie ungefaehr gleich gut passt).
+        const stufenErg = [];
+        for (const pct of (modus === 'coarse' ? [0.6, 0.4, 0.28, 0.2, 0.14, 0.1] : [0.6, 0.4, 0.28, 0.2])) {
+          if (pct <= feinste && modus !== 'coarse') { degreeLog.push(pct + ': übersprungen (feiner als ' + feinste.toFixed(2) + ')'); break; }
+          const zz = zigzagUpTo(data, to, pct);
+          const inWin = zz.pivots.filter(p => p.idx >= from);
+          if (inWin.length < 4) { degreeLog.push(pct + ': nur ' + inWin.length + ' Wendepunkte'); continue; }
+          const prev = zz.pivots.filter(p => p.idx < from);
+          const set = { pivots: (prev.length ? [prev[prev.length - 1]] : []).concat(inWin), pending: zz.pending, pct };
+          // ZWEI Lesarten je Stufe: (1) mit dem laufenden Punkt -- liefert oft nur eine
+          // vorlaeufige 1-2 mit drei Punkten, weil die Engine "in Arbeit" bevorzugt; (2) OHNE den
+          // laufenden Punkt, also die zuletzt FERTIGE Struktur (z. B. A-B-C bis zum Tief 2025,
+          // Korrektur fertig). Genau (2) fehlte auf dem Gesamtchart: die grosse A-B-C war fertig,
+          // und die Engine sah nur den kleinen Anfang der neuen Bewegung.
+          // Die Engine waehlt unter ALLEN Kandidaten dieser Stufe den besten, der mindestens vier
+          // Punkte hat und mindestens 35 % des Fensters ueberspannt -- so gewinnt die grosse,
+          // weitgehend fertige Struktur (Impuls 1-2-3-4 abwaerts oder A-B-C fertig) nach ihrer
+          // eigenen Konfidenz, nicht eine vorlaeufige 1-2 mit drei Punkten am rechten Rand.
+          const passend = detectElliott(set, lastClose, to, useLog, volumes,
+            modus === 'coarse' ? { minPoints: 4, preferEarliest: true, data } : { minPoints: 4, minSpan: 0.35 * winLen, data });
+          if (passend && modus === 'coarse') {
+            elliott = passend; elliott.degreePct = pct; degreePivots = set.pivots;
+            degreeLog.push(pct + ': ' + passend.points.length + ' Punkte ab ' + passend.points[0].idx + ' ✓');
+            break;
+          }
+          if (passend) {
+            const gute = (passend.rawScore != null ? passend.rawScore : passend.confidence) + 4 * (3 - stufenErg.length);
+            stufenErg.push({ passend, pct, pivots: set.pivots, gute });
+            degreeLog.push(pct + ': ' + passend.points.length + ' Punkte ab ' + passend.points[0].idx + ', Güte ' + gute.toFixed(1));
+            continue;
+          }
+          degreeLog.push(pct + ': ' + inWin.length + ' WP, keine gültige Zählung (≥4 Punkte' + (modus === 'coarse' ? '' : ', ≥35 % Spanne') + ')');
+        }
+        if (!elliott && stufenErg.length) {
+          const b = stufenErg.reduce((a, x) => (x.gute > a.gute ? x : a));
+          elliott = b.passend; elliott.degreePct = b.pct; degreePivots = b.pivots;
+          degreeLog.push('gewählt: ' + b.pct + ' ✓');
+        }
+      }
+    }
+    if (!elliott) { degreeLog.push('Rückfall auf die feine Zählung'); elliott = detectElliott(ewSet, lastClose, to, useLog, volumes, { data }) || detectElliott(coarse, lastClose, to, useLog, volumes, { data }); }
+    // WELLE 5 BIS ZUM ECHTEN ENDE (gemeldet: "5" stand bei $0.64, danach lief der Kurs noch auf
+    // $0.87 -- ohne Ruecksetzer unter Welle 4). Ein spaeteres Extrem jenseits von 5, vor dem der Kurs
+    // nie unter das Ende von 4 fiel, gehoert noch zu Welle 5 (sie war nur noch nicht als Wendepunkt
+    // bestaetigt). Dann wird die Zaehlung mit diesem Extrem als 5 neu bewertet -- inklusive Phase,
+    // Zielen und Projektion -- und uebernommen, wenn sie gueltig ist.
+    if (elliott && elliott.kind === 'impulse') {
+      try {
+        const P = l => elliott.points.find(q => String(q.label) === l);
+        const p4 = P('4'), p5 = P('5');
+        const auf = elliott.dir !== 'down';
+        // Auch fuer eine noch LAUFENDE Welle 5 (pending) -- gemeldet: die "5" sass bei $0.70, das
+        // Hoch bei $0.87 lag danach. Der laufende Punkt muss immer das bisherige Extrem sein.
+        if (p4 && p5) {
+          let ext = null;
+          for (let i = p5.idx + 1; i <= to; i++) {
+            const d = data[i]; if (!d) continue;
+            const h = d.high != null ? d.high : d.value, l = d.low != null ? d.low : d.value;
+            if (auf ? l < p4.price : h > p4.price) break;
+            if (auf ? h > (ext ? ext.price : p5.price) : l < (ext ? ext.price : p5.price)) ext = { idx: i, price: auf ? h : l };
+          }
+          if (ext && p5.pending) {
+            degreeLog.push('laufende Welle 5 an das bisherige Extrem gesetzt (' + p5.price.toFixed(4) + ' \u2192 ' + ext.price.toFixed(4) + ')');
+            elliott.points = elliott.points.map(q => (q === p5 ? { ...q, idx: ext.idx, price: ext.price } : q));
+            // Projektionspunkte fuer 5, die schon ueberschritten sind, entfallen
+            if (Array.isArray(elliott.projection)) elliott.projection = elliott.projection.filter(q => !(String(q.label) === '5' && (auf ? q.price <= ext.price : q.price >= ext.price)));
+            ext = null;
+          }
+          if (ext) {
+            const piv = elliott.points.filter(q => /^[0-5]$/.test(String(q.label))).map((q, k) => ({ idx: q.idx, price: q.price, type: (k % 2 === 0) === auf ? 'L' : 'H' }));
+            piv[piv.length - 1] = { idx: ext.idx, price: ext.price, type: auf ? 'H' : 'L' };
+            const neu = detectElliott({ pivots: piv, pending: null }, lastClose, to, useLog, volumes, { forceStart: true, data });
+            const n5 = neu && neu.kind === 'impulse' && neu.points.find(q => String(q.label) === '5');
+            if (n5 && n5.idx === ext.idx) {
+              degreeLog.push('Welle 5 bis zum spaeteren Extrem verlaengert (' + p5.price.toFixed(4) + ' \u2192 ' + ext.price.toFixed(4) + ')');
+              elliott = Object.assign(neu, { degreePct: elliott.degreePct });
+            } else if (['impulseDone', 'waveA', 'waveB', 'waveC', 'corrDone'].includes(elliott.phase) && !elliott.points.some(q => /^[ABC]$/.test(String(q.label)) && q.idx > p5.idx && q.idx < ext.idx)) {
+              // Neubewertung waehlt eine andere Lesart -> 5 direkt verschieben und alles, was am
+              // Ende von 5 haengt (Projektion der Korrektur, Ziele, Ungueltigkeit), um denselben
+              // Faktor mitziehen. Punkte A/B/C vor dem neuen Extrem gibt es dann nicht.
+              const f = ext.price / p5.price;
+              degreeLog.push('Welle 5 verschoben (' + p5.price.toFixed(4) + ' \u2192 ' + ext.price.toFixed(4) + ')');
+              const alt5 = p5.price;
+              elliott.points = elliott.points.filter(q => !(/^[ABC]$/.test(String(q.label)) && q.idx > p5.idx)).map(q => (q === p5 ? { ...q, idx: ext.idx, price: ext.price } : q));
+              if (Array.isArray(elliott.projection)) elliott.projection = elliott.projection.map(q => ({ ...q, price: q.price * f }));
+              if (Array.isArray(elliott.targets)) elliott.targets = elliott.targets.map(q => ({ ...q, price: q.price * f }));
+              if (elliott.invalidation && Math.abs(elliott.invalidation.price - alt5) < 1e-12) elliott.invalidation = { ...elliott.invalidation, price: ext.price };
+              if (['waveA', 'waveB', 'waveC', 'corrDone'].includes(elliott.phase)) elliott.phase = 'impulseDone';
+            }
+          }
+        }
+      } catch (e) { /* bleibt bei der urspruenglichen Zaehlung */ }
+    }
+    // VERKUERZTE WELLE 5 IN FRAGE STELLEN (gemeldet, Tageschart: "die Welle 5 gefaellt mir nicht"
+    // -- 3 und 5 lagen fast gleich hoch am Oktober-Hoch, dazwischen eine kleine 4). Die
+    // naheliegendere Lesart: Das hoehere der beiden Hochs ist das Ende von Welle 3, und der
+    // Rueckgang seitdem ist die laufende Welle 4 -- Welle 5 kommt noch. Gilt sie (4 nicht im
+    // Bereich von Welle 1), wird sie uebernommen; die verkuerzte 5 bleibt die Ausnahme.
+    if (elliott && elliott.kind === 'impulse' && elliott.truncated) {
+      try {
+        const P = l => elliott.points.find(q => String(q.label) === l);
+        const p0 = P('0'), p1 = P('1'), p2 = P('2'), p3 = P('3'), p5 = P('5');
+        const auf = elliott.dir !== 'down';
+        if (p0 && p1 && p2 && p3 && p5) {
+          const top = (auf ? p5.price > p3.price : p5.price < p3.price) ? p5 : p3;
+          let tief = null;
+          for (let i = top.idx + 1; i <= to; i++) {
+            const d = data[i]; if (!d) continue;
+            const v = auf ? (d.low != null ? d.low : d.value) : (d.high != null ? d.high : d.value);
+            if (!tief || (auf ? v < tief.price : v > tief.price)) tief = { idx: i, price: v };
+          }
+          const ueberI = tief && (auf ? tief.price > p1.price : tief.price < p1.price);
+          if (tief && ueberI) {
+            const piv = [p0, p1, p2].map((q, k) => ({ idx: q.idx, price: q.price, type: (k % 2 === 0) === auf ? 'L' : 'H' }));
+            piv.push({ idx: top.idx, price: top.price, type: auf ? 'H' : 'L' });
+            const pend = { idx: tief.idx, price: tief.price, type: auf ? 'L' : 'H' };
+            const neu = detectElliott({ pivots: piv, pending: pend }, lastClose, to, useLog, volumes, { forceStart: true, data });
+            const n3 = neu && neu.kind === 'impulse' && neu.points.find(q => String(q.label) === '3');
+            if (n3 && n3.idx === top.idx && !neu.points.some(q => String(q.label) === '5' && !q.pending)) {
+              degreeLog.push('verkuerzte Welle 5 ersetzt: 3 am Hoch, Welle 4 laeuft');
+              elliott = Object.assign(neu, { degreePct: elliott.degreePct });
+            }
+          }
+        }
+      } catch (e) { /* bleibt bei der verkuerzten Zaehlung */ }
+    }
+    if (elliott) elliott.degreeLog = degreeLog;
+    if (elliott) {
+      // GRAD-NAME (Stichwort Cycle / Primary / Intermediate ...): Elliott ordnet Wellen nach
+      // ihrer Dauer in Grade ein. Aus der mittleren Dauer einer Welle dieser Zaehlung (Abstand
+      // zwischen zwei Punkten) wird der Grad bestimmt -- Richtwerte nach Frost/Prechter:
+      // Cycle Jahre, Primary Monate bis ~2 Jahre, Intermediate Wochen bis Monate, Minor Wochen,
+      // Minute Tage, Minuette Stunden, Subminuette Minuten. Ueber Cycle ist bei RUNE (Daten seit
+      // 2019) nichts zaehlbar -- dafuer braeuchte man Jahrzehnte.
+      const gradVon = (E) => {
+        const pts = (E.points || []).filter(p => Number.isFinite(data[p.idx] && data[p.idx].date));
+        if (pts.length < 2) return null;
+        const dauern = [];
+        for (let i = 1; i < pts.length; i++) dauern.push(Math.abs(data[pts[i].idx].date - data[pts[i - 1].idx].date));
+        // Mittelwert statt Median: bei nur drei Wellen kippt der Median an der Grenze, der
+        // Mittelwert ("wie lange dauern diese Wellen im Schnitt") ist hier das robustere Mass.
+        const med = dauern.reduce((a, b) => a + b, 0) / dauern.length;
+        const T = 86400e3;
+        if (med >= 730 * T) return { key: 'cycle', name: 'Cycle' };
+        if (med >= 120 * T) return { key: 'primary', name: 'Primary' };
+        if (med >= 18 * T) return { key: 'intermediate', name: 'Intermediate' };
+        if (med >= 4 * T) return { key: 'minor', name: 'Minor' };
+        if (med >= 10 * 3600e3) return { key: 'minute', name: 'Minute' };
+        if (med >= 3600e3) return { key: 'minuette', name: 'Minuette' };
+        return { key: 'subminuette', name: 'Subminuette' };
+      };
+      elliott.degree = gradVon(elliott);
+      // FRUEHERE STRUKTUREN (gemeldet: "das Analyse-Tool muss auf den ganzen Chart greifen"):
+      // Die Hauptzaehlung beschreibt immer nur das Ende -- auf dem Monatschart seit 2019 blieb
+      // damit der ganze erste Zyklus unbeschriftet. Davor liegende Impulse und Korrekturen
+      // werden deshalb RUECKWAERTS weitergezaehlt, jede Struktur endet dort, wo die naechste
+      // beginnt, bis der Anfang des Fensters erreicht ist (gedimmt gezeichnet).
+      //
+      // Vorher lief die Schleife genau einmal -- daher der eine gedimmte Block und sonst nichts.
+      // Jetzt bis zu sechs Segmente; abgebrochen wird, sobald keine Wendepunkte mehr uebrig sind
+      // oder eine Zaehlung nicht weiter nach links reicht (sonst Endlosschleife).
+      const prior = [];
+      let endIdx = elliott.points[0].idx;
+      const priorPivots = degreePivots || medium.pivots;
+      // KONTEXT LINKS VOM BILD MITZAEHLEN (gemeldet: "jetzt ist wieder das ABC nicht zu sehen" --
+      // beim Zoomen fiel der Anstieg 2019-2021 aus dem Bild, damit fehlte (5), und die ganze
+      // grosse Zaehlung brach weg). Die frueheren Strukturen werden deshalb ueber den Kontext-
+      // bereich (doppelte Fensterbreite nach links, wie die mittleren Wendepunkte) gesucht, nicht
+      // nur ueber den sichtbaren Ausschnitt. Gezeichnet wird ohnehin nur, was im Bild liegt.
+      const priorFrom = ctxFrom;
+      for (let k = 0; k < 8; k++) {
+        if (endIdx <= priorFrom + 1) break;
+        // Zuerst die Wendepunkte der Hauptzaehlung. Reichen sie im frueheren Bereich nicht aus
+        // (auf grober Stufe liegt dort oft nur EIN durchgehender Anstieg ohne Umkehr), wird auf
+        // die feineren ausgewichen -- sonst bliebe der Anfang des Charts unbeschriftet.
+        let res = null;
+        for (const quelle of [priorPivots, medium.pivots, fineForRsi.pivots]) {
+          if (!quelle || !quelle.length) continue;
+          const sub = quelle.filter(p => p.idx <= endIdx && p.idx >= priorFrom);
+          if (sub.length < 4) continue;
+          let kandidat = detectElliott({ pivots: sub, pending: null }, sub[sub.length - 1].price, endIdx, useLog, volumes);
+          // ABGESCHLOSSEN ODER NICHTS (gemeldet: "warum steht unten (1)(2)(3) (A)(B)(C) -- wo sind 4
+          // und 5?"): Eine fruehere Struktur ist Geschichte, sie endet dort, wo die naechste beginnt.
+          // Ein Impuls, der nur bis 3 (oder 4) kommt und dann in eine Korrektur uebergeht, ist nach
+          // Elliott kein Impuls: Eine Bewegung in DREI Wellen ist eine Korrektur. Deshalb:
+          //  - Impuls 0-1-2-3 -> als A-B-C (Zickzack) beschriften,
+          //  - Impuls ohne Welle 5 mit 0-1-2-3-4 -> verwerfen (unvollstaendig),
+          //  - Korrektur nur mit Welle C.
+          if (kandidat && kandidat.kind === 'impulse' && !kandidat.points.some(q => String(q.label) === '5')) {
+            if (kandidat.points.length === 4) {
+              const abc = ['0', 'A', 'B', 'C'];
+              kandidat = { ...kandidat, kind: 'corrective', corrType: 'zigzag', points: kandidat.points.map((q, i) => ({ ...q, label: abc[i] })) };
+            } else kandidat = null;
+          }
+          if (kandidat && kandidat.kind === 'corrective' && !kandidat.points.some(q => String(q.label) === 'C')) kandidat = null;
+          if (kandidat && kandidat.points.length >= 4 && kandidat.points[0].idx < endIdx) { res = kandidat; break; }
+        }
+        if (!res) break;
+        prior.unshift(res);
+        endIdx = res.points[0].idx;
+      }
+      // FRUEHERES (A)(B)(C) MIT DER NACHFOLGENDEN ZAEHLUNG ABGLEICHEN (gemeldet: "das ABC sieht
+      // nicht korrekt aus" / "warum wird hier immer noch so ABC gezaehlt?"). Nach (5) wurde ein
+      // kurzes (A)(B)(C) gezaehlt, danach begann eine NEUE 5-Wellen-Bewegung nach unten, die weit
+      // tiefer lief als dieses (C). Nach einer abgeschlossenen Korrektur ist aber ein Anstieg zu
+      // erwarten, kein neuer Abwaertsimpuls. Stimmiger: Die Korrektur war noch nicht fertig --
+      // (A) bleibt, (B) ist der hoechste Punkt bis zum Start der folgenden Zaehlung (meist dieser
+      // Start), und die folgende 5-Wellen-Bewegung IST Welle (C); das fruehe "(C)" entfaellt.
+      // Gilt fuer JEDES Paar aufeinanderfolgender Zaehlungen (fruehere untereinander und die
+      // letzte fruehere mit der laufenden) -- vorher nur fuer das letzte Paar.
+      {
+        const lab = (P, l) => P.points.find(q => String(q.label) === l);
+        const folge = [...prior, elliott];
+        for (let i = 0; i < folge.length - 1; i++) {
+          const vor = folge[i], nach = folge[i + 1];
+          const pA = lab(vor, 'A'), pB = lab(vor, 'B'), pC = lab(vor, 'C'), p5 = lab(vor, '5');
+          if (!(vor.kind === 'impulse' && p5 && pA && pB && pC && nach.points && nach.points.length >= 3)) continue;
+          const corrDown = vor.dir === 'up', jenseits = (x, y) => (corrDown ? x < y : x > y);
+          if (nach.kind !== 'impulse' || (nach.dir === 'up') !== !corrDown) continue; // muss in Korrekturrichtung laufen
+          const v0 = nach.points[0];
+          const vExt = nach.points.reduce((m, q) => (m == null || jenseits(q.price, m.price) ? q : m), null);
+          if (!vExt || !jenseits(vExt.price, pC.price) || !jenseits(vExt.price, pA.price)) continue;
+          const neuB = jenseits(pB.price, v0.price) ? v0 : pB; // der hoehere (bei Abwaertskorrektur)
+          if (jenseits(p5.price, neuB.price) || neuB.idx <= pA.idx) continue;
+          const istLaufend = nach === elliott;
+          folge[i] = { ...vor, phase: 'waveC',
+            points: [...vor.points.filter(q => q.idx <= pA.idx), { ...neuB, label: 'B', pending: false }] };
+          const cMark = { idx: vExt.idx, price: vExt.price, type: corrDown ? 'L' : 'H',
+            pending: istLaufend ? (!!vExt.pending || elliott.phase !== 'impulseDone') : false };
+          if (istLaufend) { elliott.waveOfPrior = 'C'; elliott.priorC = cMark; }
+          else {
+            // UNTERWELLEN VON (C) EINEN GRAD KLEINER (gemeldet: "(A)(B) oben, unten (C) und
+            // dazwischen 5 Wellen???"): Die 5 Wellen von (C) standen als (1)-(5) da -- derselbe
+            // Grad wie der grosse Anstieg, das las sich wie eine eigene Zaehlung. Nach Elliott
+            // besteht (C) aus fuenf Wellen des naechstkleineren Grads: i-ii-iii-iv-v, und das
+            // Ende von v IST (C). Deshalb: i-iv klein, am Extrem nur "(C)".
+            const klein = { '1': 'i', '2': 'ii', '3': 'iii', '4': 'iv', '5': 'v' };
+            folge[i + 1] = { ...nach, istWelleC: true,
+              points: nach.points.map(q => ({ ...q, label: q.idx === vExt.idx ? 'C' : (klein[String(q.label)] || q.label) })) };
+          }
+        }
+        // ZWEITE STUFE -- FLAT (3-3-5) DES GROESSEREN GRADS (gemeldet: "komische Zaehlung" / "ist
+        // nicht A das Tief 2023, B das Hoch 2024 und C das Tief 2026?"). Nach (5) folgte eine
+        // Korrektur bis zu einem Tief L1, dann ein Anstieg (hoechstens bis unter (5)), dann eine
+        // 5-Wellen-Bewegung WEIT unter L1. Dann war die Korrektur nach (5) bei L1 nicht fertig:
+        // (A) = L1, (B) = das Hoch dazwischen, (C) = die letzte 5-Wellen-Bewegung.
+        // Bewusst UNABHAENGIG davon, wie die Abschnitte dazwischen einzeln gezaehlt wurden (die
+        // erste Fassung verlangte genau einen dreiteiligen Abschnitt zwischen L1 und der letzten
+        // Bewegung und griff bei echten Daten nicht): massgeblich sind nur die Extrempunkte.
+        // Die Kleinbeschriftung zwischen (5) und dem Ende entfaellt -- die drei grossen Wellen
+        // stehen als eigene Marken (A)/(B)/(C) da.
+        {
+          const letzte = folge[folge.length - 1]; // laufende Zaehlung
+          // Ausgangspunkt: der aeusserste (5) aller frueheren Impulse (bei RUNE das Allzeithoch).
+          let iTop = -1;
+          folge.forEach((P, k) => {
+            if (P === letzte || P.kind !== 'impulse' || !lab(P, '5')) return;
+            if (letzte.kind === 'impulse' && P.dir === letzte.dir) return; // (5) muss VOR einer Gegenbewegung stehen
+            const v = lab(P, '5').price, w = iTop >= 0 ? lab(folge[iTop], '5').price : null;
+            if (iTop < 0 || (P.dir === 'up' ? v > w : v < w)) iTop = k;
+          });
+          // Kein frueherer Impuls mit (5) im Kontext? Dann gilt das aeusserste Hoch (bei einer
+          // Abwaertsbewegung jetzt) aller frueheren Punkte als Ausgangspunkt -- so haengt die grosse
+          // Zaehlung nicht daran, ob der Anstieg davor gerade mitgezaehlt wurde.
+          let topErsatz = null;
+          if (iTop < 0 && letzte.kind === 'impulse') {
+            const runter = letzte.dir === 'down';
+            folge.forEach((P, k) => {
+              if (P === letzte) return;
+              for (const q of P.points) if (!topErsatz || (runter ? q.price > topErsatz.q.price : q.price < topErsatz.q.price)) topErsatz = { k, q };
+            });
+            if (topErsatz) iTop = topErsatz.k;
+          }
+          if (iTop >= 0 && letzte.kind === 'impulse' && letzte.points.length >= 4) {
+            const top = folge[iTop], p5 = topErsatz ? topErsatz.q : lab(top, '5');
+            const corrDown = topErsatz ? letzte.dir === 'down' : top.dir === 'up', jenseits = (x, y) => (corrDown ? x < y : x > y);
+            // NUR FUER KORREKTUREN NACH UNTEN (gemeldet, 4H/Tageschart: Abwaertsimpuls 2025/26 wurde
+            // zu "(5)", der Anstieg danach zu (A)(B)(C) nach oben, und daraus "Welle III nach unten
+            // auf $0.198 / $0.081" abgeleitet -- im groesseren Bild ist dieser Abwaertsimpuls aber
+            // selbst die Welle (C) der grossen Korrektur seit 2021). Die Umdeutung zur grossen
+            // Korrektur (mit I/II/III) gibt es deshalb nur im klassischen Fall: Hoch (5) eines
+            // Anstiegs, danach eine Korrektur nach unten. Sonst bleibt die normale Zaehlung stehen.
+            if (corrDown && (letzte.dir === 'up') === !corrDown) {
+              const lExt = letzte.points.reduce((m, q) => (m == null || jenseits(q.price, m.price) ? q : m), null);
+              // alle Punkte zwischen (5) und dem Extrem der laufenden Bewegung (ohne dieses)
+              const dazw = [];
+              for (let k = iTop; k < folge.length; k++) for (const q of folge[k].points) if (q.idx > p5.idx && q.idx < lExt.idx) dazw.push(q);
+              const vorStart = dazw.filter(q => q.idx <= letzte.points[0].idx);
+              const L1 = vorStart.reduce((m, q) => (m == null || jenseits(q.price, m.price) ? q : m), null);
+              const nachL1 = L1 ? dazw.filter(q => q.idx > L1.idx) : [];
+              const Bp = nachL1.reduce((m, q) => (m == null || jenseits(m.price, q.price) ? q : m), null);
+              const lg = v => Math.log(v);
+              const ok = L1 && Bp && lExt && jenseits(lExt.price, L1.price) && !jenseits(p5.price, Bp.price)
+                && Math.abs(lg(Bp.price) - lg(L1.price)) >= 0.382 * Math.abs(lg(p5.price) - lg(L1.price))
+                && Bp.idx > L1.idx && lExt.idx > Bp.idx;
+              if (ok) {
+                // Kleinbeschriftung nach (5) ausblenden (Punkte/Linie bleiben fuer den Verlauf).
+                for (let k = iTop; k < folge.length - 1; k++) {
+                  const P = folge[k];
+                  folge[k] = { ...P, points: P.points.map(q => (q.idx > p5.idx ? { ...q, label: '' } : q)) };
+                }
+                // Ausgangspunkt ohne eigenen Impuls im Kontext: das aeusserste Hoch heisst (5), die
+                // uebrigen Beschriftungen seines Abschnitts entfallen (dort stand z. B. "(C)" am
+                // Allzeithoch -- neben dem grossen (A)(B)(C) wirkte das wie eine zweite Zaehlung).
+                if (topErsatz) {
+                  const P = folge[iTop];
+                  folge[iTop] = { ...P, points: P.points.map(q => ({ ...q, label: q.idx === p5.idx ? '5' : (q.idx < p5.idx ? '' : q.label) })) };
+                }
+                const typ = corrDown ? ['L', 'H'] : ['H', 'L'];
+                elliott.grossMarken = [
+                  { idx: L1.idx, price: L1.price, type: typ[0], text: '(A)' },
+                  { idx: Bp.idx, price: Bp.price, type: typ[1], text: '(B)' },
+                  // (C) NUR AM ENDE VON WELLE 5 (gemeldet: "(C)?" stand am Tief von Welle 3 -- das
+                  // ist das bisherige Extrem, aber nicht das Ende von (C); Welle 4 und 5 fehlen noch).
+                  // Laeuft die Zaehlung noch (kein Punkt "5"), entfaellt die (C)-Marke; das Ende
+                  // zeigt dann die Projektion der Welle 5.
+                  ...(() => {
+                    const p5c = letzte.points.find(q => String(q.label) === '5');
+                    return p5c ? [{ idx: p5c.idx, price: p5c.price, type: typ[0], text: '(C)', pending: !!p5c.pending || elliott.phase !== 'impulseDone' }] : [];
+                  })(),
+                ];
+                elliott.waveOfPrior = 'C';
+                // Start des grossen Anstiegs (Welle I): '0' des Impulses mit (5), sonst das aeusserste
+                // Tief davor (gegenueberliegendes Extrem) aller frueheren Punkte.
+                let start0 = topErsatz ? null : lab(folge[iTop], '0');
+                if (!start0) for (let k = 0; k <= iTop; k++) for (const q of folge[k].points) if (q.idx < p5.idx && (!start0 || (corrDown ? q.price < start0.price : q.price > start0.price))) start0 = q;
+                elliott.grossTop = { idx: p5.idx, price: p5.price, corrDown, start: start0 ? { idx: start0.idx, price: start0.price } : null };
+                elliott.priorC = null; // durch grossMarken ersetzt
+                elliott.flatGross = true;
+              }
+            }
+          }
+        }
+        for (let i = 0; i < prior.length; i++) prior[i] = folge[i];
+      }
+      elliott.prior = prior;
+      elliott.zuverl = RW_EW_ZUVERL[elliott.phase] || null;
+      if (RW_EW_OHNE_PROJEKTION.includes(elliott.phase) && Array.isArray(elliott.projection) && elliott.projection.length) {
+        elliott.projectionVersteckt = elliott.projection;
+        elliott.projection = [];
+      }
+
+      // UEBERGEORDNETE ZAEHLUNG (Makro) -- top-down, nicht rueckwaerts.
+      //
+      // Der erste Versuch scheiterte, weil er von rechts nach links arbeitete: Die roemischen
+      // Ziffern sassen dort, wo die Automatik zwei Strukturen trennte, nicht an den grossen
+      // Extrema. Jetzt umgekehrt, so wie ein Analyst vorgeht und wie es auch die Literatur
+      // beschreibt (Frost/Prechter: erst den groessten Grad bestimmen, dann hineinzoomen):
+      //
+      //   1. Die GROESSTEN Wendepunkte des Fensters bestimmen -- die groebste Zickzack-Stufe,
+      //      die noch mindestens vier Punkte liefert.
+      //   2. Darauf eine ganz normale Elliott-Zaehlung laufen lassen, mit denselben Regeln.
+      //      Das ergibt die uebergeordneten Wellen, deren Punkte auf echten Extrema liegen.
+      //   3. Die feine Zaehlung (oben) beschreibt weiterhin das laufende Geschehen und liegt
+      //      damit INNERHALB der letzten uebergeordneten Welle.
+      //
+      // Verlangt wird, dass die Makro-Zaehlung den Chart auch wirklich umspannt: Ihr Startpunkt
+      // muss im ersten Fuenftel des Fensters liegen, sonst ist es keine uebergeordnete Sicht,
+      // sondern nur eine weitere Zaehlung am rechten Rand -- und dann wird gar keine gezeigt.
+      elliott.macro = null;
+      // ENTFERNT (auf Wunsch): Die Ebene "Eine Ebene hoeher" (roemische Ziffern I-V, grosse A/B)
+      // wird nicht mehr berechnet. Ohne elliott.macro verschwinden Schalter, Kreise, Panel-Zeile
+      // und Hindernis-Eintraege von selbst, weil alle an E.macro haengen. Die hoehere Ebene fuer
+      // Flaggen steht jetzt als (1)/(2)/(3) am Muster. Wieder einschalten: true setzen.
+      const RW_MAKRO_EBENE = false;
+      if (RW_MAKRO_EBENE) {
+        // Robust statt "ein Versuch": ueber mehrere Zickzack-Stufen UND mehrere Startpunkte
+        // (die drei aeussersten Wendepunkte im ersten Fuenftel) alle gueltigen Zaehlungen
+        // sammeln und die mit der groessten Abdeckung nehmen. Der erste Anlauf probierte nur
+        // je einen Startpunkt -- scheiterte der an einer Nebenbedingung, gab es gar keine
+        // uebergeordnete Sicht, obwohl eine gueltige existierte.
+        const spanne = to - from + 1;
+        let bester = null;
+        for (const pct of [0.8, 0.6, 0.45, 0.34, 0.26, 0.2]) {
+          const z = zigzagUpTo(data, to, pct);
+          const pv = (z.pivots || []).filter(p => p.idx >= from);
+          if (pv.length < 4) continue;
+          const fruehe = pv.filter(p => p.idx <= from + spanne * 0.25);
+          if (!fruehe.length) continue;
+          // Startkandidaten: tiefster und hoechster fruehe Punkt, dazu der allererste.
+          const tief = fruehe.reduce((x, y) => y.price < x.price ? y : x);
+          const hoch = fruehe.reduce((x, y) => y.price > x.price ? y : x);
+          const starts = [...new Set([tief, hoch, fruehe[0]])];
+          for (const st of starts) {
+            const ab = pv.filter(p => p.idx >= st.idx);
+            if (ab.length < 4) continue;
+            const kand = detectElliott({ pivots: ab, pending: null }, lastClose, to, useLog, volumes, { forceStart: true });
+            if (!kand || kand.points.length < 4) continue;
+            const erster = kand.points[0].idx, letzter = kand.points[kand.points.length - 1].idx;
+            const abdeckung = (letzter - erster) / spanne;
+            if (abdeckung < 0.35) continue;              // keine uebergeordnete Sicht
+            if (erster > from + spanne * 0.3) continue;  // beginnt zu weit rechts
+            const wert = abdeckung + (kand.points.length >= 6 ? 0.1 : 0);
+            // Auswahl nach FRUEHESTEM Startpunkt (gemeldet: "Makro-Zaehlung startet am ATH statt
+            // am Tief 2019"): Vorher gewann schlicht die groesste "abdeckung" (+ Punkte-Bonus) --
+            // eine spaeter beginnende, aber zufaellig etwas laenger durchhaltende Zaehlung (z.B.
+            // ab dem ATH) schlug damit eine kuerzere, aber gueltige Zaehlung ab dem tatsaechlich
+            // fruehesten Wendepunkt. Fuer eine "uebergeordnete" (Makro-)Sicht ist aber genau der
+            // fruehe Beginn der Punkt -- also zuerst nach kleinstem "erster" sortieren und "wert"
+            // nur noch als Tie-Breaker zwischen mehreren Kandidaten mit demselben Start verwenden.
+            const besser = !bester || erster < bester.erster || (erster === bester.erster && wert > bester.wert);
+            if (besser) bester = { wert, kand, pct, abdeckung, erster };
+          }
+        }
+        if (bester) elliott.macro = {
+          kind: bester.kand.kind, dir: bester.kand.dir, phase: bester.kand.phase,
+          points: bester.kand.points, diagonal: !!bester.kand.diagonal,
+          truncated: !!bester.kand.truncated, pct: bester.pct,
+          coverage: Math.round(bester.abdeckung * 100),
+        };
+      }
+      // UEBERGEORDNETER GRAD (gemeldet: "drei verschiedene Zaehlungen je nach Zoom -- welche
+      // gilt?"): Wellen bestehen aus Wellen. Dieselbe Zaehlung noch einmal auf dem 4-fachen
+      // Zeitraum (grobe Pivots) ergibt den naechstgroesseren Grad. Der groessere Grad gibt die
+      // Richtung, der sichtbare das Timing. Konsistent heisst: die sichtbare Zaehlung liegt
+      // innerhalb der LAUFENDEN Welle des groesseren Grads und bewegt sich in dieselbe Richtung
+      // wie diese.
+      {
+        const bigFrom = clamp(to - 4 * refSpan, 0, from);
+        if (from - bigFrom > refSpan) {
+          const big = pivotsAuto(data, bigFrom, to, 12, 4, Math.min(0.35, atrPct * 2.6), 4 * refSpan);
+          const parent = detectElliott(big, lastClose, to, useLog, volumes);
+          if (parent && parent.points.length >= 3 && parent.points[0].idx < elliott.points[0].idx) {
+            // Beginn der LAUFENDEN Bewegung des groesseren Grads (nicht der letzte Pivot: die
+            // sichtbare Zaehlung darf die Unterwellen dieser ganzen Bewegung umfassen).
+            const pl = l => parent.points.find(p => p.label === l);
+            const startOfMove = parent.kind === 'impulse'
+              ? ({ wave2: pl('1'), wave3: pl('2'), wave4: pl('3'), wave5: pl('4') }[parent.phase] || pl('5') || parent.points[0])
+              : (parent.phase === 'corrDone' ? (pl('C') || parent.points[0]) : parent.points[0]);
+            const anchor = startOfMove || parent.points[0];
+            // Richtung der laufenden Welle des uebergeordneten Grads
+            const upPhases = { impulse: { wave2: !parent.dir || parent.dir === 'down', wave3: parent.dir === 'up', wave4: parent.dir === 'down', wave5: parent.dir === 'up', impulseDone: parent.dir === 'down', waveA: parent.dir === 'down', waveB: parent.dir === 'up', waveC: parent.dir === 'down', corrDone: parent.dir === 'up' }, corrective: { waveC: parent.dir === 'up', corrDone: parent.dir === 'down' } };
+            const parentWaveUp = (upPhases[parent.kind] || {})[parent.phase];
+            const curUp = elliott.kind === 'impulse' ? (['wave2', 'wave4', 'impulseDone', 'waveA', 'waveC'].includes(elliott.phase) ? elliott.dir === 'down' : ['waveB'].includes(elliott.phase) ? elliott.dir === 'up' : elliott.dir === 'up') : (elliott.phase === 'waveC' ? elliott.dir === 'up' : elliott.dir === 'down');
+            const inside = elliott.points[0].idx >= anchor.idx - 2;
+            elliott.parent = { kind: parent.kind, dir: parent.dir, phase: parent.phase, confidence: parent.confidence, points: parent.points, invalidation: parent.invalidation, consistent: inside && parentWaveUp === curUp, inside, sameDirection: parentWaveUp === curUp, degree: gradVon(parent) };
+            // (A)(B)(C) DES GROESSEREN GRADS MIT DER SICHTBAREN ZAEHLUNG ABGLEICHEN (gemeldet: "das
+            // ABC sieht nicht korrekt aus" -- Monatschart: (A)(B)(C) wurde in wenige Monate direkt
+            // nach (5) gequetscht, danach lief die sichtbare Zaehlung als 5-Wellen-Abwaertsbewegung
+            // weiter und deutlich TIEFER). Auf den groben Pivots endet die Korrektur am ersten
+            // tieferen Tief; laeuft die sichtbare Zaehlung danach in Korrekturrichtung weiter und
+            // unterschreitet dieses (C), war es nicht das Ende. Dann gilt: (B) = hoechster Punkt
+            // zwischen (A) und dem Start der sichtbaren Zaehlung (inkl. diesem Start), (C) = das
+            // Extrem der sichtbaren Bewegung -- die sichtbare 5-Wellen-Bewegung IST Welle (C).
+            const P = elliott.parent;
+            const pA = P.points.find(q => q.label === 'A'), pB = P.points.find(q => q.label === 'B'), pC = P.points.find(q => q.label === 'C');
+            const pTop = P.points.find(q => q.label === '5');
+            if (P.kind === 'impulse' && pA && pB && pTop && (P.phase === 'corrDone' || P.phase === 'waveC')) {
+              const corrDown = P.dir === 'up', jenseits = (a, b) => (corrDown ? a < b : a > b);
+              const vis = elliott.points, v0 = vis[0];
+              const vExt = vis.reduce((m, q) => (m == null || jenseits(q.price, m.price) ? q : m), null);
+              if (v0 && vExt && v0.idx >= pA.idx && vExt.idx > v0.idx && (!pC || jenseits(vExt.price, pC.price)) && jenseits(vExt.price, pA.price)) {
+                const bKand = [pB, ...vis.filter(q => q.idx <= vExt.idx && q.idx >= pA.idx && q.idx <= v0.idx + 0)].filter(Boolean);
+                const nB = bKand.reduce((m, q) => (m == null || jenseits(m.price, q.price) ? q : m), null);
+                // (B) darf beim Zickzack den Start von (A) nicht ueberschreiten -- sonst nichts umbauen.
+                if (nB && !jenseits(pTop.price, nB.price)) {
+                  const letzter = vis[vis.length - 1];
+                  const laeuft = vExt === letzter && (vExt.pending || elliott.phase !== 'impulseDone');
+                  const bisA = P.points.filter(q => q.idx <= pA.idx);
+                  elliott.parent = { ...P,
+                    points: [...bisA, { ...nB, label: 'B', pending: false }, { ...vExt, label: 'C', pending: !!laeuft }],
+                    phase: laeuft ? 'waveC' : 'corrDone',
+                    invalidation: laeuft ? { price: nB.price, below: !corrDown, ruleKey: 'proInvC' } : null,
+                    abgeglichen: true,
+                    inside: true, sameDirection: true, consistent: true };
+                }
+              }
+            }
+          }
+        }
+      }
+      // UNTERWELLEN der laufenden Welle: ab dem letzten BESTAETIGTEN Punkt der Zaehlung auf den
+      // feinen Pivots noch einmal zaehlen (i-ii-iii-iv-v bzw. a-b-c) -- so sieht man, wie weit
+      // die aktuelle Welle intern schon ist (z.B. "Welle 3 laeuft, intern in Unterwelle iii").
+      const confirmedPts = elliott.points.filter(p => !p.pending);
+      const anchor = confirmedPts.length ? confirmedPts[confirmedPts.length - 1] : null;
+      if (anchor) {
+        const fineSub = fineCtx.pivots.filter(p => p.idx >= anchor.idx);
+        const fineSet2 = { pivots: fineSub, pending: fineCtx.pending && fineCtx.pending.idx > anchor.idx ? fineCtx.pending : null };
+        if (fineSub.length + (fineSet2.pending ? 1 : 0) >= 3 && fineSub.length && Math.abs(fineSub[0].idx - anchor.idx) <= 2) {
+          const sub = detectElliott(fineSet2, lastClose, to, useLog, volumes);
+          if (sub && sub.points.length >= 3) {
+            const map = { '1': 'i', '2': 'ii', '3': 'iii', '4': 'iv', '5': 'v', 'A': 'a', 'B': 'b', 'C': 'c' };
+            elliott.sub = { kind: sub.kind, dir: sub.dir, phase: sub.phase, confidence: sub.confidence, points: sub.points.filter(p => p.label !== '0').map(p => ({ ...p, label: map[p.label] || p.label })), anchorLabel: anchor.label };
+          }
+        }
+      }
+    }
+    // WELLE 2 NACH WELLE 1 SELBST SETZEN (gemeldet: "die 1 wird eingezeichnet, aber nicht mehr --
+    // wo ist Welle 2 und die Prognose?"): Endet die Zaehlung mit Welle 1 und hat der Kurs seitdem
+    // mindestens 23,6 % davon zurueckgegeben, ohne den Start (0) zu verletzen, steht beim
+    // tiefsten (bzw. hoechsten) Punkt seit 1 eine laufende Welle 2. Prognose dann: Welle 3 =
+    // 2 + 1,618 x Welle 1 (Dauer ~1,6 x Welle 1). Gilt fuer die Haupt- und die neue Zaehlung.
+    const welle2Setzen = (z, zahlenStart) => {
+      try {
+        if (!z || !Array.isArray(z.points)) return;
+        const pts = z.points;
+        const p1 = pts[pts.length - 1];
+        const p0 = zahlenStart || pts[pts.length - 2];
+        if (!p1 || !p0 || String(p1.label) !== '1' || p1.pending) return;
+        const auf = p1.price > p0.price;
+        let ext = null;
+        for (let i = p1.idx + 1; i < data.length && i <= to; i++) {
+          const d = data[i]; if (!d) continue;
+          const v = auf ? (d.low != null ? d.low : d.value) : (d.high != null ? d.high : d.value);
+          if (v > 0 && (!ext || (auf ? v < ext.price : v > ext.price))) ext = { idx: i, price: v };
+        }
+        if (!ext) return;
+        const L = (a, b) => Math.abs(useLog ? Math.log(b) - Math.log(a) : b - a);
+        const w1 = L(p0.price, p1.price);
+        if (!(w1 > 0) || L(p1.price, ext.price) < 0.236 * w1) return;
+        if (auf ? ext.price <= p0.price : ext.price >= p0.price) return;   // Regel: Welle 2 nie unter den Start
+        pts.push({ idx: ext.idx, price: ext.price, type: auf ? 'L' : 'H', label: '2', pending: true });
+        z.phase = 'wave2';
+        const mv = (von, f) => useLog ? von * Math.exp((auf ? 1 : -1) * w1 * f) : von + (auf ? 1 : -1) * w1 * f;
+        const dur1 = Math.max(2, p1.idx - p0.idx);
+        if (z === elliott) {
+          elliott.projection = [{ label: '3', price: mv(ext.price, 1.618), dIdx: Math.max(3, Math.round(dur1 * 1.6) - Math.max(0, to - ext.idx)) }];
+          elliott.invalidation = { price: p0.price, below: auf, ruleKey: 'proInvRule1' };
+        } else z.ziel3 = mv(ext.price, 1.618);
+      } catch (e) {}
+    };
+    if (elliott) welle2Setzen(elliott);
+    // GROSSES BILD WEITERDENKEN (gefragt: "wieso wird nicht so prognostiziert wie im Wochenchart?"):
+    // Ist die Zaehlung ein fertiger 5er-Impuls, der zugleich das (C) einer fertigen Korrektur ist,
+    // kommt danach keine neue Korrektur "A", sondern ein NEUER IMPULS in Gegenrichtung der
+    // Korrektur. Projektion dann 1 (38,2 % der Korrektur zurueck) -> 2 (50 % von 1) -> 3 (1,618 x 1),
+    // ungueltig unter (C).
+    try {
+      const par = elliott && elliott.parent;
+      const parC = par && Array.isArray(par.points) ? par.points[par.points.length - 1] : null;
+      const parStart = par && Array.isArray(par.points) ? par.points.find(q => q.label === '0') || par.points[0] : null;
+      if (elliott && elliott.phase === 'impulseDone' && par && (par.phase === 'corrDone' || (parC && String(parC.label) === 'C' && !parC.pending)) && parStart && parC
+          && Array.isArray(elliott.projection) && elliott.projection.length && /^[A-Ca-c]$/.test(String(elliott.projection[0].label))) {
+        const auf = parC.price < parStart.price;   // Korrektur abwaerts -> neuer Impuls aufwaerts
+        const L = (a, b) => Math.abs(useLog ? Math.log(b) - Math.log(a) : b - a);
+        const mv = (von, len, f, dir) => useLog ? von * Math.exp(dir * len * f) : von + dir * len * f;
+        const korr = L(parStart.price, parC.price), d = auf ? 1 : -1;
+        const z1 = mv(parC.price, korr, 0.382, d);
+        const w1 = L(parC.price, z1);
+        const z2 = mv(z1, w1, 0.5, -d), z3 = mv(z2, w1, 1.618, d);
+        const dauer = Math.max(3, Math.round((parC.idx - parStart.idx) * 0.4));
+        const schon = Math.max(0, to - parC.idx);
+        elliott.projection = [
+          { label: '1', price: z1, dIdx: Math.max(2, dauer - schon) },
+          { label: '2', price: z2, dIdx: Math.max(3, dauer - schon) + Math.round(dauer * 0.6) },
+          { label: '3', price: z3, dIdx: Math.max(4, dauer - schon) + Math.round(dauer * 0.6) + Math.round(dauer * 1.6) },
+        ];
+        elliott.invalidation = { price: parC.price, below: auf, ruleKey: 'proInvNewImpulse' };
+        elliott.neuerImpulsProjektion = true;
+      }
+    } catch (e) {}
+    // NEUER IMPULS NACH FERTIGER ZAEHLUNG (gefragt: "Bildet sich gerade die 1. Welle? Die Engine
+    // muss doch etwas erkennen"): Ist die Zaehlung abgeschlossen (Korrektur oder Impuls fertig) und
+    // fand die Unterwellen-Suche nichts, die einfachste Lesart selbst setzen: groesstes Extrem
+    // seit dem Ende in Gegenrichtung = Welle 1 (wenn mind. 38,2 % der letzten Welle zurueckgeholt),
+    // danach das Gegenextrem = Welle 2 (laufend, solange es der letzte Punkt ist).
+    if (elliott && !elliott.sub && (elliott.phase === 'corrDone' || elliott.phase === 'impulseDone')) {
+      try {
+        const pts = elliott.points.filter(p => !p.pending);
+        const ende = pts[pts.length - 1], davor = pts[pts.length - 2];
+        if (ende && davor) {
+          const aufw = ende.price < davor.price;   // Ende ist ein Tief -> neuer Impuls aufwaerts
+          const L = (a, b) => Math.abs(useLog ? Math.log(b) - Math.log(a) : b - a);
+          const nach = [...(fineCtx.pivots || []), ...(fineCtx.pending ? [fineCtx.pending] : [])].filter(q => q.idx > ende.idx);
+          const p1 = nach.filter(q => q.type === (aufw ? 'H' : 'L')).reduce((m, q) => (!m || (aufw ? q.price > m.price : q.price < m.price) ? q : m), null);
+          if (p1 && L(ende.price, p1.price) >= 0.382 * L(davor.price, ende.price)) {
+            const nach1 = nach.filter(q => q.idx > p1.idx && q.type === (aufw ? 'L' : 'H'));
+            const p2 = nach1.reduce((m, q) => (!m || (aufw ? q.price < m.price : q.price > m.price) ? q : m), null);
+            const punkte = [{ ...p1, label: '1', pending: false }];
+            if (p2 && (aufw ? p2.price > ende.price : p2.price < ende.price) && L(p1.price, p2.price) >= 0.236 * L(ende.price, p1.price)) {
+              const letzter = nach[nach.length - 1];
+              punkte.push({ ...p2, label: '2', pending: letzter && letzter.idx === p2.idx });
+            }
+            elliott.sub = { kind: 'impulse', dir: aufw ? 'up' : 'down', phase: punkte.length > 1 ? 'wave2' : 'wave1', confidence: 0.4, points: punkte, anchorLabel: ende.label, neuerImpuls: true };
+            // Fehlt Welle 2 noch in den Pivots, aus den Kerzen bestimmen und Welle 3 projizieren.
+            if (punkte.length === 1) welle2Setzen(elliott.sub, ende);
+            if (punkte.length >= 1) {
+              const s2 = elliott.sub.points.find(q => q.label === '2');
+              if (s2) {
+                const w1s = Math.abs(useLog ? Math.log(p1.price) - Math.log(ende.price) : p1.price - ende.price);
+                const z3 = useLog ? s2.price * Math.exp((aufw ? 1 : -1) * w1s * 1.618) : s2.price + (aufw ? 1 : -1) * w1s * 1.618;
+                elliott.projection = [{ label: '3', price: z3, dIdx: Math.max(3, Math.round((p1.idx - ende.idx) * 1.6) - Math.max(0, to - s2.idx)) }];
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+    const indicators = evalIndicators(data, from, to, ma200Override, fineForRsi);
+    fibs.elliott = elliottFib(elliott, useLog);
+    rwFibWahrscheinlichkeit(fibs.elliott, data);
+    // Erreicht (per Docht) seit dem Ankerpunkt? -> Haken in Chart und Fenster.
+    if (false && fibs.elliott && fibs.elliott.anchor && Number.isFinite(fibs.elliott.anchor.idx)) {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = fibs.elliott.anchor.idx + 1; i < data.length; i++) {
+        const d = data[i]; if (!d) continue;
+        const l = d.low != null ? d.low : d.value, h = d.high != null ? d.high : d.value;
+        if (Number.isFinite(l) && l < lo) lo = l;
+        if (Number.isFinite(h) && h > hi) hi = h;
+      }
+      const ap = fibs.elliott.anchor.price;
+      fibs.elliott.levels.forEach(l => { l.erreicht = l.price < ap ? lo <= l.price : hi >= l.price; });
+    }
+    // GROSSER GRAD NACH FERTIGER FLAT-KORREKTUR (gemeldet: "die Fibonacci greift nicht auf den
+    // grossen Zeitraum, und die weitere Zaehlung wird auf einen kleineren Zeitraum bezogen").
+    // Ist (C) der grossen Flat fertig, endet damit die ganze Korrektur seit (5). Was folgt, ist
+    // nach Elliott ein NEUER Impuls im grossen Grad -- nicht ein kleines A-B-C der letzten
+    // 5-Wellen-Bewegung. Deshalb:
+    //  - Fibonacci: Rueckholung der GESAMTEN Korrektur (5)->(C) (23,6 / 38,2 / 50 / 61,8 %),
+    //  - Projektion: (1) bis 38,2 % der Korrektur, (2) zurueck um 61,8 % von (1), (3) = 1,618 x (1),
+    //    zeitlich nach der Dauer von (B)->(C) bemessen,
+    //  - Ungueltig: unter dem Tief von (C) (der neue Impuls darf seinen Start nicht unterschreiten).
+    if (elliott && elliott.flatGross && elliott.grossTop && elliott.grossMarken && elliott.grossMarken[2] && !elliott.grossMarken[2].pending) {
+      const T5 = elliott.grossTop, Bm = elliott.grossMarken[1], Cm = elliott.grossMarken[2];
+      const auf = T5.corrDown ? 1 : -1;
+      const L = v => (useLog ? Math.log(v) : v), E_ = v => (useLog ? Math.exp(v) : v);
+      const retr = r => E_(L(Cm.price) + r * (L(T5.price) - L(Cm.price)));
+      // Dazu die Fibonacci-Verhaeltnisse INNERHALB des grossen A-B-C (gefragt: "warum wird die
+      // Fibonacci nicht auf das grosse ABC angewendet?"): Laenge von (C) im Verhaeltnis zu (A),
+      // abgetragen ab (B) -- 1,0 / 1,272 / 1,618 x (A). Sie zeigen, an welcher Stufe (C) geendet
+      // hat (mit Haken, wenn erreicht); die Rueckholungsstufen (5)-(C) zeigen die Ziele danach.
+      const Am = elliott.grossMarken[0];
+      const lenA = L(Am.price) - L(T5.price);
+      const cExt = [1, 1.272, 1.618].map(r => ({ r, wave: '(A)', price: E_(L(Bm.price) + r * lenA), cExt: true })).filter(l => l.price > 0);
+      fibs.elliott = { id: 'elliott', anchor: { idx: Cm.idx, price: Cm.price, label: '(C)' }, label: '(1)', phase: 'neuerZyklus',
+        levels: [...[0.236, 0.382, 0.5, 0.618].map(r => ({ r, wave: '(5)\u2013(C)', price: retr(r) })).filter(l => l.price > 0), ...cExt], drawFromIdx: Bm.idx };
+      {
+        let lo = Infinity, hi = -Infinity;
+        for (let i = Cm.idx + 1; i < data.length; i++) { const d = data[i]; if (!d) continue; const l = d.low != null ? d.low : d.value, h = d.high != null ? d.high : d.value; if (l < lo) lo = l; if (h > hi) hi = h; }
+        fibs.elliott.levels.forEach(l => { if (!l.cExt) l.erreicht = l.price < Cm.price ? lo <= l.price : hi >= l.price; });
+        // (C)-Stufen: erreicht, wenn (C) sie erreicht hat (Extrem seit (B)).
+        fibs.elliott.levels.forEach(l => { if (l.cExt) l.erreicht = T5.corrDown ? Cm.price <= l.price : Cm.price >= l.price; });
+      }
+      const len = Math.max(6, Cm.idx - Bm.idx), schon = Math.max(0, to - Cm.idx);
+      // (1): erste noch nicht erreichte Stufe ab 38,2 %
+      const rueck = fibs.elliott.levels.filter(l => !l.cExt);
+      const z1 = (rueck.find(l => l.r >= 0.382 && !l.erreicht) || rueck[rueck.length - 1]).price;
+      const l1 = L(z1) - L(Cm.price);
+      const z2 = E_(L(z1) - 0.618 * l1), z3 = E_(L(z2) + 1.618 * l1);
+      const d1 = Math.max(2, Math.round(len * 0.4) - schon), d2 = d1 + Math.max(2, Math.round(len * 0.25)), d3 = d2 + Math.max(3, Math.round(len * 0.6));
+      if (z1 > 0 && z2 > 0 && z3 > 0 && (auf > 0 ? z3 > z1 : z3 < z1)) {
+        // KEIN PFAD FUER (1)-(2)-(3) (gemeldet: "Welle 1 kann man doch gar nicht voraussagen"):
+        // Richtig -- fuer die erste Welle eines neuen Trends gibt es keine Messgroesse (Fibonacci-
+        // Ziele beziehen sich immer auf eine VORHERIGE Welle desselben Trends). Die Rueckhol-
+        // stufen (5)-(C) sind nur moegliche Widerstaende, keine Ziele fuer (1). Eine Projektion
+        // gibt es erst, wenn (1) und (2) stehen; dann rechnet die normale Zaehlung (2) und (3).
+        // Was bleibt: Rueckholstufen, die Ziele fuer Welle III des grossen Grads (aus I und II
+        // messbar) und die Ungueltigkeit unter (C).
+        void z2; void z3; void d1; void d2; void d3;
+        elliott.projection = [];
+        elliott.invalidation = { price: Cm.price, below: auf > 0, ruleKey: 'proInvNewImpulse' };
+        elliott.weiche = null;
+        elliott.neuerZyklus = true;
+        // (Unterzaehlung der neuen Bewegung: siehe NACHLAUF-ZAEHLUNG weiter unten.)
+        // WELLE III DES GROSSEN GRADS (gefragt: "wenn 2019-2021 Welle 1 und dann 2 durch ABC,
+        // warum gibt es keine Prognose der Welle 3?"): Der ganze Anstieg bis (5) ist Welle I, die
+        // fertige Flat-Korrektur (A)(B)(C) Welle II. Welle III wird ab dem Ende von II mit dem
+        // Ueblichen abgetragen: 1,0 / 1,618 / 2,618 x Laenge von I. Laengen in der Skala des
+        // Charts (Log: Verhaeltnis, linear: Dollar) -- bei Coins, die aus wenigen Cent kamen,
+        // ergibt Log riesige Zahlen; deshalb wird die jeweils andere Rechnung mit ausgewiesen.
+        if (T5.start && T5.start.price > 0) {
+          const lenI = L(T5.price) - L(T5.start.price);
+          const lenILin = T5.price - T5.start.price, lenILog = Math.log(T5.price / T5.start.price);
+          // FOLGT DER SKALA DES CHARTS (auf Wunsch: "ja, auf Log"): Log-Ansicht -> Laenge von I als
+          // Verhaeltnis, lineare Ansicht -> in Dollar. Die jeweils andere Rechnung steht zum
+          // Vergleich im Analyse-Fenster. Hinweis: kam I aus wenigen Cent, ergibt Log sehr hohe Ziele.
+          elliott.grossW3 = [1, 1.618, 2.618].map(r => ({
+            r, price: E_(L(Cm.price) + auf * Math.abs(lenI) * r),
+            alt: useLog ? Cm.price + auf * Math.abs(lenILin) * r : Cm.price * Math.exp(auf * Math.abs(lenILog) * r),
+            altLog: !useLog,
+          })).filter(x => x.price > 0);
+        }
+      }
+    }
+    // NACHLAUF-ZAEHLUNG NACH WELLE 5 (gefragt: "wo ist die Zaehlung nach Welle 5?"). Ist ein Impuls
+    // fertig, zeigte die Engine danach oft gar nichts mehr: Die Wendepunkte der gewaehlten
+    // Feinheit sind auf den GANZEN Ausschnitt abgestimmt (hoechstens ~24), und die kleineren
+    // Schwuenge nach Welle 5 werden davon verschluckt. Hier wird der Abschnitt ab dem Ende von
+    // Welle 5 eigens mit einer feineren Schwelle gezaehlt:
+    //  - neuer Zyklus (grosse Korrektur fertig): als Impuls i-ii-iii-iv-v in die neue Richtung,
+    //  - sonst: als Korrektur a-b-c gegen den Impuls.
+    // Regeln: Impuls -- ii nicht unter den Start, iii ueber i, iv nicht in i, v ueber iii;
+    // Korrektur -- b nicht ueber das Ende von 5 hinaus, c jenseits von a. Die letzte, noch nicht
+    // bestaetigte Bewegung zaehlt mit "?" (laufend). Projektion nur mit Bezugswelle:
+    // Impuls ab i+ii -> iii = 1,618 x i, ab iii -> iv = 38,2 % von iii, ab iv -> v = Laenge von i;
+    // Korrektur ab a+b -> c = Laenge von a.
+    try {
+      const p5 = elliott && elliott.kind === 'impulse' && elliott.points.find(q => q.label === '5' && !q.pending);
+      const startPunkt = elliott && elliott.neuerZyklus && elliott.grossMarken && elliott.grossMarken[2]
+        ? { idx: elliott.grossMarken[2].idx, price: elliott.grossMarken[2].price }
+        : (p5 && elliott.phase === 'impulseDone' && !elliott.points.some(q => /^[ABC]$/.test(String(q.label)) && q.idx > p5.idx) ? { idx: p5.idx, price: p5.price } : null);
+      // (Nur, wenn die Zaehlung NACH Welle 5 noch nichts gezaehlt hat -- gemeldet: "was ist dieser
+      // Doppelstrich?": Die Hauptzaehlung fuehrte schon A-B-C, und die Nachlauf-Zaehlung zeichnete
+      // ihr a-b-c fast deckungsgleich daneben.)
+      if (startPunkt && to - startPunkt.idx >= 4) {
+        const impuls = !!elliott.neuerZyklus;
+        const runter = elliott.neuerZyklus ? !(elliott.grossTop && elliott.grossTop.corrDown) : elliott.dir === 'up'; // Richtung der NEUEN Bewegung (gegen den Impuls)
+        const auf2 = runter ? -1 : 1;
+        const Lg = v => (useLog ? Math.log(v) : v), Eg = v => (useLog ? Math.exp(v) : v);
+        // Schwelle relativ zur Spanne des Abschnitts selbst (20 % davon, auf der Log-Skala): so
+        // zaehlen die grossen Schwuenge, nicht jedes Zittern -- unabhaengig vom Zeitraum.
+        let segHi = -Infinity, segLo = Infinity;
+        for (let i = startPunkt.idx; i <= to; i++) { const d = data[i]; if (!d) continue; const h = d.high != null ? d.high : d.value, l = d.low != null ? d.low : d.value; if (h > segHi) segHi = h; if (l < segLo) segLo = l; }
+        const spanneLog = segLo > 0 && segHi > segLo ? Math.log(segHi / segLo) : 0.3;
+        const pct = Math.max(0.06, Math.min(0.35, Math.exp(0.2 * spanneLog) - 1, Math.max(0.06, (atrPct || 0.05) * 4)));
+        // FEHLAUSBRUCH (DOCHT) NICHT ALS WELLE ZAEHLEN (gemeldet: "dort nicht als Welle beachten,
+        // koennte ein Fake-Out gewesen sein" -- Wochenchart: ein einzelner Docht auf 0,631 bei
+        // Schluss 0,457 wurde zu Welle i, Welle iii wirkte dadurch zu kurz). Fuer diese Zaehlung
+        // werden Kerzen, deren Hoch bzw. Tief nur aus EINEM Docht besteht (Docht > 60 % der Kerze,
+        // Nachbarkerzen erreichen nicht einmal dessen Mitte), auf ihren Koerper gekuerzt -- vor der
+        // Suche nach Wendepunkten, damit der Docht keinen Schwung "erfindet".
+        const datenOhneDocht = data.map((d, i) => {
+          if (!d || d.open == null || d.high == null || d.low == null || i < startPunkt.idx) return d;
+          const sp = d.high - d.low; if (!(sp > 0)) return d;
+          const kOben = Math.max(d.open, d.close), kUnten = Math.min(d.open, d.close);
+          const nb = [data[i - 1], data[i + 1]].filter(Boolean);
+          let h = d.high, l = d.low;
+          if (d.high - kOben > 0.6 * sp && nb.length && nb.every(x => x.high < kOben + (d.high - kOben) * 0.5)) h = kOben;
+          if (kUnten - d.low > 0.6 * sp && nb.length && nb.every(x => x.low > kUnten - (kUnten - d.low) * 0.5)) l = kUnten;
+          return h === d.high && l === d.low ? d : { ...d, high: h, low: l };
+        });
+        const zz = zigzag(datenOhneDocht, startPunkt.idx, to, pct);
+        const piv = (zz && zz.pivots ? zz.pivots : []).filter(q => q.idx > startPunkt.idx);
+        if (zz && zz.pending && zz.pending.idx > startPunkt.idx) piv.push({ ...zz.pending, laufend: true });
+        const hT = auf2 > 0 ? 'H' : 'L', tT = auf2 > 0 ? 'L' : 'H';
+        const ueber = (x, y) => (auf2 > 0 ? x > y : x < y);
+        const folgeP = [];
+        for (const q of piv.sort((x, y) => x.idx - y.idx)) {
+          const erw = folgeP.length % 2 === 0 ? hT : tT;
+          if (q.type === erw) folgeP.push(q);
+          else if (folgeP.length && q.type === folgeP[folgeP.length - 1].type) {
+            const l = folgeP[folgeP.length - 1];
+            if (q.type === hT ? ueber(q.price, l.price) : ueber(l.price, q.price)) folgeP[folgeP.length - 1] = q;
+          }
+        }
+        const labs = impuls ? ['i', 'ii', 'iii', 'iv', 'v'] : ['a', 'b', 'c'];
+        const pts = [];
+        for (let k = 0; k < folgeP.length && k < labs.length; k++) {
+          const q = folgeP[k];
+          if (impuls) {
+            if (k === 1 && !ueber(q.price, startPunkt.price)) break;
+            if ((k === 2 || k === 3) && !ueber(q.price, pts[0].price)) break;
+            if (k === 4 && !ueber(q.price, pts[2].price)) break;
+          } else {
+            const p5price = startPunkt.price;
+            if (k === 1 && !ueber(q.price, p5price)) break;            // b nicht ueber 5 hinaus
+            if (k === 2 && !ueber(q.price, pts[0].price)) break;       // c jenseits von a
+          }
+          pts.push({ ...q, label: labs[k] }); // ohne "?" (auf Wunsch)
+          if (q.laufend) break;
+        }
+        // LETZTE WELLE BIS ZU IHREM ECHTEN ENDE VERLAENGERN (gemeldet: "dieses kleine abc ist
+        // falsch" -- c sass auf einer Zwischenspitze, danach lief der Kurs noch hoeher). Eine c-
+        // bzw. v-Welle besteht selbst aus Teilwellen; ein Ruecksetzer darin ist kein neues
+        // Ereignis, solange er die vorige Welle (b bzw. iv) nicht unterschreitet. Das Ende ist
+        // deshalb das aeusserste Extrem in Wellenrichtung, bis eine Gegenbewegung unter b/iv
+        // faellt.
+        if (pts.length >= 3 && pts.length === labs.length) {
+          const li = pts.length - 1, vorLetzt = pts[li - 1];
+          const startIdx = folgeP.findIndex(q => q.idx === pts[li].idx);
+          let best = pts[li];
+          for (let k2 = startIdx + 1; k2 < folgeP.length; k2++) {
+            const q = folgeP[k2];
+            if (q.type !== hT && !ueber(q.price, vorLetzt.price)) break; // Gegenbewegung unter b/iv
+            if (q.type === hT && ueber(q.price, best.price)) best = q;
+          }
+          if (best !== pts[li]) pts[li] = { ...best, label: labs[li] };
+        }
+        if (pts.length) {
+          const lI = Lg(pts[0].price) - Lg(startPunkt.price);
+          const dI = Math.max(2, pts[0].idx - startPunkt.idx);
+          const fertig = pts.filter(q => !q.laufend);
+          let ziel = null;
+          if (impuls) {
+            // BODEN FUER WELLE ii (gefragt: "wo waere der Boden fuer Welle 2?"): Rueckholung von i,
+            // ueblich 50-61,8 %, hoechstens bis kurz vor den Start (78,6 %). Ziel = 61,8 %.
+            if (fertig.length === 1) {
+              const lI1 = Lg(fertig[0].price) - Lg(startPunkt.price);
+              const stufe = r => Eg(Lg(fertig[0].price) - r * lI1);
+              ziel = { label: 'ii', price: stufe(0.618), dBars: Math.round(dI * 0.6), stufen: [0.5, 0.618, 0.786].map(r => ({ r, price: stufe(r) })) };
+              // Und wohin iii danach liefe (gewuenscht: "ich will sehen, wo Welle 3 enden koennte"):
+              // 1,618 x i ab dem Ziel von ii, dazu 1 x und 2,618 x als Spanne.
+              const ab = Lg(ziel.price);
+              ziel.danach = { label: 'iii', price: Eg(ab + 1.618 * lI1), dBars: Math.round(dI * 1.6), spanne: [1, 2.618].map(r => ({ r, price: Eg(ab + r * lI1) })) };
+            } else if (fertig.length === 2) ziel = { label: 'iii', price: Eg(Lg(fertig[1].price) + 1.618 * lI), dBars: Math.round(dI * 1.6) };
+            else if (fertig.length === 3) ziel = { label: 'iv', price: Eg(Lg(fertig[2].price) - 0.382 * (Lg(fertig[2].price) - Lg(fertig[1].price))), dBars: Math.round(dI * 0.6) };
+            else if (fertig.length === 4) ziel = { label: 'v', price: Eg(Lg(fertig[3].price) + lI), dBars: dI };
+          } else if (fertig.length === 2) ziel = { label: 'c', price: Eg(Lg(fertig[1].price) + lI), dBars: dI };
+          // ERREICHT? (gemeldet: "warum c bei $0.72, obwohl wir schon drunter sind?") -- Ziel der
+          // laufenden Welle mit dem bisherigen Extrem seit dem letzten fertigen Punkt vergleichen.
+          // Wellenrichtung der Zielwelle: c/iii/v laufen wie a/i (Index gerade), iv wie ii.
+          if (ziel && ziel.price > 0) {
+            const lzt = fertig[fertig.length - 1];
+            const zielAuf = (fertig.length % 2 === 0) ? auf2 > 0 : auf2 < 0;
+            let ex = null;
+            for (let i = lzt.idx + 1; i <= to; i++) { const d = data[i]; if (!d) continue; const v = zielAuf ? (d.high != null ? d.high : d.value) : (d.low != null ? d.low : d.value); if (ex == null || (zielAuf ? v > ex : v < ex)) ex = v; }
+            ziel.erreicht = ex != null && (zielAuf ? ex >= ziel.price : ex <= ziel.price);
+          }
+          elliott.nachlauf = { points: pts, start: startPunkt, ziel: ziel && ziel.price > 0 ? ziel : null, art: impuls ? 'impuls' : 'korrektur' };
+          // EINE ZAEHLUNG, NICHT ZWEI (gemeldet: "es ueberlappen sich immer noch Wellenzaehlungen"):
+          // Die Nachlauf-Zaehlung ist die genauere (Dochtfilter, Regeln, Ziele) -- die einfache
+          // 1-2-Lesart von oben entfaellt dann.
+          // Gleiches gilt fuer die Unterwellen-Suche, wenn sie denselben Abschnitt zaehlt (Monatschart:
+          // i-ii doppelt).
+          if (elliott.sub && (elliott.sub.neuerImpuls || (elliott.sub.points || []).some(q => q.idx >= startPunkt.idx))) delete elliott.sub;
+          // Eine zweite Projektion (das grosse A-B-C der Engine) widerspraeche der gezaehlten
+          // Bewegung -- es gilt die Nachlauf-Zaehlung mit ihrem eigenen Ziel.
+          elliott.projection = [];
+        }
+      }
+    } catch (e) { /* Zusatz -- ohne ihn bleibt alles wie vorher */ }
+    fibs.confluence = fibConfluence(fibs, sr, tolLog);
+    const fib = fibs.swing || fibs.major; // Rueckwaertskompatibel: "das" aktuelle Fib
+    let score = scoreAll(trend, sr, elliott, fib, indicators, lastClose);
+    if (elliott && elliott.scenarios && elliott.scenarios.length) {
+      // Korrekturen: groesserer Grad (passend -> Hauptszenario +8, sonst -8), Indikatoren
+      // (Bull-Anteil verschiebt bis zu +/-10 in Richtung), S/R-Zone nahe dem Ziel des
+      // "laeuft darueber hinaus"-Szenarios (-5). Danach auf 100 normiert.
+      const sc = elliott.scenarios;
+      const par = elliott.parent;
+      const tilt = Math.max(-10, Math.min(10, Math.round((score.bullPct - 50) / 5)));
+      for (const x of sc) {
+        if (par) x.prob += (x.key === 'scenContinue' || x.key === 'scenCDone' || x.key === 'scenNext' || x.key === 'scenResume' || x.key === 'scenNewImpulse' || x.key === 'scenCorrection') ? (par.consistent ? 8 : -8) : (par.consistent ? -4 : 4);
+        x.prob += x.dir === 'up' ? tilt : -tilt;
+        if (x.key === 'scenExtend' && x.target) {
+          const near = [...sr.supports, ...sr.resistances].some(z => Math.abs(ln(z.price) - ln(x.target)) < 0.03);
+          if (near) x.prob -= 5;
+        }
+        x.prob = Math.max(5, x.prob);
+      }
+      const sum = sc.reduce((a, x) => a + x.prob, 0) || 1;
+      let acc = 0;
+      sc.forEach((x, i) => { x.prob = i === sc.length - 1 ? 100 - acc : Math.round(x.prob / sum * 100); acc += x.prob; });
+    }
+    // KLEINE ZEITRAEUME BESTAETIGEN DIE GROSSEN (gefordert: "die kleineren Zeitraeume muessen dem
+    // groesseren entsprechen und ihn bestaetigen, nicht das andere behaupten"). Bei 4H/1H usw.
+    // reicht die eigene Kurshistorie (wenige Monate) nicht fuer das grosse Bild -- der 4H-Chart
+    // zaehlte deshalb winzige Schwuenge direkt nach dem Tief als 1-2-3-4-5. Jetzt liefert die App
+    // die Zaehlung des WOCHENCHARTS mit (kontextExtern: Punkte mit Datum). Die Punkte werden auf
+    // die Kerzen dieses Zeitraums gelegt (Extrem innerhalb der jeweiligen Woche), und die feine
+    // Zaehlung laeuft nur noch INNERHALB der aktuellen grossen Welle (z. B. a-b-c von Welle 2).
+    try {
+      const kx = kontextExtern;
+      if (kx && Array.isArray(kx.punkte) && kx.punkte.length && elliott) {
+        const T = i => Number(data[i] && (data[i].date != null ? data[i].date : data[i].time));
+        const hiOf = d => (d.high != null ? d.high : d.value), loOf = d => (d.low != null ? d.low : d.value);
+        // Echte Kerzen (nicht dochtgefiltert): Der Wochenchart hat das Extrem bereits geprueft.
+        const roh = rohDaten && rohDaten.length === data.length ? rohDaten : data;
+        const finde = (pkt, oben) => {
+          let best = null;
+          for (let i = 0; i <= to; i++) {
+            // Kerze ueberschneidet die Woche (auch Monatskerzen, die laenger als eine Woche sind).
+            const t0 = T(i), t1 = i + 1 < data.length ? T(i + 1) : t0 + (i > 0 ? t0 - T(i - 1) : 86400e3);
+            if (!(t0 < pkt.bis && t1 > pkt.von)) continue;
+            const v = oben ? hiOf(roh[i]) : loOf(roh[i]);
+            if (v > 0 && (!best || (oben ? v > best.price : v < best.price))) best = { idx: i, price: v };
+          }
+          return best;
+        };
+        const auf = kx.punkte[0].price > kx.start.price;
+        const start = finde(kx.start, !auf);
+        const gelegtAlle = kx.punkte.map((q, k) => { const oben = (k % 2 === 0) === auf; const f = finde(q, oben); return f ? { ...f, type: oben ? 'H' : 'L', label: q.label, pending: !!q.laeuft } : null; });
+        // KURZE HISTORIE (getestet: 4H-Charts reichen nur ~16 Monate zurueck, der Wochen-Rahmen beginnt
+        // 2024): Punkte VOR dem ersten Kursdatum fehlen hier einfach -- die spaeteren werden trotzdem
+        // gelegt, solange alle ab dem ersten gefundenen Punkt da sind.
+        const ersterDa = gelegtAlle.findIndex(Boolean);
+        const datenStart = T(0);
+        const vorDaten = ersterDa > 0 && gelegtAlle.slice(0, ersterDa).every((g, k) => !g && kx.punkte[k].bis <= datenStart + 7 * 86400e3);
+        const gelegt = vorDaten ? gelegtAlle.slice(ersterDa) : gelegtAlle;
+        if (!(gelegt.length && gelegt.every(Boolean))) elliott.kontextFehler = 'Punkte des Wochencharts nicht in diesen Kerzen gefunden (' + gelegt.filter(Boolean).length + '/' + gelegt.length + ')';
+        // Auch wenn der letzte grosse Punkt VOR dem Ausschnitt liegt (z. B. SOL: Welle 3 im Mai, der
+        // Ausschnitt zeigt nur die laufende Welle 4) -- der Rahmen gilt trotzdem.
+        if (gelegt.length && gelegt.every(Boolean)) {
+          // Laufende letzte Welle: ihr Extrem bis JETZT in diesem Zeitraum
+          const letzt = gelegt[gelegt.length - 1];
+          if (letzt.pending) {
+            const oben = letzt.type === 'H';
+            const vorher = gelegt[gelegt.length - 2] || start;
+            for (let i = (vorher ? vorher.idx + 1 : 0); i <= to; i++) { const v = oben ? hiOf(data[i]) : loOf(data[i]); if (v > 0 && (oben ? v > letzt.price : v < letzt.price)) { letzt.idx = i; letzt.price = v; } }
+          }
+          const pts = [...(start && !vorDaten ? [{ ...start, type: auf ? 'L' : 'H', label: '0', pending: false }] : []), ...gelegt];
+          const korrektur = kx.art === 'korrektur' || gelegt.some(q => /^[A-E]$/.test(String(q.label)));
+          elliott.kind = korrektur ? 'correction' : 'impulse'; elliott.dir = auf ? 'up' : 'down';
+          elliott.points = pts;
+          elliott.phase = kx.phase || ('wave' + gelegt.length);
+          elliott.projection = (kx.projektion || []).map((q, k) => ({ label: q.label, price: q.price, dIdx: Math.max(3, Math.round((q.tage || 14) * (kx.balkenJeTag || 1))) }));
+          // Ungueltigkeit nach dem Start der Struktur -- auch wenn er vor den Kursdaten liegt.
+          const startPreis = start ? start.price : kx.start && kx.start.price;
+          if (startPreis > 0) elliott.invalidation = { price: startPreis, below: auf, ruleKey: korrektur ? 'proInvCorrStart' : gelegt.length >= 2 ? 'proInvRule1' : 'proInvNewImpulse' };
+          elliott.kontextZaehlung = true; elliott.kontextQuelle = kx.quelle || 'W';
+          delete elliott.nachlauf; delete elliott.parent;
+          // NACH FERTIGEM 5er: DIE KORREKTUR DANACH ZAEHLEN (gemeldet bei RUNE/BTC: Wochen-Rahmen "0-5
+          // fertig", danach zeigte der Chart nur ein loses a-b-c und ein Ziel fuer eine laengst fertige
+          // Welle 5). Seit dem Ende von 5 ist der Kurs in Gegenrichtung gelaufen = Welle A; laeuft er
+          // seit dem Extrem von A wieder mindestens 23,6 % zurueck = Welle B (laufend). Ziele:
+          // B = 50/61,8 % von A, danach C = 1 x A ab B.
+          try {
+            const p5 = elliott.points[elliott.points.length - 1];
+            if (p5 && String(p5.label) === '5' && !p5.pending && elliott.kind === 'impulse') {
+              const Lg = v => (useLog ? Math.log(v) : v), Eg = v => (useLog ? Math.exp(v) : v);
+              const korrAuf = p5.type === 'L';   // nach Abwaerts-Impuls laeuft die Korrektur aufwaerts
+              let aP = null;
+              for (let i = p5.idx + 1; i <= to; i++) { const d = data[i]; if (!d) continue; const v = korrAuf ? hiOf(roh[i]) : loOf(roh[i]); if (v > 0 && (!aP || (korrAuf ? v > aP.price : v < aP.price))) aP = { idx: i, price: v }; }
+              if (aP) {
+                const lenA = Math.abs(Lg(aP.price) - Lg(p5.price));
+                let bP = null;
+                for (let i = aP.idx + 1; i <= to; i++) { const d = data[i]; if (!d) continue; const v = korrAuf ? loOf(roh[i]) : hiOf(roh[i]); if (v > 0 && (!bP || (korrAuf ? v < bP.price : v > bP.price))) bP = { idx: i, price: v }; }
+                const bRueck = bP && lenA > 0 ? Math.abs(Lg(aP.price) - Lg(bP.price)) / lenA : 0;
+                // Start der Struktur, auch wenn er vor den Kursdaten liegt (kurze 4H-Historie).
+                const p0i = elliott.points.find(q => q.label === '0') || (kx.start && kx.start.price > 0 ? { price: kx.start.price } : null);
+                const gesamt = p0i ? Math.abs(Lg(p5.price) - Lg(p0i.price)) : 0;
+                // A-B-C SCHON IN DER BEWEGUNG SEIT 5? (gemeldet: "ABC ist schon gebildet, finde ich" --
+                // RUNE 4H: nach 5 erst ein Tief, ein Ruecksetzer nach oben, dann ein tieferes Tief. Gezaehlt
+                // wurde das tiefere Tief als A und der jetzige Anstieg als B.) Gesucht wird im Abschnitt
+                // 5 -> Extrem ein Zwischen-Tief (a) mit Gegenbewegung (b), die
+                //   - mindestens 23,6 % von a zurueckholt und nicht ueber 5 hinaus laeuft,
+                //   - von einem neuen Extrem jenseits von a abgeloest wird (c),
+                //   - mit c mindestens 61,8 % so lang wie a (sonst ist es nur ein Zittern in a),
+                //   - und a mindestens 30 % der ganzen Strecke 5 -> Extrem ausmacht.
+                // Gibt es mehrere, gilt die mit der kraeftigsten Gegenbewegung. Dann ist die Korrektur
+                // A-B-C fertig, wenn der Kurs seit dem Extrem schon wieder 23,6 % der Korrektur holt.
+                let abc = null;
+                try {
+                  const ges = Math.abs(Lg(aP.price) - Lg(p5.price));
+                  let lauf = null;
+                  for (let i = p5.idx + 1; i < aP.idx; i++) {
+                    const d = roh[i]; if (!d) continue;
+                    const ext = korrAuf ? hiOf(d) : loOf(d), geg = korrAuf ? loOf(d) : hiOf(d);
+                    if (ext > 0 && (!lauf || (korrAuf ? ext > lauf.price : ext < lauf.price))) lauf = { idx: i, price: ext };
+                    if (!lauf || !(geg > 0) || i <= lauf.idx + 1) continue;
+                    const lA = Math.abs(Lg(lauf.price) - Lg(p5.price));
+                    if (!(lA > 0) || lA < 0.3 * ges) continue;
+                    if (korrAuf ? geg <= p5.price : geg >= p5.price) continue; // b nicht ueber 5 hinaus
+                    const rueck = Math.abs(Lg(lauf.price) - Lg(geg)) / lA;
+                    const lC = Math.abs(Lg(aP.price) - Lg(geg));
+                    if (rueck >= 0.236 && rueck < 1 && lC >= 0.618 * lA && (!abc || rueck > abc.rueck))
+                      abc = { a: { ...lauf }, b: { idx: i, price: geg }, rueck };
+                  }
+                } catch (x) { abc = null; }
+                if (abc && lenA > 0 && gesamt > 0) {
+                  const lenK = Math.abs(Lg(aP.price) - Lg(p5.price));
+                  const seitC = bP ? Math.abs(Lg(bP.price) - Lg(aP.price)) / lenK : 0;
+                  const cFertig = seitC >= 0.236;
+                  elliott.points.push({ idx: abc.a.idx, price: abc.a.price, type: korrAuf ? 'H' : 'L', label: 'A', pending: false });
+                  elliott.points.push({ idx: abc.b.idx, price: abc.b.price, type: korrAuf ? 'L' : 'H', label: 'B', pending: false });
+                  elliott.points.push({ idx: aP.idx, price: aP.price, type: korrAuf ? 'H' : 'L', label: 'C', pending: !cFertig });
+                  elliott.kind = 'correction'; elliott.dir = korrAuf ? 'up' : 'down';
+                  const dk = korrAuf ? 1 : -1;
+                  if (cFertig) {
+                    // Korrektur fertig: neuer Impuls in Richtung der alten Welle 1-5. Erste Marke = 38,2 %
+                    // der Korrektur zurueck (typisches Ende einer ersten Welle), dann 61,8 %.
+                    elliott.phase = 'corrDone';
+                    // Naechste noch NICHT erreichte Stufe (38,2 / 50 / 61,8 / 78,6 % der Korrektur zurueck).
+                    const z1 = [0.382, 0.5, 0.618, 0.786].map(f => Eg(Lg(aP.price) - dk * lenK * f)).find(z => (korrAuf ? z < bP.price : z > bP.price));
+                    elliott.projection = z1 ? [{ label: '1', price: z1, dIdx: 8 }] : [];
+                    elliott.invalidation = { price: aP.price, below: !korrAuf, ruleKey: 'proInvNewImpulse' };
+                  } else {
+                    elliott.phase = 'waveC';
+                    elliott.projection = [{ label: 'C', price: Eg(Lg(abc.b.price) + dk * Math.abs(Lg(abc.a.price) - Lg(p5.price))), dIdx: 8 }];
+                    elliott.invalidation = { price: p5.price, below: korrAuf, ruleKey: 'proInvCorrStart' };
+                  }
+                  kx.phase = elliott.phase;
+                } else if (lenA > 0 && gesamt > 0 && lenA >= 0.05 * gesamt) {
+                  const aLaeuft = !(bP && bRueck >= 0.236);
+                  elliott.points.push({ idx: aP.idx, price: aP.price, type: korrAuf ? 'H' : 'L', label: 'A', pending: aLaeuft });
+                  if (!aLaeuft) elliott.points.push({ idx: bP.idx, price: bP.price, type: korrAuf ? 'L' : 'H', label: 'B', pending: true });
+                  elliott.kind = 'correction'; elliott.dir = korrAuf ? 'up' : 'down';
+                  const dk = korrAuf ? 1 : -1;
+                  if (aLaeuft) {
+                    elliott.phase = 'waveA';
+                    // Naechste noch nicht erreichte Stufe: 23,6 / 38,2 / 50 / 61,8 % der ganzen Abwaertswelle.
+                    const zA = [0.236, 0.382, 0.5, 0.618].map(f => Eg(Lg(p5.price) + dk * gesamt * f)).find(z => (korrAuf ? z > aP.price : z < aP.price));
+                    elliott.projection = zA ? [{ label: 'A', price: zA, dIdx: 6 }] : [];
+                  } else {
+                    elliott.phase = 'waveB';
+                    const zB = Eg(Lg(aP.price) - dk * lenA * (bRueck >= 0.5 ? 0.618 : 0.5));
+                    elliott.projection = [{ label: 'B', price: zB, dIdx: 6 }, { label: 'C', price: Eg(Lg(zB) + dk * lenA), dIdx: 20 }];
+                  }
+                  elliott.invalidation = { price: p5.price, below: korrAuf, ruleKey: 'proInvCorrStart' };
+                  kx.phase = elliott.phase;
+                }
+              }
+            }
+          } catch (e) {}
+          // LAUFENDE TREIBENDE WELLE SCHON FERTIG? (gemeldet bei RUNE/BTC: "warum 2x Welle 5?" -- Welle 5
+          // stand am Tief vom Juni UND als Ziel weit darunter, obwohl der Kurs seither ~60 % gestiegen
+          // war). Hat der Kurs seit dem Extrem einer laufenden Welle 1/3/5/A/C mindestens 38,2 % dieser
+          // Welle zurueckgeholt, gilt sie als fertig: Punkt fest, ihr Ziel faellt weg, die Feinzaehlung
+          // beschreibt ab dort die naechste Welle (nach 5 die Korrektur A, nach C ein neuer Impuls).
+          try {
+            const lp = elliott.points[elliott.points.length - 1], vp = elliott.points[elliott.points.length - 2];
+            if (lp && vp && lp.pending && ['1', '3', '5', 'A', 'C'].includes(String(lp.label))) {
+              const Lg = v => (useLog ? Math.log(v) : v);
+              const lenW = Math.abs(Lg(lp.price) - Lg(vp.price));
+              const zur = Math.abs(Lg(lastClose) - Lg(lp.price));
+              const gegenRichtung = lp.type === 'H' ? lastClose < lp.price : lastClose > lp.price;
+              if (lenW > 0 && gegenRichtung && zur >= 0.382 * lenW) {
+                lp.pending = false;
+                elliott.projection = (elliott.projection || []).filter(q => String(q.label) !== String(lp.label));
+                const folge = { '1': 'wave2', '3': 'wave4', '5': 'waveA', 'A': 'waveB', 'C': 'wave1' }[String(lp.label)];
+                elliott.phase = folge === 'waveA' ? 'impulseDone' : folge === 'wave1' ? 'corrDone' : folge;
+                kx.phase = folge;
+                // Projektion fuer die Folgewelle, wenn keine mehr da ist: Ruecklauf 38,2/50/61,8 % von
+                // 0 bis 5 (nach Impuls) bzw. von der ganzen Korrektur (nach C) -- Ziel 50 %.
+                if (!elliott.projection.length) {
+                  const p0 = elliott.points.find(q => q.label === '0') || elliott.points[0];
+                  const gesamt = Math.abs(Lg(lp.price) - Lg(p0.price));
+                  const d = lp.type === 'H' ? -1 : 1;
+                  const Eg = v => (useLog ? Math.exp(v) : v);
+                  if (folge === 'waveA' || folge === 'wave1') elliott.projection = [{ label: folge === 'waveA' ? 'A' : '1', price: Eg(Lg(lp.price) + d * gesamt * (folge === 'waveA' ? 0.236 : 0.382)), dIdx: 6 }];
+                  else if (folge === 'wave2' || folge === 'wave4') elliott.projection = [{ label: folge === 'wave2' ? '2' : '4', price: Eg(Lg(lp.price) + d * lenW * (folge === 'wave2' ? 0.618 : 0.382)), dIdx: 6 }];
+                }
+                if (folge === 'waveA') elliott.invalidation = { price: lp.price, below: lp.type === 'L', ruleKey: 'proInvBeyondEnd' };
+              }
+            }
+          } catch (e) {}
+          // FEINE ZAEHLUNG NUR INNERHALB DER LAUFENDEN GROSSEN WELLE
+          delete elliott.sub;
+          const anker = [...pts].reverse().find(q => !q.pending) || null;
+          if (anker) {
+            // EIGENE WENDEPUNKTE AB DEM ANKER (getestet: lag der Anker vor dem Ausschnitt, fehlten die
+            // feinen Wendepunkte zwischen Anker und Ausschnitt -- die Feinzaehlung wurde unsinnig).
+            // Schwelle passend zur Groesse der laufenden Welle.
+            let fein = fineCtx.pivots.filter(q => q.idx >= anker.idx), pend = fineCtx.pending && fineCtx.pending.idx > anker.idx ? fineCtx.pending : null;
+            // IMMER so (nicht nur wenn der Anker vor dem Ausschnitt liegt): sonst zaehlte jede Zoomstufe
+            // die Teilwellen anders, weil die Wendepunkt-Schwelle vom Ausschnitt abhing.
+            if (true) {
+              let mx = -Infinity, mn = Infinity;
+              for (let i = anker.idx; i <= to; i++) { const d = data[i]; if (!d) continue; mx = Math.max(mx, hiOf(d)); mn = Math.min(mn, loOf(d)); }
+              const span = mx > 0 && mn > 0 ? Math.log(mx / mn) : 0;
+              const pct = Math.min(0.25, Math.max(0.03, Math.exp(span / 6) - 1));
+              try { const zz = zigzag(data, anker.idx, to, pct); fein = (zz.pivots || []).filter(q => q.idx >= anker.idx); pend = zz.pending && zz.pending.idx > anker.idx ? zz.pending : null; } catch (e) {}
+            }
+            const set = { pivots: fein, pending: pend };
+            // KORREKTIVE WELLE (2, 4, B) -> gezielt als a-b-c zaehlen (getestet: die allgemeine Suche
+            // lieferte fuer Welle 2 "a-b-c-d-e", ein Dreieck -- das gibt es in Welle 2 nicht).
+            // c = Extrem seit dem Anker, b = staerkste Gegenbewegung davor (mind. 23,6 % von a),
+            // a = Extrem zwischen Anker und b.
+            const naechsteW = String(kx.phase || '').replace('wave', '');
+            if (['2', '4', 'B'].includes(naechsteW)) {
+              const ab = anker.type === 'H';   // Korrektur abwaerts nach einem Hoch
+              const alle = [...fein, ...(pend ? [pend] : [])];
+              const tiefOf = i => (ab ? loOf(data[i]) : hiOf(data[i]));
+              let cI = null;
+              for (let i = anker.idx + 1; i <= to; i++) { const v = tiefOf(i); if (v > 0 && (cI == null || (ab ? v < tiefOf(cI) : v > tiefOf(cI)))) cI = i; }
+              let best = null;
+              if (cI != null) for (const h of alle) {
+                if (h.idx <= anker.idx || h.idx >= cI || h.type !== (ab ? 'H' : 'L')) continue;
+                let aI = null; for (let i = anker.idx + 1; i < h.idx; i++) { const v = tiefOf(i); if (v > 0 && (aI == null || (ab ? v < tiefOf(aI) : v > tiefOf(aI)))) aI = i; }
+                if (aI == null) continue;
+                const Lg = v => (useLog ? Math.log(v) : v);
+                const lenA = Math.abs(Lg(anker.price) - Lg(tiefOf(aI)));
+                const ret = lenA > 0 ? Math.abs(Lg(h.price) - Lg(tiefOf(aI))) / lenA : 0;
+                if (ret >= 0.236 && ret < 1 && (!best || ret > best.ret)) best = { aI, h, ret };
+              }
+              if (best) {
+                const cLaeuft = cI >= to - 2;
+                const pts3 = [
+                  { idx: best.aI, price: tiefOf(best.aI), type: ab ? 'L' : 'H', label: 'a', pending: false },
+                  { idx: best.h.idx, price: best.h.price, type: ab ? 'H' : 'L', label: 'b', pending: false },
+                  { idx: cI, price: tiefOf(cI), type: ab ? 'L' : 'H', label: 'c', pending: cLaeuft },
+                ];
+                elliott.sub = { kind: 'correction', dir: ab ? 'down' : 'up', phase: cLaeuft ? 'waveC' : 'corrDone', confidence: 0.5, imKontext: true, anchorLabel: anker.label, points: pts3 };
+                const lz0 = elliott.points[elliott.points.length - 1];
+                if (lz0 && lz0.pending) elliott.points = elliott.points.slice(0, -1);
+              }
+            }
+            if (!elliott.sub && fein.length + (set.pending ? 1 : 0) >= 3) {
+              const sub = detectElliott(set, lastClose, to, useLog, volumes);
+              if (sub && sub.points && sub.points.length >= 3) {
+                // Laeuft eine KORREKTIVE grosse Welle (2, 4, B), wird ihre Feinzaehlung als a-b-c
+                // beschriftet (getestet: dieselbe Welle 2 hiess mal i-ii, mal a-b-c). Nur in
+                // treibenden Wellen (1, 3, 5, A, C) heissen die Teile i-ii-iii-iv-v.
+                const naechste = String(kx.phase || '').replace('wave', '');
+                const korrektiv = ['2', '4', 'B', 'b'].includes(naechste);
+                // In TREIBENDEN Wellen auch eine gefundene A-B-C-Folge als i-ii-iii beschriften (gemeldet:
+                // "Warum abc?" -- RUNE/ETH Woche, Welle 3 lief, die Feinzaehlung zeigte a-b-c). Drei
+                // Teilwellen am Anfang einer Welle 3 sind der Beginn ihrer fuenf Teile (i, ii, iii),
+                // keine Korrektur: Die Richtung der grossen Welle legt fest, wie sie heissen.
+                const map = korrektiv ? { '1': 'a', '2': 'b', '3': 'c', '4': 'd', '5': 'e', 'A': 'a', 'B': 'b', 'C': 'c' } : { '1': 'i', '2': 'ii', '3': 'iii', '4': 'iv', '5': 'v', 'A': 'i', 'B': 'ii', 'C': 'iii' };
+                // Nur die erste vollstaendige Teil-Struktur: kein "i-v + a-b-c" in einer Welle.
+                if (sub.points.filter(q => q.label !== '0').length > 5) sub.points = sub.points.slice(0, 6);
+                const alsImpuls = !korrektiv && /^correct/.test(String(sub.kind || ''));
+                elliott.sub = { kind: alsImpuls ? 'impulse' : sub.kind, dir: sub.dir, phase: alsImpuls ? 'wave3' : sub.phase, confidence: sub.confidence, imKontext: true, anchorLabel: anker.label,
+                  points: sub.points.filter(q => q.label !== '0').map(q => ({ ...q, label: map[q.label] || q.label })) };
+                // Die laufende grosse Welle wird jetzt von a-b-c (bzw. i-v) beschrieben -- ihr
+                // vorlaeufiger Endpunkt wuerde sonst auf "a" liegen (Ueberlappung). Ihr Ziel bleibt
+                // in der Projektion.
+                const lz = elliott.points[elliott.points.length - 1];
+                if (lz && lz.pending) elliott.points = elliott.points.slice(0, -1);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {}
+    // REGEL "Welle 4 nie unter das Ende von Welle 1" auch OHNE Feinzaehlung (getestet: Monatschart
+    // RUNE/SOL hat zu wenige Kerzen fuer eine a-b-c-Suche und zeigte sonst weiter Welle 4).
+    try {
+      if (kontextExtern && elliott && elliott.kontextZaehlung && elliott.kind === 'impulse' && String(elliott.phase) === 'wave4') {
+        const auf = elliott.dir === 'up';
+        const p1 = elliott.points.find(q => q.label === '1'), p3 = elliott.points.find(q => q.label === '3');
+        if (p1 && p3) {
+          let ext = null;
+          for (let i = p3.idx + 1; i <= to; i++) { const d = data[i]; if (!d) continue; const v = auf ? (d.low != null ? d.low : d.value) : (d.high != null ? d.high : d.value); if (v > 0 && (!ext || (auf ? v < ext.price : v > ext.price))) ext = { idx: i, price: v }; }
+          if (ext && (auf ? ext.price < p1.price : ext.price > p1.price)) {
+            elliott.points = elliott.points.filter(q => q.label === '0' || q.label === '3').map(q => q.label === '3' ? { ...q, label: '1', pending: false } : q);
+            elliott.points.push({ idx: ext.idx, price: ext.price, type: auf ? 'L' : 'H', label: '2', pending: true });
+            elliott.phase = 'wave2'; elliott.umbenannt = true;
+            delete elliott.sub;   // die a-b-c gehoerte zur verworfenen "Welle 4"
+            const L = (a, b) => Math.abs(useLog ? Math.log(b) - Math.log(a) : b - a);
+            const p0 = elliott.points.find(q => q.label === '0');
+            const w1 = p0 ? L(p0.price, p3.price) : 0;
+            const mv = (v, f) => useLog ? v * Math.exp((auf ? 1 : -1) * w1 * f) : v + (auf ? 1 : -1) * w1 * f;
+            // Laeuft der Kurs seit dem Tief schon ueber das neue "1"? Dann ist 2 fertig und 3 laeuft.
+            let hoch = null;
+            for (let i = ext.idx + 1; i <= to; i++) { const d = data[i]; if (!d) continue; const v = auf ? (d.high != null ? d.high : d.value) : (d.low != null ? d.low : d.value); if (v > 0 && (!hoch || (auf ? v > hoch.price : v < hoch.price))) hoch = { idx: i, price: v }; }
+            if (hoch && (auf ? hoch.price > p3.price : hoch.price < p3.price)) {
+              elliott.points[elliott.points.length - 1].pending = false;
+              elliott.points.push({ idx: hoch.idx, price: hoch.price, type: auf ? 'H' : 'L', label: '3', pending: true });
+              elliott.phase = 'wave3';
+              const z = [1.618, 2.618, 4.236].map(f => mv(ext.price, f)).find(v => (auf ? v > hoch.price : v < hoch.price));
+              elliott.projection = z ? [{ label: '3', price: z, dIdx: 6 }] : [];
+              elliott.invalidation = { price: ext.price, below: auf, ruleKey: 'proInvRule1' };
+            } else {
+              elliott.projection = [{ label: '3', price: mv(ext.price, 1.618), dIdx: 8 }];
+              elliott.invalidation = p0 ? { price: p0.price, below: auf, ruleKey: 'proInvRule1' } : elliott.invalidation;
+            }
+          }
+        }
+      }
+    } catch (e) {}
+    // (nach Fein-Zaehlung) Korrektur moeglicherweise schon fertig?
+    try {
+      const kx = kontextExtern;
+      // Schon nach der Regel "Welle 4 nie unter Welle 1" umbenannt -> nicht noch einmal umdeuten.
+      if (kx && elliott && elliott.kontextZaehlung && elliott.sub && elliott.sub.imKontext && !elliott.umbenannt) {
+        const auf = elliott.dir === 'up';
+                  // NACH a-b-c IST DIE KORREKTUR MOEGLICHERWEISE FERTIG (gefragt: "muesste nach abc nicht
+                  // die Korrektur zu Ende sein?"): Zaehlt der kleine Zeitraum die laufende Welle 2 (bzw.
+                  // 4) schon als FERTIGES a-b-c (oder als fertigen 5er-Abschwung = c), kann sie hier
+                  // enden -- auch wenn sie flacher ist als ueblich. Dann:
+                  //   - Welle 2 als moeglich fertig markieren (gestrichelt) am Ende von c,
+                  //   - Projektion direkt zu Welle 3 (1,618 x Welle 1 ab dort),
+                  //   - Bestaetigung: ueber b (Weiche "Welle 2 wohl fertig"),
+                  //   - die tieferen Fib-Stufen bleiben als Alternative, mit geringerer Wahrscheinlichkeit.
+                  const sub = elliott.sub; const gegen = sub.dir !== (auf ? 'up' : 'down');
+                  const subFertig = gegen && ((sub.kind !== 'impulse' && sub.phase === 'corrDone') || (sub.kind === 'impulse' && sub.phase === 'impulseDone'));
+                  let laufendeWelle = String(kx.phase || '').replace('wave', '');
+                  if (subFertig && (laufendeWelle === '2' || laufendeWelle === '4')) {
+                    const cEnde = elliott.sub.points[elliott.sub.points.length - 1];
+                    // REGEL "Welle 4 nie unter das Ende von Welle 1" (getestet: RUNE/SOL und RUNE/XRP --
+                    // die Korrektur nach "3" lief tief in den Bereich von Welle 1). Dann war die Zaehlung
+                    // 0-1-2-3 so nicht richtig: der ganze Anstieg bis "3" ist Welle 1, die Korrektur
+                    // ist Welle 2. Umbenennen statt eine regelwidrige Welle 4 zu zeigen.
+                    const p1w0 = elliott.points.find(q => q.label === '1');
+                    if (laufendeWelle === '4' && p1w0 && cEnde && (auf ? cEnde.price < p1w0.price : cEnde.price > p1w0.price)) {
+                      const p3alt = elliott.points.find(q => q.label === '3');
+                      if (p3alt) {
+                        elliott.points = elliott.points.filter(q => q.label === '0' || q.label === '3').map(q => q.label === '3' ? { ...q, label: '1' } : q);
+                        laufendeWelle = '2';
+                        elliott.phase = 'wave2';
+                        elliott.umbenannt = true;
+                      }
+                    }
+                    const bPkt = elliott.sub.points.find(q => q.label === 'b') || elliott.sub.points[elliott.sub.points.length - 2];
+                    const pA = elliott.points.find(q => q.label === '0'), pB = elliott.points.find(q => q.label === '1');
+                    if (cEnde && pA && pB) {
+                      const Lg = v => (useLog ? Math.log(v) : v), Eg = v => (useLog ? Math.exp(v) : v);
+                      const w1 = Math.abs(Lg(pB.price) - Lg(pA.price));
+                      const rueck = w1 > 0 ? Math.abs(Lg(pB.price) - Lg(cEnde.price)) / w1 : 0;
+                      elliott.points.push({ idx: cEnde.idx, price: cEnde.price, type: auf ? 'L' : 'H', label: laufendeWelle, pending: true, moeglich: true });
+                      // Welle 3: 1,618 x Welle 1. Welle 5: 1 x Welle 1, hoechstens 0,618 x (0 bis 3) --
+                      // getestet: RUNE/BTC lieferte sonst ein Ziel um den Faktor 80 tiefer.
+                      const p3w = elliott.points.find(q => q.label === '3');
+                      const len5 = Math.min(w1, p3w ? 0.618 * Math.abs(Lg(p3w.price) - Lg(pA.price)) : w1);
+                      const z3 = laufendeWelle === '2' ? Eg(Lg(cEnde.price) + (auf ? 1 : -1) * w1 * 1.618) : Eg(Lg(cEnde.price) + (auf ? 1 : -1) * len5);
+                      const dauer1 = Math.max(4, pB.idx - pA.idx);
+                      elliott.projection = [{ label: laufendeWelle === '2' ? '3' : '5', price: z3, dIdx: Math.round(dauer1 * 1.6) }];
+                      // Wahrscheinlichkeit "jetzt fertig": je tiefer der Ruecklauf schon ist, desto eher.
+                      elliott.welleFertigWkt = rueck >= 0.618 ? 60 : rueck >= 0.5 ? 50 : rueck >= 0.382 ? 40 : 25;
+                      elliott.welleFertigRueck = rueck;
+                      if (bPkt) elliott.weiche = { price: bPkt.price, below: !auf, key: 'proSwitchW2Done' };
+                      // SCHON BESTAETIGT (getestet: RUNE/XRP -- Welle 4 endete im Juni, danach lief der Kurs
+                      // laengst ueber das Hoch von Welle 3): Ist der Kurs seit c ueber den Start der
+                      // Korrektur hinaus, ist die Welle FERTIG und die naechste laeuft. Dann: Punkt fest,
+                      // naechste Welle laufend am Extrem seither, Projektion fuer diese Welle.
+                      const startKorr = elliott.points.filter(q => !q.moeglich).slice(-1)[0];
+                      let ext = null;
+                      for (let i = cEnde.idx + 1; i <= to; i++) { const d = data[i]; if (!d) continue; const v = auf ? (d.high != null ? d.high : d.value) : (d.low != null ? d.low : d.value); if (v > 0 && (!ext || (auf ? v > ext.price : v < ext.price))) ext = { idx: i, price: v }; }
+                      if (startKorr && ext && (auf ? ext.price > startKorr.price : ext.price < startKorr.price)) {
+                        const mp = elliott.points.find(q => q.moeglich);
+                        if (mp) { mp.pending = false; delete mp.moeglich; }
+                        const naechste = laufendeWelle === '2' ? '3' : '5';
+                        elliott.points.push({ idx: ext.idx, price: ext.price, type: auf ? 'H' : 'L', label: naechste, pending: true });
+                        elliott.phase = 'wave' + naechste;
+                        // Ziel: naechste noch NICHT erreichte Stufe (getestet: SOL/XRP -- Welle 5 war schon
+                        // ueber 1 x und 1,618 x hinaus). Welle 3: 1,618 / 2,618 / 4,236 x Welle 1;
+                        // Welle 5: 1 / 1,618 / 2,618 x Welle 1. Alles erreicht -> keine Projektion (Welle
+                        // kann jederzeit enden).
+                        const stufenN = naechste === '3' ? [1.618, 2.618, 4.236] : [1, 1.618, 2.618];
+                        const zN = stufenN.map(f => Eg(Lg(cEnde.price) + (auf ? 1 : -1) * w1 * f)).find(z => (auf ? z > ext.price : z < ext.price));
+                        elliott.projection = zN ? [{ label: naechste, price: zN, dIdx: Math.max(3, Math.round(dauer1 * 0.6)) }] : [];
+                        delete elliott.welleFertigWkt; delete elliott.welleFertigRueck;
+                        elliott.weiche = null;
+                        elliott.invalidation = { price: cEnde.price, below: auf, ruleKey: 'proInvRule1' };
+                        delete elliott.sub;
+                      }
+                    }
+
+        }
+      }
+    } catch (e) {}
+    // DAS GROSSE BILD GILT AUCH IM AUSSCHNITT (gemeldet: "im Wochen-/Monatschart ungenau, jede Welle
+    // beachten" -- getestet mit echten Kursen: Voll-Ansicht D/W/M zaehlt einheitlich "Korrektur bis
+    // $0,295 fertig, neuer Impuls i = $0,845, ii laeuft"; im herangezoomten Wochenchart wurde
+    // derselbe Anstieg dagegen mal A-B, mal 0-A-B-C mit Ziel UNTER $0,30 gezaehlt, weil der
+    // Ausschnitt die Vorgeschichte nicht kennt). Jetzt: Ist der Ausschnitt nicht der ganze Verlauf,
+    // wird einmal (zwischengespeichert) der ganze Verlauf gezaehlt. Erkennt der einen neuen Impuls
+    // nach fertiger Korrektur und liegt dessen Start im Ausschnitt, uebernimmt der Ausschnitt genau
+    // diese Zaehlung (0 = Start, dann 1, 2 ...) samt Ziel und Ungueltigkeitsmarke.
+    try {
+      if (from > 0 && !analyze.__imKontext && elliott && !elliott.kontextZaehlung) {
+        const key = [N, data[N - 1] && data[N - 1].date, data[N - 1] && data[N - 1].value, useLog, degreeMode].join('|');
+        let ctx = RW_EW_KONTEXT.get(key);
+        if (ctx === undefined) {
+          analyze.__imKontext = true;
+          try { ctx = analyze({ data: rohDaten, viewStart: 0, viewEnd: to, logScale, ma200Override, degreeMode, dochtFilter, kontextExtern: null }); } catch (e) { ctx = null; }
+          analyze.__imKontext = false;
+          if (RW_EW_KONTEXT.size > 20) RW_EW_KONTEXT.clear();
+          RW_EW_KONTEXT.set(key, ctx || null);
+        }
+        const nl = ctx && ctx.elliott && ctx.elliott.nachlauf;
+        if (nl && nl.art === 'impuls' && nl.start && nl.points && nl.points.length && nl.points[nl.points.length - 1].idx >= from) {
+          const map = { i: '1', ii: '2', iii: '3', iv: '4', v: '5' };
+          const auf = nl.points[0].price > nl.start.price;
+          const letzter = nl.points[nl.points.length - 1];
+          // Laeuft die letzte Welle noch? Ja, wenn das Ziel der Nachlauf-Zaehlung genau dieser Welle
+          // gilt und noch nicht erreicht ist (oder sie an der letzten Kerze endet).
+          const laeuft = !!(letzter && ((nl.ziel && !nl.ziel.erreicht && nl.ziel.label === letzter.label) || letzter.idx >= to - 1));
+          const pts = [{ idx: nl.start.idx, price: nl.start.price, type: auf ? 'L' : 'H', label: '0', pending: false },
+            ...nl.points.map((q, k) => ({ idx: q.idx, price: q.price, type: q.type || (k % 2 === 0 ? (auf ? 'H' : 'L') : (auf ? 'L' : 'H')), label: map[q.label] || q.label, pending: k === nl.points.length - 1 && laeuft }))];
+          const n = nl.points.length;
+          const proj = [];
+          if (nl.ziel && !nl.ziel.erreicht) {
+            proj.push({ label: map[nl.ziel.label] || nl.ziel.label, price: nl.ziel.price, dIdx: Math.max(2, nl.ziel.dBars || 4) });
+            if (nl.ziel.danach) proj.push({ label: map[nl.ziel.danach.label] || nl.ziel.danach.label, price: nl.ziel.danach.price, dIdx: Math.max(3, (nl.ziel.dBars || 4) + (nl.ziel.danach.dBars || 6)) });
+          }
+          elliott.kind = 'impulse'; elliott.dir = auf ? 'up' : 'down';
+          elliott.points = pts;
+          elliott.phase = n >= 5 ? 'impulseDone' : 'wave' + (n + (laeuft ? 0 : 1));
+          elliott.projection = proj;
+          elliott.invalidation = { price: nl.start.price, below: auf, ruleKey: n >= 2 ? 'proInvRule1' : 'proInvNewImpulse' };
+          elliott.kontextZaehlung = true;
+          delete elliott.sub; delete elliott.nachlauf;
+          // Rahmen-Zaehlung (eine Stufe groesser) weglassen, wenn sie dieselben Punkte beschriftet --
+          // sonst stuenden z. B. "1" und "(1)" uebereinander.
+          if (elliott.parent && (elliott.parent.points || []).some(q => q.label !== '0' && pts.some(m => m.label !== '0' && Math.abs(m.idx - q.idx) <= 1))) delete elliott.parent;
+          // Die grosse Korrektur davor als Rahmen behalten, wenn bekannt.
+          if (ctx.elliott.grossMarken) elliott.grossMarken = ctx.elliott.grossMarken;
+        } else if (ctx && ctx.elliott && Array.isArray(ctx.elliott.points) && ctx.elliott.points.length >= 2 && ctx.elliott.points[0].idx >= from && ctx.elliott.umgestelltNachGross) {
+          // GLEICHE ZAEHLUNG BEIM HERANZOOMEN (getestet: RUNE/AVAX Monat -- ganz herausgezoomt "(C) fertig,
+          // neuer Impuls 1-2-3", herangezoomt "5 abwaerts, dann A-B-C"). Liegt die Zaehlung der
+          // Gesamtansicht vollstaendig im Ausschnitt, wird sie uebernommen.
+          const C = ctx.elliott;
+          elliott.kind = C.kind; elliott.dir = C.dir; elliott.phase = C.phase;
+          elliott.points = C.points.map(q => ({ ...q }));
+          elliott.projection = (C.projection || []).map(q => ({ ...q }));
+          elliott.invalidation = C.invalidation ? { ...C.invalidation } : elliott.invalidation;
+          elliott.weiche = C.weiche || null;
+          if (C.grossMarken) elliott.grossMarken = C.grossMarken;
+          delete elliott.parent; delete elliott.sub; delete elliott.nachlauf;
+          elliott.kontextZaehlung = true;
+        }
+      }
+    } catch (e) {}
+    // GROSSE WELLE ENDET MITTEN IN DER KLEINEN ZAEHLUNG (gemeldet bei RUNE/AVAX, Monatschart: "B geht
+    // tiefer, das geht doch nicht" -- das Tief war zugleich (C) der grossen Zaehlung UND "B" der
+    // kleinen; A und B gehoerten in Wahrheit noch zur grossen Welle (C)). Faellt ein Punkt der kleinen
+    // Zaehlung mit dem Ende der grossen (C bzw. 5) zusammen, beginnt die kleine Zaehlung DORT: dieser
+    // Punkt wird "0", alles davor entfaellt, und die Folgewellen heissen 1, 2, 3 ... (nach einer fertigen
+    // grossen Korrektur kommt ein neuer Impuls).
+    try {
+      // Ende der grossen Zaehlung: Rahmen-Zaehlung (parent) ODER die grossen Marken "(A)(B)(C)"
+      // (gemeldet: im Monatschart stand das grosse (C) als Marke, nicht als Rahmen-Zaehlung).
+      const par = elliott && !elliott.kontextZaehlung && elliott.parent;
+      let pe = par && Array.isArray(par.points) ? par.points[par.points.length - 1] : null;
+      const gm = elliott && !elliott.kontextZaehlung && Array.isArray(elliott.grossMarken) ? elliott.grossMarken[elliott.grossMarken.length - 1] : null;
+      if ((!pe || !['C', '5'].includes(String(pe.label))) && gm && /\(C\)|\(5\)/.test(String(gm.text || ''))) pe = { ...gm, label: String(gm.text).replace(/[()]/g, ''), pending: false };   // Marke gilt als Ende, auch wenn sie "laufend" hiess
+      if (pe && !pe.pending && ['C', '5'].includes(String(pe.label)) && Array.isArray(elliott.points)) {
+        const k = elliott.points.findIndex(q => q.label !== '0' && Math.abs(q.idx - pe.idx) <= 1);
+        if (k > 0) {
+          const nach = elliott.points.slice(k + 1);
+          const neuLab = ['1', '2', '3', '4', '5'];
+          elliott.points = [{ ...elliott.points[k], label: '0', pending: false }, ...nach.map((q, i) => ({ ...q, label: neuLab[i] || q.label }))];
+          // Laeuft der letzte Punkt noch, gehoert das erste Ziel zu IHM (gleiche Nummer), nicht zur naechsten Welle.
+          const letzterLaeuft = nach.length && nach[nach.length - 1].pending;
+          const off = letzterLaeuft ? nach.length - 1 : nach.length;
+          elliott.projection = (elliott.projection || []).map((q, i) => ({ ...q, label: neuLab[off + i] || q.label }));
+          elliott.kind = 'impulse';
+          elliott.dir = pe.type === 'L' ? 'up' : 'down';
+          elliott.phase = 'wave' + (off + 1);
+          elliott.invalidation = { price: pe.price, below: pe.type === 'L', ruleKey: off >= 1 ? 'proInvRule1' : 'proInvNewImpulse' };
+          elliott.weiche = null;
+          elliott.umgestelltNachGross = true;
+          // Ziel der laufenden Welle schon ueberschritten? (getestet: RUNE/AVAX Monat -- "3" stand bei
+          // 0,0759, ihr Ziel bei 0,0745). Dann naechste Stufe: Welle 3 = 1,618/2,618 x Welle 1 ab 2,
+          // Welle 5 = 1/1,618 x Welle 1 ab 4, Welle 1 = 38,2/61,8 % der grossen Korrektur.
+          try {
+            const lz = elliott.points[elliott.points.length - 1];
+            const z0 = (elliott.projection || [])[0];
+            const aufN = elliott.dir === 'up';
+            if (lz && lz.pending && z0 && String(z0.label) === String(lz.label) && (aufN ? lz.price >= z0.price : lz.price <= z0.price)) {
+              const Lg = v => (useLog ? Math.log(v) : v), Eg = v => (useLog ? Math.exp(v) : v);
+              const q = l => elliott.points.find(x => x.label === l);
+              const p0 = q('0'), p1 = q('1'), p2 = q('2'), p4 = q('4');
+              const w1 = p0 && p1 ? Math.abs(Lg(p1.price) - Lg(p0.price)) : null;
+              const dd = aufN ? 1 : -1;
+              let basis = null, stufen = [];
+              if (lz.label === '3' && p2 && w1) { basis = p2.price; stufen = [1.618, 2.618, 4.236]; }
+              else if (lz.label === '5' && p4 && w1) { basis = p4.price; stufen = [1, 1.618, 2.618]; }
+              const neu = basis ? stufen.map(f => Eg(Lg(basis) + dd * w1 * f)).find(z => (aufN ? z > lz.price : z < lz.price)) : null;
+              elliott.projection = neu ? [{ ...z0, price: neu }, ...elliott.projection.slice(1)] : elliott.projection.slice(1);
+            }
+          } catch (e) {}
+          // Die grossen Marken bleiben (sie zeigen den Rahmen), aber ohne "laufend".
+          if (Array.isArray(elliott.grossMarken)) elliott.grossMarken = elliott.grossMarken.map(q => ({ ...q, pending: false }));
+        }
+      }
+    } catch (e) {}
+    // KEIN ZIEL FUER EINE SCHON FERTIGE WELLE (gemeldet bei RUNE/BTC: "5 Wellen fertig -- Korrektur
+    // erwartet" und gleichzeitig "Erwarteter Pfad: 5 bei 3,5e-6"): Ziele, deren Welle in der Zaehlung
+    // bereits als fester Punkt steht, fallen weg.
+    try {
+      if (elliott && Array.isArray(elliott.projection) && Array.isArray(elliott.points)) {
+        const fest = new Set(elliott.points.filter(q => !q.pending && !q.moeglich).map(q => String(q.label)));
+        elliott.projection = elliott.projection.filter(q => !fest.has(String(q.label)));
+      }
+    } catch (e) {}
+    // FIB NACH DER ZAEHLUNG NEU (gemeldet: "die Fib macht keinen Sinn" -- es standen noch die
+    // Stufen "Welle 4" der verworfenen Ausschnitt-Zaehlung da): Wurde die Zaehlung durch das grosse
+    // Bild ersetzt, gehoeren die Fibonacci-Stufen zur NEUEN laufenden Welle (z. B. Welle 2 =
+    // 38,2/50/61,8/78,6 % von Welle 1), jeweils mit Wahrscheinlichkeit.
+    if (elliott && elliott.kontextZaehlung) {
+      try {
+        // Die "Weiche" (z. B. "ueber $0,712: C fertig") gehoerte zur verworfenen Zaehlung.
+        elliott.weiche = null;
+        // Laufende Welle ohne eigenen Punkt (wurde fuer a-b-c entfernt): Phase bleibt, Anker = letzter Punkt.
+        // Ist die laufende Welle moeglicherweise schon fertig (a-b-c komplett), wird ihr Endpunkt fuer
+        // die Fib-Rechnung ausgeblendet (Stufen gemessen an Welle 1), und "jetzt fertig" bekommt
+        // seinen Anteil -- die uebrigen Stufen teilen sich den Rest.
+        const ohneMoeglich = elliott.welleFertigWkt ? { ...elliott, points: elliott.points.filter(q => !q.moeglich) } : elliott;
+        fibs.elliott = elliottFib(ohneMoeglich, useLog);
+        rwFibWahrscheinlichkeit(fibs.elliott, data);
+        if (fibs.elliott && elliott.welleFertigWkt) {
+          const rest = 100 - elliott.welleFertigWkt;
+          const offen = fibs.elliott.levels.filter(l => l.prob != null);
+          const summe = offen.reduce((a, l) => a + l.prob, 0) || 1;
+          offen.forEach(l => { l.prob = Math.round(l.prob / summe * rest); });
+          fibs.elliott.jetztFertig = { prob: elliott.welleFertigWkt, rueck: elliott.welleFertigRueck };
+          // Als eigene Stufe zeigen: "Welle 2 x 0,33 $0,598 · 25 %" -- das ist die Variante "schon fertig".
+          const mp = elliott.points.find(q => q.moeglich);
+          if (mp) fibs.elliott.levels.push({ r: Math.round(elliott.welleFertigRueck * 100) / 100, wave: fibs.elliott.label, price: mp.price, prob: elliott.welleFertigWkt, erreicht: false, jetzt: true });
+        }
+        fibs.confluence = fibConfluence(fibs, sr, tolLog);
+      } catch (e) {}
+    }
+    // FIB DER KLEINEN KORREKTUR (gewuenscht: "ich will auch die Fib bei a-b-c-Korrekturen sehen"):
+    // Laeuft innerhalb der grossen Welle eine a-b-c (Feinzaehlung), die ueblichen Ziele fuer c:
+    // 0,618 / 1 / 1,272 / 1,618 x a, gemessen ab b. Mit Haken (erreicht) und Wahrscheinlichkeit.
+    try {
+      fibs.elliottSub = null;
+      const S = elliott && elliott.sub;
+      if (S && S.imKontext && Array.isArray(S.points)) {
+        const a = S.points.find(q => q.label === 'a'), b = S.points.find(q => q.label === 'b');
+        const anker = elliott.points.filter(q => !q.moeglich && !q.pending).slice(-1)[0];
+        if (a && b && anker) {
+          const Ssyn = { kind: 'correction', dir: a.price < anker.price ? 'down' : 'up', phase: 'waveC',
+            points: [{ ...anker, label: '0' }, { ...a, label: 'A' }, { ...b, label: 'B' }] };
+          const fs = elliottFib(Ssyn, useLog);
+          if (fs) { fs.id = 'elliottSub'; rwFibWahrscheinlichkeit(fs, data); fibs.elliottSub = fs; }
+        }
+      }
+    } catch (e) {}
+    // NAECHSTES ZWISCHENZIEL (Backtest, unabhaengige Zeitpunkte, 14 RUNE-Paare, Tageschart 45 Tage:
+    // das grosse Wellenziel wurde in 20 % der Faelle erreicht -- SELTENER als ein gleich weites Ziel in
+    // Gegenrichtung (24 %); die naechste noch offene Fib-Stufe der laufenden Welle dagegen in 30 %,
+    // Gegenrichtung 25 %). Diese Stufe wird hervorgehoben (dickere Linie) und im Fenster genannt.
+    try {
+      if (fibs.elliott && elliott && Array.isArray(elliott.projection) && elliott.projection.length && lastClose > 0) {
+        const auf = elliott.projection[0].price > lastClose;
+        const offen = fibs.elliott.levels.filter(l => l && l.price > 0 && !l.erreicht && !l.jetzt && (auf ? l.price > lastClose : l.price < lastClose));
+        const nah = offen.sort((x, y) => Math.abs(x.price - lastClose) - Math.abs(y.price - lastClose))[0];
+        if (nah) { fibs.elliott.nearest = { r: nah.r, wave: nah.wave }; elliott.zwischenziel = { price: nah.price, r: nah.r, wave: nah.wave, prob: nah.prob }; }
+      }
+    } catch (e) {}
+    // NAECHSTE WELLE MIT WAHRSCHEINLICHKEITEN (gefordert: "Welle 3 muss auch mit Wahrscheinlich-
+    // keiten angezeigt werden, alle Wellen"): Laeuft Welle 2 (bzw. 4), werden zusaetzlich die
+    // Stufen der FOLGEWELLE berechnet -- gemessen ab dem wahrscheinlichsten Ziel der laufenden Welle
+    // (erster Projektionspunkt): Welle 3 = 1 / 1,618 / 2 / 2,618 x Welle 1, Welle 5 = 0,618 / 1 /
+    // 1,618 x Welle 1. Gezeichnet als kurze Linien rechts, ab dem Projektionspunkt.
+    try {
+      fibs.elliottWeiter = null;
+      const E2 = elliott;
+      if (E2 && E2.kind === 'impulse' && Array.isArray(E2.projection) && E2.projection.length) {
+        const lab = l => E2.points.find(q => q.label === l);
+        const p0 = lab('0'), p1 = lab('1');
+        const ziel = E2.projection[0];
+        const sign = E2.dir === 'up' ? 1 : -1;
+        const w1 = p0 && p1 ? Math.abs(useLog ? Math.log(p1.price) - Math.log(p0.price) : p1.price - p0.price) : null;
+        const mv = (von, f) => useLog ? von * Math.exp(sign * w1 * f) : von + sign * w1 * f;
+        let stufen = null, welle = null, gew = null;
+        if (w1 && (E2.phase === 'wave2') && (String(ziel.label) === '2' || String(ziel.label) === '3')) { welle = '3'; stufen = [1, 1.618, 2, 2.618]; gew = { 1: 20, 1.618: 45, 2: 15, 2.618: 20 }; }
+        else if (w1 && (E2.phase === 'wave4') && String(ziel.label) === '4') { welle = '5'; stufen = [0.618, 1, 1.618]; gew = { 0.618: 35, 1: 45, 1.618: 20 }; }
+        if (stufen) {
+          const summe = stufen.reduce((a, r) => a + gew[r], 0);
+          // Bezugspunkt: Ziel der laufenden Welle -- oder, wenn sie schon moeglich fertig ist, ihr Ende.
+          const basis = String(ziel.label) === welle ? (E2.points.find(q => q.moeglich) || ziel) : ziel;
+          fibs.elliottWeiter = { id: 'elliottWeiter', label: welle, vonPreis: basis.price, drawFromIdx: String(ziel.label) === welle ? (basis.idx != null ? basis.idx : to) : to + Math.max(1, ziel.dIdx || 1),
+            levels: stufen.map(r => ({ r, wave: welle, price: mv(basis.price, r), prob: Math.round(gew[r] / summe * 100) })).filter(l => Number.isFinite(l.price) && l.price > 0) };
+        }
+      }
+    } catch (e) {}
+    // VERKUERZTE FUENFTE ALS ALTERNATIVE (gefragt: "Koennte Welle 5 nicht schon im September
+    // entstanden sein?"). Erst hier am Ende, auf der ENDGUELTIGEN Zaehlung (nach Grad-Abgleich,
+    // Nachlauf usw.), damit Kreis und Szenario zur gezeichneten Zaehlung passen.
+    // Laeuft laut Zaehlung noch Welle 4 oder 5: Gab es seit Welle 4 schon ein Extrem in
+    // Trendrichtung, das hoechstens 10 % vor dem Ende von Welle 3 stehen blieb (nicht darueber
+    // hinaus -- sonst waere es eine regulaere Welle 5), und ist der Kurs seitdem um mindestens
+    // 61,8 % dieses Wegs zurueckgelaufen? Dann ist eine "truncated fifth" plausibel: Welle 5 ist
+    // fertig, die Korrektur A-B-C laeuft. Bestaetigt erst durch einen Schluss jenseits von Welle 4.
+    // Vor den Umdeutungen eine versteckte Projektion zurueckholen, danach je nach NEUER Phase bewerten.
+    const vorUmdeutung = elliott ? { phase: elliott.phase, kind: elliott.kind, n: (elliott.points || []).length } : null;
+    const versteckt0 = elliott ? elliott.projectionVersteckt : null;
+    projektionHolen(elliott);
+    grosseKorrekturAusDaten(elliott, data, from, to, useLog, fibs);
+    neuerTrendNachKorrektur(elliott, data, from, to, lastClose, useLog, fibs);
+    rahmenInZaehlung(elliott, data, from);
+    abcNachGrossCAlsImpuls(elliott, fibs);
+    if (elliott && vorUmdeutung && (elliott.phase !== vorUmdeutung.phase || elliott.kind !== vorUmdeutung.kind || (elliott.points || []).length !== vorUmdeutung.n)) phaseNeuBewerten(elliott);
+    else if (elliott && versteckt0 && (!elliott.projection || !elliott.projection.length || elliott.projection === versteckt0)) { elliott.projectionVersteckt = versteckt0; elliott.projection = []; }
+    ergaenzeProjektion(elliott, useLog, fibs);
+    // Bewertung neu, wenn die Zaehlung oben umgedeutet wurde (sonst stand z. B. weiter "Bearish").
+    if (elliott && (elliott.neuerTrendNachKorrektur || elliott.umbenanntNachGrossC)) { try { score = scoreAll(trend, sr, elliott, fib, indicators, lastClose); } catch (e) {} }
+    altTrunc5(elliott, data, lastClose, useLog);
+    // PLAUSIBILITAETS-DECKEL FUER PROJEKTIONEN (gemeldet bei RUNE/NEAR Woche: "diese Zaehlungen machen
+    // keinen Sinn" -- Welle 3 bei 0,011 und Welle 5 bei 0,0016, also -99 % vom aktuellen Kurs 0,165).
+    // Ursache: Die Wellenlaengen werden aus frueheren, riesigen Bewegungen abgeleitet (Log-Skala ueber
+    // Jahre) und dann vom aktuellen Kurs aus weitergerechnet. Ein Ziel mehr als Faktor 3,3 (1,2 im
+    // Log-Raum) vom aktuellen Kurs entfernt ist keine brauchbare Prognose mehr. Solche Ziele -- und alle
+    // dahinter, weil der Weg sonst abreisst -- entfallen; die Zaehlung selbst bleibt sichtbar.
+    try {
+      // GRENZE JE ZEITEBENE (gemeldet: "nur im Daily-Chart keine Wellen-Prognose"): Ein fester Faktor 3,3 war fuer
+      // Tages- und Wochenkerzen zu eng -- eine Welle 3 kann dort leicht das 4- bis 6-Fache bringen. Jetzt nach
+      // Kerzenabstand: unter 1 Tag Faktor 3,3, Tageskerzen Faktor 7, Wochen/Monate Faktor 15.
+      const abstand = data.length > 2 ? Math.abs((data[data.length - 1].date || 0) - (data[data.length - 2].date || 0)) : 0;
+      const grenzeLog = abstand >= 5 * 86400e3 ? Math.log(15) : abstand >= 20 * 3600e3 ? Math.log(7) : 1.2;
+      // Nach unten strenger: mehr als -75 % (Faktor 4) gilt auf jeder Zeitebene als unbrauchbar (RUNE/NEAR-Fall mit -99 %).
+      const weitWeg = pr => { if (!(Number.isFinite(pr) && pr > 0 && lastClose > 0)) return false; const r = Math.log(pr / lastClose); return r < 0 ? -r > Math.min(grenzeLog, Math.log(4)) : r > grenzeLog; };
+      if (elliott && Array.isArray(elliott.projection) && elliott.projection.length) {
+        const k = elliott.projection.findIndex(q => weitWeg(q && q.price));
+        if (k >= 0) { elliott.projection = elliott.projection.slice(0, k); elliott.projektionGekappt = true; }
+      }
+      if (elliott && Array.isArray(elliott.targets) && elliott.targets.length) {
+        const vorher = elliott.targets.length;
+        elliott.targets = elliott.targets.filter(q => !weitWeg(q && q.price));
+        if (elliott.targets.length !== vorher) elliott.projektionGekappt = true;
+      }
+      const nl = elliott && elliott.nachlauf;
+      if (nl && nl.ziel) {
+        if (weitWeg(nl.ziel.price)) { nl.ziel = null; elliott.projektionGekappt = true; }
+        else if (nl.ziel.danach && weitWeg(nl.ziel.danach.price)) { delete nl.ziel.danach; elliott.projektionGekappt = true; }
+      }
+    } catch (e) {}
+    let divergenzen = [];
+    try { divergenzen = detectDivergenzen(data, from, to); } catch (e) { divergenzen = []; }
+    return {
+      from, to, lastClose, atrAbs, atrPct, useLog, divergenzen,
+      pivots: mediumInView.pivots, pending: medium.pending, coarsePivots: coarse.pivots,
+      trend, sr, fib, fibs, elliott, indicators, score, trendlines, trendlinesTouch,
+      updatedAt: Date.now()
+    };
+  }
+
+  // DIAGNOSE: Warum wird eine bestimmte Punktfolge nicht gezaehlt?
+  //
+  // Ohne das liesse sich nur raten, an welcher der rund zwanzig Bedingungen eine von Hand
+  // geprueft gueltige Folge haengen bleibt. Der Aufruf laesst die normale Zaehlung laufen,
+  // protokolliert jede Ablehnung mit Grund und Zahlen und gibt die Eintraege zurueck, die
+  // genau zur gesuchten Punktfolge gehoeren.
+  function erklaereZaehlung(data, pivots, gesuchteIdx, to, useLog) {
+    evalTrace = [];
+    let erg = null;
+    try {
+      erg = detectElliott({ pivots, pending: null }, data[to].value, to, useLog !== false, data.map(d => d.volume), { forceStart: true });
+    } catch (e) {
+      evalTrace.push({ idx: [], grund: 'Ausnahme: ' + (e && e.message), zahlen: [] });
+    }
+    const spur = evalTrace || []; evalTrace = null;
+    const passt = (a) => Array.isArray(a) && gesuchteIdx.every((g, i) => a[i] === g);
+    return {
+      gefunden: erg ? erg.points.map(p => p.label + '@' + p.idx).join(' ') : null,
+      treffer: spur.filter(e => passt(e.idx)),
+      gesamt: spur.length,
+    };
+  }
+
+  const pinZaehlung = () => { EW_PIN = new Map([...EW_HYST.entries()].map(([k, v]) => [k, { ...v, dates: v.dates.slice() }])); };
+  const loeseZaehlung = () => { EW_PIN = null; };
+  return { analyze, pinZaehlung, loeseZaehlung, zigzag, pivotsAuto, atrSeries, rsiArr, emaArr, erklaereZaehlung, _internal: { detectElliott, detectSR, detectFib, detectTrend, zigzagUpTo, altTrunc5, detectDivergenzen, ergaenzeProjektion, neuerTrendNachKorrektur, abcNachGrossCAlsImpuls, grosseKorrekturAusDaten, rahmenInZaehlung } };
+})();
+  return TPAnalysis;
+})();
