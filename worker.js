@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-0030'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-0300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2775,6 +2775,7 @@ async function handleStats(request, env, ctx) {
     // SCHNELL (gemeldet: "Statistikseite oeffnet sehr langsam"): letzten Stand sofort, Auffrischung im Hintergrund;
     // ohne Stand hoechstens 3 s warten.
     liveTest: await liveBilanz(env),
+    botStand: await botStand(env),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
       const frisch = runebondEmpfehlungen(env).catch(() => null);
@@ -3098,6 +3099,9 @@ async function handleStats(request, env, ctx) {
             tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>')) +
             tile('live3', 'Phase signals (new engine)', L.phasenSig ? L.phasenSig.n : null, L.phasenSig && L.phasenSig.ausgewertet ? `${L.phasenSig.treffer} % correct after 3 days (4H) / 7 days (1D) \u00b7 ${L.phasenSig.ausgewertet} evaluated \u00b7 backtest: 56\u201365 %` : 'signals appear only in special situations \u00b7 waiting for results');
         })()}
+        <div class="sec">Learning bot \u00b7 step 1: collecting</div>
+        ${(() => { const B = stats.botStand || {}; return tile('bot1', 'Cases collected', B.faelle || null,
+          `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} (one per hour)`); })()}
       </div>
     </section>
     <section class="page">
@@ -7871,8 +7875,108 @@ async function liveBilanz(env) {
   } catch (e) { return { n: 0, fehler: String(e && e.message || e) }; }
 }
 
+
+// ===== LERNENDER BOT · SCHRITT 1: MERKMALE SAMMELN =====
+// Fuer 8 Coins (4H + Tag) je Kerze einfache, schnell berechenbare Merkmale + spaeteres Ergebnis (Kursveraenderung nach
+// 3 Tagen bei 4H bzw. 7 Tagen bei Tag). Einmalig wird die Historie nachgeladen (je Lauf ein Coin/Zeitebene), danach
+// kommen laufend neue Kerzen dazu und offene Ergebnisse werden nachgetragen. Nur oeffentliche Marktdaten.
+const RW_BOT_COINS = ['RUNE', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'AVAX'];
+const RW_BOT_EBENEN = { '4h': { h: 18, hist: 3000 }, '1d': { h: 7, hist: 1500 } };
+async function rwBotKerzen(sym, iv, anzahl) {
+  let ende = Date.now(), alle = [];
+  while (alle.length < anzahl) {
+    const r = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}USDT&interval=${iv}&limit=1000&endTime=${ende}`, { timeoutMs: 15000 });
+    if (!r.ok) throw new Error('klines ' + r.status);
+    const j = await r.json(); if (!Array.isArray(j) || !j.length) break;
+    alle = j.map(x => ({ date: Number(x[0]), schluss: Number(x[6]), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] })).concat(alle);
+    ende = Number(j[0][0]) - 1; if (j.length < 1000) break;
+  }
+  const jetzt = Date.now();
+  return alle.filter(x => x.schluss < jetzt).slice(-anzahl);
+}
+function rwBotMerkmale(k, h, abIndex) {
+  const n = k.length, c = k.map(x => x.close), v = k.map(x => x.volume || 0);
+  const pre = [0], preV = [0]; for (let i = 0; i < n; i++) { pre.push(pre[i] + c[i]); preV.push(preV[i] + v[i]); }
+  const sma = (i, p) => i >= p - 1 ? (pre[i + 1] - pre[i + 1 - p]) / p : null;
+  const smaV = (i, p) => i >= p - 1 ? (preV[i + 1] - preV[i + 1 - p]) / p : null;
+  const rsi = new Array(n).fill(null), atr = new Array(n).fill(null);
+  let g = 0, l = 0, a = 0;
+  for (let i = 1; i < n; i++) {
+    const d = c[i] - c[i - 1], gu = Math.max(d, 0), ld = Math.max(-d, 0);
+    const tr = Math.max(k[i].high - k[i].low, Math.abs(k[i].high - c[i - 1]), Math.abs(k[i].low - c[i - 1]));
+    if (i <= 14) { g += gu / 14; l += ld / 14; a += tr / 14; } else { g = (g * 13 + gu) / 14; l = (l * 13 + ld) / 14; a = (a * 13 + tr) / 14; }
+    if (i >= 14) { rsi[i] = 100 - 100 / (1 + g / (l || 1e-12)); atr[i] = a; }
+  }
+  const rows = [];
+  for (let i = Math.max(230, abIndex || 0); i < n; i++) {
+    const s200 = sma(i, 200), s200alt = sma(i - 20, 200), m20 = sma(i, 20);
+    if (s200 == null || s200alt == null || m20 == null) continue;
+    let q = 0; for (let j = i - 19; j <= i; j++) q += (c[j] - m20) * (c[j] - m20); const sd = Math.sqrt(q / 20) || 1e-12;
+    const phase = c[i] > s200 && s200 > s200alt ? 'auf' : c[i] < s200 && s200 < s200alt ? 'ab' : 'seit';
+    const vm = smaV(i - 1, 20);
+    const rund = (x, st) => x == null || !isFinite(x) ? null : Math.round(x * st) / st;
+    rows.push({
+      at: k[i].date, close: c[i], phase,
+      rsi: rund(rsi[i], 10), bbpos: rund((c[i] - m20) / (2 * sd), 100),
+      mom6: rund(c[i] / c[i - 6] - 1, 10000), mom30: rund(c[i] / c[i - 30] - 1, 10000),
+      dist200: rund(c[i] / s200 - 1, 10000), slope200: rund(s200 / s200alt - 1, 100000),
+      volr: rund(vm ? v[i] / vm : null, 100), atrp: rund(atr[i] ? atr[i] / c[i] : null, 10000),
+      ret: k[i + h] ? rund(c[i + h] / c[i] - 1, 100000) : null,
+    });
+  }
+  return rows;
+}
+const RW_BOT_SPALTEN = ['coin', 'ebene', 'at', 'close', 'phase', 'rsi', 'bbpos', 'mom6', 'mom30', 'dist200', 'slope200', 'volr', 'atrp', 'ret'];
+async function rwBotSchreiben(env, coin, iv, rows) {
+  const proZeile = RW_BOT_SPALTEN.length, jeStmt = Math.floor(90 / proZeile); // D1: max. ~100 Parameter je Abfrage
+  const stmts = [];
+  for (let i = 0; i < rows.length; i += jeStmt) {
+    const teil = rows.slice(i, i + jeStmt);
+    const platz = teil.map(() => '(' + RW_BOT_SPALTEN.map(() => '?').join(',') + ')').join(',');
+    const werte = []; for (const r of teil) werte.push(coin, iv, r.at, r.close, r.phase, r.rsi, r.bbpos, r.mom6, r.mom30, r.dist200, r.slope200, r.volr, r.atrp, r.ret);
+    stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO bot_faelle (${RW_BOT_SPALTEN.join(',')}) VALUES ${platz}`).bind(...werte));
+  }
+  for (let i = 0; i < stmts.length; i += 200) await env.DB.batch(stmts.slice(i, i + 200));
+}
+async function botSammler(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_faelle (coin TEXT, ebene TEXT, at INTEGER, close REAL, phase TEXT, rsi REAL, bbpos REAL,
+    mom6 REAL, mom30 REAL, dist200 REAL, slope200 REAL, volr REAL, atrp REAL, ret REAL, PRIMARY KEY (coin, ebene, at))`).run();
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
+  const status = new Map(((await env.DB.prepare('SELECT k, v FROM bot_status').all()).results || []).map(r => [r.k, r.v]));
+  // 1) Historie: je Lauf genau ein noch fehlendes Coin/Zeitebene-Paar nachladen
+  for (const iv in RW_BOT_EBENEN) for (const coin of RW_BOT_COINS) {
+    if (status.get('hist:' + coin + ':' + iv) === 'fertig') continue;
+    const k = await rwBotKerzen(coin, iv, RW_BOT_EBENEN[iv].hist);
+    const rows = rwBotMerkmale(k, RW_BOT_EBENEN[iv].h, 0);
+    await rwBotSchreiben(env, coin, iv, rows);
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, 'fertig').run();
+    return { historie: coin + ' ' + iv, faelle: rows.length };
+  }
+  // 2) Laufend: neue Kerzen anhaengen, offene Ergebnisse nachtragen
+  for (const iv in RW_BOT_EBENEN) for (const coin of RW_BOT_COINS) {
+    try {
+      const H = RW_BOT_EBENEN[iv].h;
+      const k = await rwLiveKerzen(coin, iv, 300);
+      if (k.length < 240) continue;
+      const rows = rwBotMerkmale(k, H, k.length - H - 3);
+      await rwBotSchreiben(env, coin, iv, rows.slice(-3)); // nur die neuesten Kerzen neu einfuegen
+      const offen = rows.filter(r => r.ret != null);       // Ergebnisse, die jetzt feststehen
+      if (offen.length) await env.DB.batch(offen.map(r => env.DB.prepare('UPDATE bot_faelle SET ret = ? WHERE coin = ? AND ebene = ? AND at = ? AND ret IS NULL').bind(r.ret, coin, iv, r.at)));
+    } catch (e) { console.warn('[bot] laufend', coin, iv, e && e.message); }
+  }
+  return { laufend: true };
+}
+async function botStand(env) {
+  try {
+    const z = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN ret IS NOT NULL THEN 1 ELSE 0 END) AS mit FROM bot_faelle').first();
+    const st = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v = 'fertig'").first()) || {};
+    return { faelle: z ? z.n : 0, mitErgebnis: z ? z.mit : 0, historieFertig: st.n || 0, historieGesamt: RW_BOT_COINS.length * Object.keys(RW_BOT_EBENEN).length };
+  } catch (e) { return { faelle: 0, mitErgebnis: 0, historieFertig: 0, historieGesamt: 16 }; }
+}
+
 async function runRefreshCycle(env) {
   try { await liveMitschreiber(env); } catch (e) { console.warn('[live] Lauf', e && e.message); }
+  try { await botSammler(env); } catch (e) { console.warn('[bot] Lauf', e && e.message); }
   // Slash-/Erstattungs-Erkennung entfernt (gewuenscht): einmalig ihre Tabellen und Zwischenstaende loeschen
   try {
     if (!(await env.DB.prepare("SELECT v FROM push_state WHERE k = 'slashAufraeumen'").first().catch(() => null))) {
