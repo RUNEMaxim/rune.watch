@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-13-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-0030'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3095,7 +3095,8 @@ async function handleStats(request, env, ctx) {
           const seit = new Date(L.seit).toISOString().slice(0, 10);
           const zeile = (name, a) => a ? `${name}: after bullish ${a.bullUp ?? '\u2013'} % up (${a.bullN}) \u00b7 after bearish ${a.bearDown ?? '\u2013'} % down (${a.bearN}) \u00b7 base ${a.basisUp} % up \u00b7 Brier ${a.brier} (random ${a.brierZufall})` : `${name}: waiting for results`;
           return tile('live1', 'Signals recorded', L.n, `since ${seit}`) +
-            tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>'));
+            tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>')) +
+            tile('live3', 'Phase signals (new engine)', L.phasenSig ? L.phasenSig.n : null, L.phasenSig && L.phasenSig.ausgewertet ? `${L.phasenSig.treffer} % correct after 3 days (4H) / 7 days (1D) \u00b7 ${L.phasenSig.ausgewertet} evaluated \u00b7 backtest: 56\u201365 %` : 'signals appear only in special situations \u00b7 waiting for results');
         })()}
       </div>
     </section>
@@ -7815,6 +7816,8 @@ async function rwLiveKerzen(sym, iv, n) {
 async function liveMitschreiber(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS live_signale (coin TEXT, ebene TEXT, at INTEGER, close REAL, bull_pct INTEGER, urteil TEXT, trend TEXT,
     ew_phase TEXT, szen_dir TEXT, szen_prob INTEGER, r1 REAL, r2 REAL, r3 REAL, PRIMARY KEY (coin, ebene, at))`).run();
+  // neue Spalten fuer die phasenabhaengigen Signale (einmalig, Fehler = Spalte existiert schon)
+  for (const sp of ['phase TEXT', 'ph_sig TEXT', 'ph_dir TEXT']) { try { await env.DB.prepare('ALTER TABLE live_signale ADD COLUMN ' + sp).run(); } catch (e) {} }
   const stunde = new Date().getUTCHours();
   const ebenen = ['4h'].concat(stunde < 1 ? ['1d'] : []);
   for (const iv of ebenen) for (const coin of RW_LIVE_COINS) {
@@ -7828,8 +7831,9 @@ async function liveMitschreiber(env) {
         try { r = RW_ANALYSE.analyze({ data: k, viewStart: Math.max(0, k.length - 250), viewEnd: k.length - 1, logScale: true, dochtFilter: true }); } catch (e) { console.warn('[live] analyse', coin, iv, e && e.message); }
         if (r) {
           const E = r.elliott, S = r.score, sc = E && E.scenarios && E.scenarios[0];
-          await env.DB.prepare('INSERT OR IGNORE INTO live_signale (coin, ebene, at, close, bull_pct, urteil, trend, ew_phase, szen_dir, szen_prob) VALUES (?,?,?,?,?,?,?,?,?,?)')
-            .bind(coin, iv, letzte.date, letzte.close, S ? S.bullPct : null, S ? S.verdict : null, r.trend ? r.trend.dir : null, E ? E.phase : null, sc ? sc.dir : null, sc ? sc.prob : null).run();
+          const P = r.phasen, PS = P && P.signal;
+          await env.DB.prepare('INSERT OR IGNORE INTO live_signale (coin, ebene, at, close, bull_pct, urteil, trend, ew_phase, szen_dir, szen_prob, phase, ph_sig, ph_dir) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            .bind(coin, iv, letzte.date, letzte.close, S ? S.bullPct : null, S ? S.verdict : null, r.trend ? r.trend.dir : null, E ? E.phase : null, sc ? sc.dir : null, sc ? sc.prob : null, P ? P.phase : null, PS ? PS.key : null, PS ? PS.dir : null).run();
         }
       }
       // Auswertung frueherer Signale mit denselben Kerzen
@@ -7848,7 +7852,7 @@ async function liveMitschreiber(env) {
 }
 async function liveBilanz(env) {
   try {
-    const rows = (await env.DB.prepare('SELECT coin, ebene, at, bull_pct, urteil, szen_dir, szen_prob, r1, r2, r3 FROM live_signale').all()).results || [];
+    const rows = (await env.DB.prepare('SELECT coin, ebene, at, bull_pct, urteil, szen_dir, szen_prob, r1, r2, r3, ph_sig, ph_dir FROM live_signale').all()).results || [];
     if (!rows.length) return { n: 0 };
     const erste = Math.min(...rows.map(r => r.at));
     const auswert = (feld) => {
@@ -7860,7 +7864,10 @@ async function liveBilanz(env) {
       const brier = z.filter(r => r.bull_pct != null).reduce((a, r) => a + Math.pow(r.bull_pct / 100 - (r[feld] > 0 ? 1 : 0), 2), 0) / Math.max(1, z.filter(r => r.bull_pct != null).length);
       return { n: z.length, basisUp: Math.round(100 * up), bullUp: q(bull, r => r[feld] > 0), bullN: bull.length, bearDown: q(bear, r => r[feld] < 0), bearN: bear.length, brier: +brier.toFixed(3), brierZufall: +(up * (1 - up)).toFixed(3) };
     };
-    return { n: rows.length, seit: erste, kurz: auswert('r1'), mittel: auswert('r2'), lang: auswert('r3') };
+    // Phasen-Signale: Treffer nach dem gemessenen Horizont (4H: 3 Tage = r2, Tag: 7 Tage = r2)
+    const ps = rows.filter(r => r.ph_dir && r.r2 != null);
+    const phasenSig = { n: rows.filter(r => r.ph_dir).length, ausgewertet: ps.length, treffer: ps.length ? Math.round(100 * ps.filter(r => r.ph_dir === 'up' ? r.r2 > 0 : r.r2 < 0).length / ps.length) : null };
+    return { n: rows.length, seit: erste, kurz: auswert('r1'), mittel: auswert('r2'), lang: auswert('r3'), phasenSig };
   } catch (e) { return { n: 0, fehler: String(e && e.message || e) }; }
 }
 
@@ -8104,6 +8111,37 @@ const RW_EW_ZUVERL = {
   wave3: { n: 55, treffer: 65, richtung: 49 }, wave2: { n: 36, treffer: 6, richtung: 38 },
 };
 const RW_EW_OHNE_PROJEKTION = ['waveB'];
+const RW_PHASEN_SIGNALE = {
+  '4h': { h: '3d', liste: [
+    { key: 'bbUnten', phase: 'ab', dir: 'up', treffer: 58, basis: 46, coins: '6/8' },
+    { key: 'bbOben', phase: 'ab', dir: 'down', treffer: 65, basis: 54, coins: '6/8' },
+    { key: 'rsiTief', phase: 'ab', dir: 'up', treffer: 57, basis: 46, coins: '4/8' },
+    { key: 'rsiTief', phase: 'seit', dir: 'up', treffer: 60, basis: 45, coins: '3/7' },
+    { key: 'bbUnten', phase: 'seit', dir: 'up', treffer: 56, basis: 46, coins: '3/8' },
+  ] },
+  '1d': { h: '7d', liste: [
+    { key: 'bbUnten', phase: 'seit', dir: 'up', treffer: 65, basis: 55, coins: '3/5' },
+  ] },
+};
+function rwPhasenSignal(k) {
+  if (!Array.isArray(k) || k.length < 230) return null;
+  const n = k.length, c = k.map(x => +x.close), t = k.map(x => +new Date(x.date));
+  const diffs = []; for (let i = Math.max(1, n - 50); i < n; i++) diffs.push(t[i] - t[i - 1]); diffs.sort((a, b) => a - b);
+  const md = diffs[Math.floor(diffs.length / 2)] || 0;
+  const ebene = Math.abs(md - 14400000) < 4320000 ? '4h' : Math.abs(md - 86400000) < 25920000 ? '1d' : null;
+  const sma = (end, p) => { let s = 0; for (let i = end - p + 1; i <= end; i++) s += c[i]; return s / p; };
+  const s200 = sma(n - 1, 200), s200alt = sma(n - 21, 200), last = c[n - 1];
+  const phase = last > s200 && s200 > s200alt ? 'auf' : last < s200 && s200 < s200alt ? 'ab' : 'seit';
+  const m20 = sma(n - 1, 20); let q = 0; for (let i = n - 20; i < n; i++) q += (c[i] - m20) * (c[i] - m20); const sd = Math.sqrt(q / 20);
+  let g = 0, l = 0; for (let i = 1; i < n; i++) { const d = c[i] - c[i - 1], gu = Math.max(d, 0), ld = Math.max(-d, 0); if (i <= 14) { g += gu / 14; l += ld / 14; } else { g = (g * 13 + gu) / 14; l = (l * 13 + ld) / 14; } }
+  const rsi = 100 - 100 / (1 + g / (l || 1e-9));
+  const aktiv = { bbUnten: last < m20 - 2 * sd, bbOben: last > m20 + 2 * sd, rsiTief: rsi < 30, rsiHoch: rsi > 70 };
+  const tab = ebene ? RW_PHASEN_SIGNALE[ebene] : null;
+  const signale = tab ? tab.liste.filter(x => x.phase === phase && aktiv[x.key]).map(x => ({ ...x, h: tab.h, ebene })) : [];
+  signale.sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis));
+  const warnung = phase === 'auf' && (aktiv.rsiHoch || aktiv.bbOben) ? 'aufUeberkauft' : null;
+  return { phase, ebene, rsi: Math.round(rsi), signal: signale[0] || null, weitere: signale.slice(1), warnung };
+}
 const TPAnalysis = (() => {
   const ln = v => Math.log(Math.max(v, 1e-12));
   const hiOf = d => d.high != null ? d.high : d.value;
@@ -12088,6 +12126,7 @@ const TPAnalysis = (() => {
       from, to, lastClose, atrAbs, atrPct, useLog, divergenzen,
       pivots: mediumInView.pivots, pending: medium.pending, coarsePivots: coarse.pivots,
       trend, sr, fib, fibs, elliott, indicators, score, trendlines, trendlinesTouch,
+      phasen: (() => { try { return rwPhasenSignal(rohDaten); } catch (e) { return null; } })(),
       updatedAt: Date.now()
     };
   }
