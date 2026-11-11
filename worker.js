@@ -178,6 +178,42 @@ async function handleBonderZahl(request, env) {
   return json(v, env);
 }
 
+// KURZLINK ZU EINER NODE (gewuenscht: "den Link schoener machen"): runewatch.org/n/<name-oder-adressende>
+// leitet auf die RUNEBond-Profilseite der Node weiter -- mit unserer Empfehlungs-Kennung, die im geteilten
+// Link selbst nicht mehr zu sehen ist. Name z. B. "the-runecrafter", sonst die letzten Zeichen der Adresse.
+const rwSlug = (t) => String(t || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+async function handleNodeKurzlink(request, env, ctx) {
+  const url = new URL(request.url);
+  const slug = rwSlug(decodeURIComponent(url.pathname.slice(3)));
+  let liste = [];
+  try {
+    const r = await handleRunebondNodes(new Request(new URL('/runebond-nodes', url).toString()), env, ctx);
+    const j = await r.json();
+    liste = Array.isArray(j && j.listings) ? j.listings : (Array.isArray(j && j.nodes) ? j.nodes : []);
+  } catch (e) {}
+  const treffer = slug ? (liste.find((n) => n && n.name && rwSlug(n.name) === slug)
+    || liste.find((n) => n && n.addr && String(n.addr).toLowerCase().endsWith(slug))) : null;
+  let affiliate = String(env.RUNEBOND_AFFILIATE || '').split(',').map((x) => x.trim()).filter((x) => /^thor1/.test(x))[0] || '';
+  if (!affiliate) {
+    try {
+      const tn = await fetchFromBases(getThornodeBases(), '/thorchain/thorname/runewatch');
+      const al = tn && Array.isArray(tn.aliases) ? tn.aliases.find((x) => String(x.chain).toUpperCase() === 'THOR') : null;
+      if (al && al.address) affiliate = al.address;
+    } catch (e) {}
+  }
+  const ziel = new URL(treffer ? (treffer.profileUrl || `https://app.runebond.com/nodes/${treffer.addr}`) : 'https://app.runebond.com/');
+  if (affiliate) { ziel.searchParams.set('ref', affiliate); ziel.searchParams.set('affiliate', affiliate); }
+  ziel.searchParams.set('utm_source', 'rune.watch');
+  ziel.searchParams.set('utm_medium', 'share');
+  // als Klick zaehlen (Quelle "geteilter Link")
+  try {
+    const now = Date.now();
+    const p = env.DB.prepare('INSERT INTO outbound_clicks (target, token, day, at, quelle) VALUES (?, ?, ?, ?, ?)').bind('runebond', 'kurzlink', utcDayString(now), now, 'geteilt').run().catch(() => {});
+    if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+  } catch (e) {}
+  return new Response(null, { status: 302, headers: { Location: ziel.toString(), 'Cache-Control': 'no-store' } });
+}
+
 // JAHRES-APY FUER DIE WILLKOMMENS-KARTE (gewuenscht: "meine Jahres-APY aus der App, fuer jeden neuen
 // Besucher sichtbar"): Die App des Betreibers schickt ihre 12-Monats-APY (Durchschnitt der Churn-APYs)
 // hierher; jeder Besucher liest sie. Angenommen wird sie nur fuer eine Betreiber-Adresse (dieselbe Liste
@@ -2421,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-13-1530'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-13-1945'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5343,6 +5379,9 @@ export default {
       }
       if (url.pathname === '/thornode-timeline') {
         return await handleThornodeTimeline(request, env, ctx);
+      }
+      if (url.pathname.startsWith('/n/')) {
+        return await handleNodeKurzlink(request, env, ctx);
       }
       if (url.pathname === '/rb-pruefung') {
         // NACHPRUEFEN (gemeldet: "die Zahlen koennen nicht stimmen"): oeffentliche Rohdaten der RUNEBond-Zaehlung --
