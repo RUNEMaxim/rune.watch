@@ -2421,7 +2421,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-12-1900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-13-0015'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -4104,7 +4104,7 @@ function baueDexVergleichCached() {
   return promise;
 }
 
-const DEX_VOLUME_STALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const DEX_VOLUME_STALE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 Tage: lieber aeltere Zahlen als "nicht verfuegbar" (gemeldet)
 
 // VERGANGENE TAGE FESTHALTEN (gemeldet: "dann springt es manchmal rueber zu Liquify").
 //
