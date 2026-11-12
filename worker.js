@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-0300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-0715'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2776,6 +2776,8 @@ async function handleStats(request, env, ctx) {
     // ohne Stand hoechstens 3 s warten.
     liveTest: await liveBilanz(env),
     botStand: await botStand(env),
+    laufLive: await rwLaufInfo(env, 'live'),
+    laufBot: await rwLaufInfo(env, 'bot'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
       const frisch = runebondEmpfehlungen(env).catch(() => null);
@@ -3101,7 +3103,10 @@ async function handleStats(request, env, ctx) {
         })()}
         <div class="sec">Learning bot \u00b7 step 1: collecting</div>
         ${(() => { const B = stats.botStand || {}; return tile('bot1', 'Cases collected', B.faelle || null,
-          `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} (one per hour)`); })()}
+          `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} (four per hour)`); })()}
+        ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet (runs at minute ${n === 'Live' ? '30' : '33/38/43/48'} UTC)` :
+            `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 80)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 80)}` : ' \u00b7 ok');
+          return tile('bot2', 'Run status', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot)); })()}
       </div>
     </section>
     <section class="page">
@@ -5404,6 +5409,13 @@ export default {
         const erg = await runebondEmpfehlungen(env).catch(e => ({ fehler: String(e && e.message || e) }));
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
       }
+      if (url.pathname === '/bot-pruefung') {
+        // Sofort einen Lauf ausloesen und Fehler sehen (nur mit Statistik-Schluessel).
+        if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+        const live = await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
+        const bot = await rwDiagLauf(env, 'bot', () => botSammler(env));
+        return json({ live, bot, stand: await botStand(env), liveBilanz: await liveBilanz(env) }, env);
+      }
       if (url.pathname === '/bonder-zahl') {
         return await handleBonderZahl(request, env);
       }
@@ -5565,6 +5577,12 @@ export default {
     // grossen Durchgang. Mit einem zweiten Cron "* * * * *" in wrangler.toml laeuft er jede Minute
     // allein (schnell, kein Dune/Swap-Paare davor); der grosse Durchgang bleibt wie er ist.
     if (event && event.cron === '* * * * *') {
+      // LIVE-MITSCHREIBER + LERNENDER BOT in eigenen Aufrufen (gemeldet: "keine Ergebnisse"): vorher liefen sie
+      // vorn im grossen Durchgang und teilten sich dessen Budget. Jetzt: Minute 30 = Live-Signale,
+      // Minuten 33/38/43/48 = Bot (Historie also 4 Paare pro Stunde, danach laufend).
+      const minute = new Date().getUTCMinutes();
+      if (minute === 30) ctx.waitUntil(rwDiagLauf(env, 'live', () => liveMitschreiber(env)));
+      if (minute === 33 || minute === 38 || minute === 43 || minute === 48) ctx.waitUntil(rwDiagLauf(env, 'bot', () => botSammler(env)));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -7811,9 +7829,7 @@ async function syncPodcastMeldung(env) {
 const RW_LIVE_COINS = ['RUNE', 'BTC', 'ETH', 'SOL'];
 const RW_LIVE_H = { '4h': [6, 18, 42], '1d': [3, 7, 14] };
 async function rwLiveKerzen(sym, iv, n) {
-  const r = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}USDT&interval=${iv}&limit=${n}`, { timeoutMs: 12000 });
-  if (!r.ok) throw new Error('klines ' + r.status);
-  const j = await r.json();
+  const j = await rwKlinesHolen(`symbol=${sym}USDT&interval=${iv}&limit=${n}`);
   const jetzt = Date.now();
   return j.filter(k => Number(k[6]) < jetzt).map(k => ({ date: Number(k[0]), open: +k[1], high: +k[2], low: +k[3], close: +k[4], value: +k[4], volume: +k[5] })); // nur geschlossene Kerzen
 }
@@ -7832,7 +7848,7 @@ async function liveMitschreiber(env) {
       const da = await env.DB.prepare('SELECT 1 FROM live_signale WHERE coin = ? AND ebene = ? AND at = ?').bind(coin, iv, letzte.date).first();
       if (!da) {
         let r = null;
-        try { r = RW_ANALYSE.analyze({ data: k, viewStart: Math.max(0, k.length - 250), viewEnd: k.length - 1, logScale: true, dochtFilter: true }); } catch (e) { console.warn('[live] analyse', coin, iv, e && e.message); }
+        try { r = RW_ANALYSE.analyze({ data: k, viewStart: Math.max(0, k.length - 250), viewEnd: k.length - 1, logScale: true, dochtFilter: true }); } catch (e) { console.warn('[live] analyse', coin, iv, e && e.message); RW_DIAG.push(`analyse ${coin} ${iv}: ${e && e.message || e}`); }
         if (r) {
           const E = r.elliott, S = r.score, sc = E && E.scenarios && E.scenarios[0];
           const P = r.phasen, PS = P && P.signal;
@@ -7851,7 +7867,7 @@ async function liveMitschreiber(env) {
         const n1 = o.r1 ?? ret(h1), n2 = o.r2 ?? ret(h2), n3 = o.r3 ?? ret(h3);
         if (n1 !== o.r1 || n2 !== o.r2 || n3 !== o.r3) await env.DB.prepare('UPDATE live_signale SET r1 = ?, r2 = ?, r3 = ? WHERE coin = ? AND ebene = ? AND at = ?').bind(n1, n2, n3, coin, iv, o.at).run();
       }
-    } catch (e) { console.warn('[live]', coin, iv, e && e.message); }
+    } catch (e) { console.warn('[live]', coin, iv, e && e.message); RW_DIAG.push(`live ${coin} ${iv}: ${e && e.message || e}`); }
   }
 }
 async function liveBilanz(env) {
@@ -7876,6 +7892,35 @@ async function liveBilanz(env) {
 }
 
 
+// ===== DIAGNOSE fuer Live-Mitschreiber und Bot =====
+let RW_DIAG = [];
+async function rwDiagLauf(env, name, fn) {
+  RW_DIAG = []; const t0 = Date.now(); let ergebnis = null, fehler = null;
+  try { ergebnis = await fn(); } catch (e) { fehler = String(e && e.message || e); }
+  const info = { at: Date.now(), ms: Date.now() - t0, fehler, einzelFehler: RW_DIAG.slice(0, 12), ergebnis };
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('lauf:' + name, JSON.stringify(info)).run();
+  } catch (e) {}
+  return info;
+}
+async function rwLaufInfo(env, name) {
+  try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('lauf:' + name).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
+}
+// Kerzen mit Ausweich-Adressen (falls ein Binance-Spiegel aus der Cloud gesperrt ist)
+const RW_KLINES_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com', 'https://api1.binance.com', 'https://api4.binance.com'];
+async function rwKlinesHolen(pfadUndQuery) {
+  let letzter = null;
+  for (const h of RW_KLINES_HOSTS) {
+    try {
+      const r = await fetchWithTimeout(h + '/api/v3/klines?' + pfadUndQuery, { timeoutMs: 12000 });
+      if (r.ok) return await r.json();
+      letzter = h + ' HTTP ' + r.status;
+    } catch (e) { letzter = h + ' ' + (e && e.message || e); }
+  }
+  throw new Error('klines nicht erreichbar: ' + letzter);
+}
+
 // ===== LERNENDER BOT · SCHRITT 1: MERKMALE SAMMELN =====
 // Fuer 8 Coins (4H + Tag) je Kerze einfache, schnell berechenbare Merkmale + spaeteres Ergebnis (Kursveraenderung nach
 // 3 Tagen bei 4H bzw. 7 Tagen bei Tag). Einmalig wird die Historie nachgeladen (je Lauf ein Coin/Zeitebene), danach
@@ -7885,9 +7930,7 @@ const RW_BOT_EBENEN = { '4h': { h: 18, hist: 3000 }, '1d': { h: 7, hist: 1500 } 
 async function rwBotKerzen(sym, iv, anzahl) {
   let ende = Date.now(), alle = [];
   while (alle.length < anzahl) {
-    const r = await fetchWithTimeout(`https://data-api.binance.vision/api/v3/klines?symbol=${sym}USDT&interval=${iv}&limit=1000&endTime=${ende}`, { timeoutMs: 15000 });
-    if (!r.ok) throw new Error('klines ' + r.status);
-    const j = await r.json(); if (!Array.isArray(j) || !j.length) break;
+    const j = await rwKlinesHolen(`symbol=${sym}USDT&interval=${iv}&limit=1000&endTime=${ende}`); if (!Array.isArray(j) || !j.length) break;
     alle = j.map(x => ({ date: Number(x[0]), schluss: Number(x[6]), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] })).concat(alle);
     ende = Number(j[0][0]) - 1; if (j.length < 1000) break;
   }
@@ -7962,7 +8005,7 @@ async function botSammler(env) {
       await rwBotSchreiben(env, coin, iv, rows.slice(-3)); // nur die neuesten Kerzen neu einfuegen
       const offen = rows.filter(r => r.ret != null);       // Ergebnisse, die jetzt feststehen
       if (offen.length) await env.DB.batch(offen.map(r => env.DB.prepare('UPDATE bot_faelle SET ret = ? WHERE coin = ? AND ebene = ? AND at = ? AND ret IS NULL').bind(r.ret, coin, iv, r.at)));
-    } catch (e) { console.warn('[bot] laufend', coin, iv, e && e.message); }
+    } catch (e) { console.warn('[bot] laufend', coin, iv, e && e.message); RW_DIAG.push(`bot ${coin} ${iv}: ${e && e.message || e}`); }
   }
   return { laufend: true };
 }
@@ -7975,8 +8018,6 @@ async function botStand(env) {
 }
 
 async function runRefreshCycle(env) {
-  try { await liveMitschreiber(env); } catch (e) { console.warn('[live] Lauf', e && e.message); }
-  try { await botSammler(env); } catch (e) { console.warn('[bot] Lauf', e && e.message); }
   // Slash-/Erstattungs-Erkennung entfernt (gewuenscht): einmalig ihre Tabellen und Zwischenstaende loeschen
   try {
     if (!(await env.DB.prepare("SELECT v FROM push_state WHERE k = 'slashAufraeumen'").first().catch(() => null))) {
