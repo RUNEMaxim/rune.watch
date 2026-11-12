@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-1800'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-2100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5439,9 +5439,10 @@ export default {
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
       }
       if (url.pathname === '/bot-signale') {
-        const [a, b, live, tb4, tb1] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d')]);
+        const [a, b, live, tb4, tb1, ewRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
+          env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null)]);
         const kurz = x => x ? { at: x.at, horizont: x.horizont, n: x.n, signale: x.signale, aenderung: x.aenderung } : null;
-        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
+        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
@@ -5450,6 +5451,20 @@ export default {
         if (!RW_BOT_COINS.includes(coin)) return json({ error: 'UNKNOWN_COIN' }, env, 400);
         const [pr, live] = await Promise.all([botPrognose(env, coin, iv), botLiveBilanz(env)]);
         return json({ ...pr, live }, env);
+      }
+      if (url.pathname === '/elliott-tabelle' && request.method === 'POST') {
+        // Ergebnis des Elliott-Genauigkeitstests (laeuft im Browser, weil die volle Analyse dort schneller ist)
+        if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+        const b = await request.json().catch(() => null);
+        if (!b || typeof b !== 'object') return json({ error: 'BAD_REQUEST' }, env, 400);
+        const sauber = {};
+        for (const iv of ['4h', '1d']) if (b[iv] && Array.isArray(b[iv].zeilen)) sauber[iv] = {
+          zeilen: b[iv].zeilen.slice(0, 300).map(z => ({ art: String(z.art).slice(0, 30), key: String(z.key).slice(0, 60), n: +z.n || 0, treffer: +z.treffer || 0, erwartet: +z.erwartet || 0, coinsPlus: +z.coinsPlus || 0, coinsMit: +z.coinsMit || 0, bestanden: !!z.bestanden })),
+          stabilitaet: b[iv].stabilitaet && typeof b[iv].stabilitaet === 'object' ? b[iv].stabilitaet : {} };
+        await botSammlerTabellen(env);
+        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('elliott:tabelle', JSON.stringify({ at: Date.now(), ...sauber })).run();
+        const bestanden = Object.values(sauber).reduce((a, e) => a + e.zeilen.filter(z => z.bestanden).length, 0);
+        return json({ ok: true, bestanden }, env);
       }
       if (url.pathname === '/bot-historie' && request.method === 'POST') {
         // Lange Historie vom Browser (Backtest-Seite) annehmen: der Browser darf Binance abrufen, Cloudflare nicht.
