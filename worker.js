@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0010'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2789,7 +2789,7 @@ async function handleStats(request, env, ctx) {
     botTb1d: await botTrendbruch(env, '1d'),
     botEwLauf: await rwLaufInfo(env, 'elliott'),
     botEwTab: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
-      return { at: t.at, b4: t['4h'] ? t['4h'].zeilen.filter(z => z.bestanden).length : 0, b1: t['1d'] ? t['1d'].zeilen.filter(z => z.bestanden).length : 0 }; } catch (e) { return null; } })(),
+      return { at: t.at, cfg: t.cfg || null, b4: t['4h'] ? t['4h'].zeilen.filter(z => z.bestanden).length : 0, b1: t['1d'] ? t['1d'].zeilen.filter(z => z.bestanden).length : 0 }; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
@@ -3137,9 +3137,10 @@ async function handleStats(request, env, ctx) {
             : `${name}: no variant passed (` + T.varianten.map(v => `${v.linie}: dd ${v.ddMit}/${v.ddOhne} %, better ${v.besserBei}/${v.coins}`).join('; ') + ')';
           const tbTile = tile('bot6', 'Trend break (risk signal)', null, tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h));
           const EW = stats.botEwTab, EL = stats.botEwLauf && stats.botEwLauf.ergebnis;
-          const ewTile = tile('bot7', 'Elliott count types (weekly test)', EW ? EW.b4 + EW.b1 : null,
-            (EW ? `last finished ${new Date(EW.at).toISOString().slice(0, 10)} \u00b7 reliable: 4H ${EW.b4}, daily ${EW.b1}` : 'first run in progress') +
-            (EL && EL.status === 'laeuft' ? `<br>running: pair ${EL.paar}` : EL && EL.status ? `<br>${EL.status}` : '') + (stats.botEwLauf && stats.botEwLauf.fehler ? '<br>ERROR ' + stats.botEwLauf.fehler : ''));
+          void EL;
+          const ewTile = tile('bot7', 'Elliott (trained)', EW ? EW.b4 + EW.b1 : null,
+            EW ? `trained ${new Date(EW.at).toISOString().slice(0, 10)} \u00b7 reliable count types: 4H ${EW.b4}, daily ${EW.b1}` + (EW.cfg ? ` \u00b7 wave detection factor: 4H ${EW.cfg['4h']}, daily ${EW.cfg['1d']}` : '')
+              : 'not trained yet \u2013 backtest page \u2192 \u201cElliott trainieren\u201d (PC, 1\u20132 h)');
           return liveTile + tbTile + ewTile + tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
             sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d)) + (false ? tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
             `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')) : ''); })()}
@@ -5466,11 +5467,16 @@ export default {
         if (!b || typeof b !== 'object') return json({ error: 'BAD_REQUEST' }, env, 400);
         const sauber = {};
         for (const iv of ['4h', '1d']) if (b[iv] && Array.isArray(b[iv].zeilen)) sauber[iv] = {
-          zeilen: b[iv].zeilen.slice(0, 300).map(z => ({ art: String(z.art).slice(0, 30), key: String(z.key).slice(0, 60), n: +z.n || 0, treffer: +z.treffer || 0, erwartet: +z.erwartet || 0, coinsPlus: +z.coinsPlus || 0, coinsMit: +z.coinsMit || 0, bestanden: !!z.bestanden })),
-          stabilitaet: b[iv].stabilitaet && typeof b[iv].stabilitaet === 'object' ? b[iv].stabilitaet : {} };
+          zeilen: b[iv].zeilen.slice(0, 300).map(z => ({ art: String(z.art).slice(0, 30), key: String(z.key).slice(0, 60), n: +z.n || 0, treffer: +z.treffer || 0, erwartet: +z.erwartet || 0, coinsPlus: +z.coinsPlus || 0, coinsMit: +z.coinsMit || 0, bestanden: !!z.bestanden,
+            anteil60: z.anteil60 == null ? null : +z.anteil60 })),
+          stabilitaet: b[iv].stabilitaet && typeof b[iv].stabilitaet === 'object' ? b[iv].stabilitaet : {}, guete: b[iv].guete || null };
+        const okF = f => [0.6, 0.8, 1, 1.3].includes(+f);
+        if (b.cfg && typeof b.cfg === 'object') sauber.cfg = { '4h': okF(b.cfg['4h']) ? +b.cfg['4h'] : 1, '1d': okF(b.cfg['1d']) ? +b.cfg['1d'] : 1 };
+        if (b.varianten && typeof b.varianten === 'object') sauber.varianten = b.varianten;
         await botSammlerTabellen(env);
-        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('elliott:tabelle', JSON.stringify({ at: Date.now(), ...sauber })).run();
-        const bestanden = Object.values(sauber).reduce((a, e) => a + e.zeilen.filter(z => z.bestanden).length, 0);
+        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('elliott:tabelle', JSON.stringify({ at: Date.now(), v: 2, ...sauber })).run();
+        await env.DB.prepare("DELETE FROM bot_status WHERE k = 'elliott:job'").run().catch(() => {});
+        const bestanden = ['4h', '1d'].reduce((a, iv) => a + (sauber[iv] ? sauber[iv].zeilen.filter(z => z.bestanden).length : 0), 0);
         return json({ ok: true, bestanden }, env);
       }
       if (url.pathname === '/bot-historie' && request.method === 'POST') {
@@ -5490,6 +5496,10 @@ export default {
       if (url.pathname === '/bot-pruefung') {
         // Sofort einen Lauf ausloesen und Fehler sehen (nur mit Statistik-Schluessel).
         if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+        if (url.searchParams.get('elliott') === '1') {
+          const e1 = await rwDiagLauf(env, 'elliott', () => botElliottSchritt(env));
+          return json({ elliott: e1 }, env);
+        }
         if (url.searchParams.get('lernen') === '1') {
           const s4 = await rwDiagLauf(env, 'signale4h', () => botSignaleLernen(env, '4h'));
           const s1 = await rwDiagLauf(env, 'signale1d', () => botSignaleLernen(env, '1d'));
@@ -5702,8 +5712,8 @@ async function rwPlanLaeufe(env) {
       if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
-    // jede Minute eine Portion, solange der Test laeuft (danach prueft er nur noch, ob er aktuell ist)
-    if (await alter('elliott') > 50e3) await rwDiagLauf(env, 'elliott', () => botElliottSchritt(env));
+    // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
+    //  -- Backtest-Seite "Elliott trainieren" -- und speichert das Ergebnis ueber /elliott-tabelle.)
   } catch (e) { console.warn('[plan]', e && e.message); }
   finally { rwPlanLaeuftGerade = false; }
 }
@@ -8501,7 +8511,8 @@ async function botTrendbruch(env, iv) {
 // Gleiche Messung wie der Browser-Test "Elliott genau": je Schritt die volle Chart-Analyse, dann pruefen, ob das Ziel vor
 // der Ungueltigkeit erreicht wurde -- verglichen mit der rechnerischen Erwartung aus den Abstaenden. Pro Lauf nur eine
 // Portion (Rechenzeit), Zwischenstand in der Datenbank; fertig -> Tabelle 'elliott:tabelle' (die App liest sie).
-const RW_EW_PORTION = 300; // ~12 s Rechenzeit je Lauf (gewuenscht: schneller)
+const RW_EW_PORTION = 400; // Obergrenze; tatsaechlich bricht der Lauf nach ~8 s Rechenzeit ab (siehe unten)
+const RW_EW_ZEIT_MS = 8000;
 function rwMarktphase(c, i) {
   if (i < 220) return null; let s = 0, sa = 0; for (let j = i - 199; j <= i; j++) s += c[j]; for (let j = i - 219; j <= i - 20; j++) sa += c[j];
   const s200 = s / 200, alt = sa / 200; return c[i] > s200 && s200 > alt ? 'auf' : c[i] < s200 && s200 < alt ? 'ab' : 'seit';
@@ -8524,8 +8535,12 @@ async function botElliottSchritt(env) {
     job = { v: 2, start: Date.now(), paare: [], idx: 0, pos: null }; for (const iv of ['4h', '1d']) for (const c of RW_BOT_COINS) job.paare.push([c, iv]);
     await env.DB.prepare('DELETE FROM bot_ew_recs').run();
   }
-  let rest = RW_EW_PORTION;
-  while (rest > 0 && job.idx < job.paare.length) {
+  let rest = RW_EW_PORTION; const t0 = Date.now();
+  // ZEITBUDGET (gemeldet: haengt bei Paar 2/16): Bei zu viel Rechenzeit bricht Cloudflare den ganzen Aufruf ab, ohne dass
+  // der Zwischenstand gespeichert wird. Jetzt wird alle 20 Analysen gespeichert (dabei laeuft die Uhr im Worker weiter)
+  // und nach ~8 s sauber aufgehoert.
+  const speichern = async () => { await env.DB.prepare("INSERT OR REPLACE INTO bot_status (k, v) VALUES ('elliott:job', ?)").bind(JSON.stringify(job)).run(); };
+  while (rest > 0 && job.idx < job.paare.length && Date.now() - t0 < RW_EW_ZEIT_MS) {
     const [coin, iv] = job.paare[job.idx];
     const rows = ((await env.DB.prepare('SELECT at, open, high, low, close, volume FROM bot_faelle WHERE coin = ? AND ebene = ? AND high IS NOT NULL ORDER BY at').bind(coin, iv).all()).results) || [];
     const k = rows.map(r => ({ date: r.at, open: r.open != null ? r.open : r.close, high: r.high, low: r.low, close: r.close, value: r.close, volume: r.volume || 0 }));
@@ -8533,6 +8548,11 @@ async function botElliottSchritt(env) {
     if (k.length < 400) { job.idx++; job.pos = null; continue; }
     let i = job.pos == null ? 300 : job.pos; const stmts = [];
     for (; i < k.length - L && rest > 0; i += SCHRITT, rest--) {
+      if (stmts.length >= 20 || (rest % 20 === 0 && rest !== RW_EW_PORTION)) {
+        if (stmts.length) { await env.DB.batch(stmts.splice(0)); }
+        job.pos = i; await speichern();
+        if (Date.now() - t0 > RW_EW_ZEIT_MS) break;
+      }
       let A = null; try { const D = k.slice(Math.max(0, i - 700), i + 1); A = RW_ANALYSE.analyze({ data: D, viewStart: Math.max(0, D.length - 250), viewEnd: D.length - 1, logScale: true, dochtFilter: true }); } catch (e) { continue; }
       const E = A && A.elliott; if (!E || !E.targets || !E.targets[0] || !E.invalidation) continue;
       const markt = rwMarktphase(c, i); if (!markt) continue;
@@ -8550,6 +8570,7 @@ async function botElliottSchritt(env) {
     }
     if (stmts.length) await env.DB.batch(stmts);
     if (i >= k.length - L) { job.idx++; job.pos = null; } else job.pos = i;
+    await speichern();
   }
   if (job.idx >= job.paare.length) {
     const tabelle = { at: Date.now(), v: 2 };
@@ -8837,6 +8858,9 @@ const RW_EW_ZUVERL = {
   wave3: { n: 55, treffer: 65, richtung: 49 }, wave2: { n: 36, treffer: 6, richtung: 38 },
 };
 const RW_EW_OHNE_PROJEKTION = ['waveB'];
+const RW_EW_CFG = (() => { const d = { '4h': 1, '1d': 1, erzwungen: null };
+  try { if (typeof localStorage !== 'undefined') { const j = JSON.parse(localStorage.getItem('rw_ew_cfg') || 'null'); if (j && typeof j === 'object') { if (j['4h'] > 0) d['4h'] = j['4h']; if (j['1d'] > 0) d['1d'] = j['1d']; } } } catch (e) {}
+  return d; })();
 const RW_PHASEN_SIGNALE = {
   '4h': { h: '3d', liste: [
     { key: 'bbUnten', phase: 'ab', dir: 'up', treffer: 58, basis: 46, coins: '6/8' },
@@ -8926,6 +8950,11 @@ function rwTrendbruch(k, cfg) {
     zustand[i] = drin;
   }
   return { ev, ma, drin, seit, cfg, zustand };
+}
+function rwBotEbene(k) {
+  const n = k.length, t = k.map(x => +new Date(x.date)); const diffs = []; for (let i = Math.max(1, n - 50); i < n; i++) diffs.push(t[i] - t[i - 1]); diffs.sort((a, b) => a - b);
+  const md = diffs[Math.floor(diffs.length / 2)] || 0;
+  return Math.abs(md - 14400000) < 4320000 ? '4h' : Math.abs(md - 86400000) < 25920000 ? '1d' : null;
 }
 function rwPhasenSignal(k) {
   if (!Array.isArray(k) || k.length < 230) return null;
@@ -9085,6 +9114,7 @@ const TPAnalysis = (() => {
     return { pivots: piv, pending };
   }
   const ZZ_STEPS = [0.006, 0.009, 0.013, 0.018, 0.025, 0.035, 0.05, 0.07, 0.1, 0.14, 0.2, 0.28, 0.4, 0.6];
+  let zzFaktor = 1; // gelernte Feinheit der Wellenerkennung, je Aufruf von analyze() gesetzt
   // WICHTIG (gemeldet: "Muster verschwinden, wenn ich den Chart etwas verschiebe"): der ZigZag
   // lief bisher ab dem LINKEN Bildrand. Jedes Verschieben aenderte damit den Startpunkt, die
   // Wendepunkte und mit ihnen Muster und Ziele -- sie flackerten. Jetzt laeuft der ZigZag immer
@@ -9111,6 +9141,7 @@ const TPAnalysis = (() => {
   // auf eine andere Stufe und lieferte ganz andere Pivots (zweite Flacker-Ursache).
   const pow2Span = len => Math.pow(2, Math.round(Math.log(Math.max(8, len)) / Math.LN2));
   function pivotsAuto(data, from, to, maxCount, minCount, minPct, viewLen) {
+    if (zzFaktor !== 1) maxCount = Math.max(3, Math.round(maxCount * zzFaktor));
     const steps = ZZ_STEPS.filter(p => p >= (minPct || 0));
     if (!steps.length) steps.push(ZZ_STEPS[ZZ_STEPS.length - 1]);
     // Die Zaehlung fuer "zu viele Wendepunkte?" laeuft NICHT ueber das exakte Fenster (das
@@ -11367,6 +11398,7 @@ const TPAnalysis = (() => {
   }
 
   function analyze({ data: rohDaten, viewStart, viewEnd, logScale, ma200Override, degreeMode, dochtFilter, kontextExtern = null }) {
+    try { zzFaktor = RW_EW_CFG.erzwungen || RW_EW_CFG[rwBotEbene(rohDaten)] || 1; } catch (e) { zzFaktor = 1; }
     // Dochtfilter jetzt IMMER (nicht nur im Vergleichs-Chart): Fehlausbrueche sollen in keinem
     // Zeitraum eine Welle erfinden. Gezeichnet werden weiterhin die echten Kerzen.
     const data = rohDaten && rohDaten.length && dochtFilter !== false ? rwDochtFilter(rohDaten) : rohDaten;
