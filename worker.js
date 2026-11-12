@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-1045'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-1130'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2783,6 +2783,8 @@ async function handleStats(request, env, ctx) {
     botLernlauf4h: await rwLaufInfo(env, 'lernen4h'),
     botLernlauf1d: await rwLaufInfo(env, 'lernen1d'),
     botLive: await botLiveBilanz(env),
+    botSignale4h: await botSignale(env, '4h'),
+    botSignale1d: await botSignale(env, '1d'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
       const frisch = runebondEmpfehlungen(env).catch(() => null);
@@ -3116,7 +3118,11 @@ async function handleStats(request, env, ctx) {
           const m = (name, M, L) => { if (M && M.modell) return `${name}: model from ${new Date(M.at).toISOString().slice(0, 10)} \u00b7 test hit rate ${pct(M.test.treffer)} (base ${pct(Math.max(M.basis, 1 - M.basis))}) \u00b7 Brier ${M.test.brier} vs ${M.test.brierBasis}` + (M.gelernt && M.gelernt.length ? ` \u00b7 learned: ${M.gelernt.join(', ')}` : '');
             const e = L && L.ergebnis; return `${name}: ` + (e && e.uebernommen === false ? `not adopted (${e.test ? 'Brier ' + e.test.brier + ' vs base ' + e.test.brierBasis : ''})` : L && L.fehler ? 'ERROR ' + L.fehler : 'not trained yet'); };
           const B = stats.botLive || {};
-          return tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
+          const sig = (name, S) => !S ? `${name}: not learned yet` : `${name}: ${S.signale.length} reliable situations (learned ${new Date(S.at).toISOString().slice(0, 10)} from ${S.n} cases)` +
+            (S.signale.length ? ': ' + S.signale.slice(0, 4).map(x => `${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}%/${x.basis}%`).join(', ') : '') +
+            (S.aenderung && (S.aenderung.neu.length || S.aenderung.weg.length) ? ` \u00b7 new: ${S.aenderung.neu.length}, dropped: ${S.aenderung.weg.length}` : '');
+          return tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
+            sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d)) + tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
             `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')); })()}
       </div>
     </section>
@@ -5420,6 +5426,11 @@ export default {
         const erg = await runebondEmpfehlungen(env).catch(e => ({ fehler: String(e && e.message || e) }));
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
       }
+      if (url.pathname === '/bot-signale') {
+        const [a, b] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d')]);
+        const kurz = x => x ? { at: x.at, horizont: x.horizont, n: x.n, signale: x.signale, aenderung: x.aenderung } : null;
+        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b) }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=900' } });
+      }
       if (url.pathname === '/bot-prognose') {
         const coin = String(url.searchParams.get('coin') || 'RUNE').toUpperCase(), iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
         if (!RW_BOT_COINS.includes(coin)) return json({ error: 'UNKNOWN_COIN' }, env, 400);
@@ -5446,7 +5457,9 @@ export default {
         if (url.searchParams.get('lernen') === '1') {
           const l4 = await rwDiagLauf(env, 'lernen4h', () => botLernen(env, '4h'));
           const l1 = await rwDiagLauf(env, 'lernen1d', () => botLernen(env, '1d'));
-          return json({ lernen4h: l4, lernen1d: l1, prognoseRUNE: await botPrognose(env, 'RUNE', '4h') }, env);
+          const s4 = await rwDiagLauf(env, 'signale4h', () => botSignaleLernen(env, '4h'));
+          const s1 = await rwDiagLauf(env, 'signale1d', () => botSignaleLernen(env, '1d'));
+          return json({ signale4h: s4, signale1d: s1, modell4h: l4.ergebnis, modell1d: l1.ergebnis }, env);
         }
         const live = await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
         const bot = await rwDiagLauf(env, 'bot', () => botSammler(env));
@@ -5650,6 +5663,7 @@ async function rwPlanLaeufe(env) {
       const M = await botModell(env, iv), a = await alter('lernen' + iv);
       // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
       if (a > 7 * 864e5 || (!M && a > 864e5)) await rwDiagLauf(env, 'lernen' + iv, () => botLernen(env, iv));
+      if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
     }
   } catch (e) { console.warn('[plan]', e && e.message); }
   finally { rwPlanLaeuftGerade = false; }
@@ -8215,6 +8229,70 @@ async function botLiveBilanz(env) {
     const ok = rows.filter(r => (r.p > 0.5) === (r.ret > 0)).length;
     return { n: gesamt ? gesamt.n : 0, ausgewertet: rows.length, treffer: rows.length ? ok / rows.length : null };
   } catch (e) { return { n: 0, ausgewertet: 0, treffer: null }; }
+}
+
+
+// ===== LERNENDER BOT · SIGNAL-TABELLE (woechentlich) =====
+// Statt jede Kerze vorherzusagen (bestand den Probelauf nicht) lernt der Bot, WELCHE SITUATIONEN je Marktphase
+// verlaesslich besser als die Basis waren. Aufnahme nur bei: mind. 100 Faellen, Vorsprung >= 5 Punkte, statistisch
+// abgesichert (z >= 2 mit Ueberlappungs-Korrektur), gleiche Richtung bei mind. 4 Coins und in beiden Zeithaelften.
+// Faellt eine Situation durch, verschwindet sie automatisch aus der Tabelle.
+const RW_SITUATIONEN = {
+  rsiTief: r => r.rsi != null && r.rsi < 30,
+  rsiHoch: r => r.rsi != null && r.rsi > 70,
+  bbUnten: r => r.bbpos != null && r.bbpos < -1,
+  bbOben: r => r.bbpos != null && r.bbpos > 1,
+  fallKurz: r => r.mom6 != null && r.atrp != null && r.mom6 < -3 * r.atrp,
+  steigKurz: r => r.mom6 != null && r.atrp != null && r.mom6 > 3 * r.atrp,
+  weitUnter200: r => r.dist200 != null && r.dist200 < -0.2,
+  weitUeber200: r => r.dist200 != null && r.dist200 > 0.2,
+  volSpitze: r => r.volr != null && r.volr > 2.5,
+  bbUntenVol: r => r.bbpos != null && r.bbpos < -1 && r.volr > 1.5,
+  bbObenVol: r => r.bbpos != null && r.bbpos > 1 && r.volr > 1.5,
+  rsiTiefFall: r => r.rsi != null && r.rsi < 30 && r.mom30 < -0.15,
+  ruhig: r => r.atrp != null && r.bbpos != null && Math.abs(r.bbpos) < 0.3 && r.atrp < 0.015,
+};
+async function botSignaleLernen(env, iv) {
+  const H = RW_BOT_EBENEN[iv].h;
+  const rows = ((await env.DB.prepare('SELECT coin, at, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, ret FROM bot_faelle WHERE ebene = ? AND ret IS NOT NULL').bind(iv).all()).results) || [];
+  if (rows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: rows.length };
+  const ats = rows.map(r => r.at).sort((a, b) => a - b), mitte = ats[Math.floor(ats.length / 2)];
+  const basis = {}; for (const r of rows) { const b = (basis[r.phase] = basis[r.phase] || { n: 0, up: 0 }); b.n++; if (r.ret > 0) b.up++; }
+  const uebernommen = [], geprueft = [];
+  for (const ph of ['auf', 'ab', 'seit']) {
+    if (!basis[ph] || basis[ph].n < 500) continue;
+    const bq = basis[ph].up / basis[ph].n;
+    for (const key in RW_SITUATIONEN) {
+      const g = rows.filter(r => r.phase === ph && RW_SITUATIONEN[key](r));
+      if (g.length < 100) continue;
+      const up = g.filter(r => r.ret > 0).length / g.length;
+      const dir = up >= bq ? 'up' : 'down';
+      const treffer = dir === 'up' ? up : 1 - up, b = dir === 'up' ? bq : 1 - bq, vorsprung = treffer - b;
+      const nEff = g.length / Math.max(1, H / 3); // aufeinanderfolgende Kerzen ueberlappen -> weniger echte Faelle
+      const z = vorsprung / Math.sqrt(b * (1 - b) / nEff);
+      // Coins und Zeithaelften
+      const proCoin = {}; for (const r of g) { const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, ok: 0 }); c.n++; if ((r.ret > 0) === (dir === 'up')) c.ok++; }
+      const coinsMit = Object.values(proCoin).filter(c => c.n >= 15), coinsOk = coinsMit.filter(c => c.ok / c.n - b >= 0.02).length;
+      const haelfte = sel => { const h = g.filter(sel); return h.length >= 30 ? h.filter(r => (r.ret > 0) === (dir === 'up')).length / h.length - b : null; };
+      const h1 = haelfte(r => r.at < mitte), h2 = haelfte(r => r.at >= mitte);
+      const eintrag = { phase: ph, key, dir, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
+        h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2) };
+      geprueft.push(eintrag);
+      if (vorsprung >= 0.05 && z >= 2 && coinsOk >= 4 && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) uebernommen.push(eintrag);
+    }
+  }
+  uebernommen.sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis));
+  const altRoh = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('signale:' + iv).first().catch(() => null);
+  const alt = altRoh ? JSON.parse(altRoh.v) : null;
+  const sKey = e => e.phase + ':' + e.key + ':' + e.dir;
+  const altSet = new Set(alt && alt.signale ? alt.signale.map(sKey) : []), neuSet = new Set(uebernommen.map(sKey));
+  const aenderung = { neu: [...neuSet].filter(k => !altSet.has(k)), weg: [...altSet].filter(k => !neuSet.has(k)) };
+  const info = { ebene: iv, at: Date.now(), horizont: iv === '1d' ? '7d' : '3d', n: rows.length, signale: uebernommen, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
+  return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
+}
+async function botSignale(env, iv) {
+  try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('signale:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
 }
 
 async function botStand(env) {
