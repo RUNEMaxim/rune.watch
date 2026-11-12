@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0010'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5702,7 +5702,8 @@ async function rwPlanLaeufe(env) {
       if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
-    if (await alter('elliott') > 4 * 60e3) await rwDiagLauf(env, 'elliott', () => botElliottSchritt(env));
+    // jede Minute eine Portion, solange der Test laeuft (danach prueft er nur noch, ob er aktuell ist)
+    if (await alter('elliott') > 50e3) await rwDiagLauf(env, 'elliott', () => botElliottSchritt(env));
   } catch (e) { console.warn('[plan]', e && e.message); }
   finally { rwPlanLaeuftGerade = false; }
 }
@@ -8500,7 +8501,7 @@ async function botTrendbruch(env, iv) {
 // Gleiche Messung wie der Browser-Test "Elliott genau": je Schritt die volle Chart-Analyse, dann pruefen, ob das Ziel vor
 // der Ungueltigkeit erreicht wurde -- verglichen mit der rechnerischen Erwartung aus den Abstaenden. Pro Lauf nur eine
 // Portion (Rechenzeit), Zwischenstand in der Datenbank; fertig -> Tabelle 'elliott:tabelle' (die App liest sie).
-const RW_EW_PORTION = 150; // ~6 s Rechenzeit je Lauf
+const RW_EW_PORTION = 300; // ~12 s Rechenzeit je Lauf (gewuenscht: schneller)
 function rwMarktphase(c, i) {
   if (i < 220) return null; let s = 0, sa = 0; for (let j = i - 199; j <= i; j++) s += c[j]; for (let j = i - 219; j <= i - 20; j++) sa += c[j];
   const s200 = s / 200, alt = sa / 200; return c[i] > s200 && s200 > alt ? 'auf' : c[i] < s200 && s200 < alt ? 'ab' : 'seit';
