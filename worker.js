@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-2100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-2200'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2787,6 +2787,9 @@ async function handleStats(request, env, ctx) {
     botSigLive: await botSignalLiveBilanz(env),
     botTb4h: await botTrendbruch(env, '4h'),
     botTb1d: await botTrendbruch(env, '1d'),
+    botEwLauf: await rwLaufInfo(env, 'elliott'),
+    botEwTab: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
+      return { at: t.at, b4: t['4h'] ? t['4h'].zeilen.filter(z => z.bestanden).length : 0, b1: t['1d'] ? t['1d'].zeilen.filter(z => z.bestanden).length : 0 }; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
@@ -3133,7 +3136,11 @@ async function handleStats(request, env, ctx) {
           const tbz = (name, T) => !T ? `${name}: not tested yet` : T.gewaehlt ? `${name}: ${T.gewaehlt.linie} \u00b7 max drawdown ${T.gewaehlt.ddMit} % instead of ${T.gewaehlt.ddOhne} % (median, better for ${T.gewaehlt.besserBei}/${T.gewaehlt.coins} coins) \u00b7 keeps ${Math.round(100 * T.gewaehlt.ertragFaktor)} % of hold return \u00b7 false alarms ${T.gewaehlt.fehlalarme} %`
             : `${name}: no variant passed (` + T.varianten.map(v => `${v.linie}: dd ${v.ddMit}/${v.ddOhne} %, better ${v.besserBei}/${v.coins}`).join('; ') + ')';
           const tbTile = tile('bot6', 'Trend break (risk signal)', null, tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h));
-          return liveTile + tbTile + tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
+          const EW = stats.botEwTab, EL = stats.botEwLauf && stats.botEwLauf.ergebnis;
+          const ewTile = tile('bot7', 'Elliott count types (weekly test)', EW ? EW.b4 + EW.b1 : null,
+            (EW ? `last finished ${new Date(EW.at).toISOString().slice(0, 10)} \u00b7 reliable: 4H ${EW.b4}, daily ${EW.b1}` : 'first run in progress') +
+            (EL && EL.status === 'laeuft' ? `<br>running: pair ${EL.paar}` : EL && EL.status ? `<br>${EL.status}` : '') + (stats.botEwLauf && stats.botEwLauf.fehler ? '<br>ERROR ' + stats.botEwLauf.fehler : ''));
+          return liveTile + tbTile + ewTile + tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
             sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d)) + (false ? tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
             `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')) : ''); })()}
       </div>
@@ -5695,6 +5702,7 @@ async function rwPlanLaeufe(env) {
       if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
+    if (await alter('elliott') > 4 * 60e3) await rwDiagLauf(env, 'elliott', () => botElliottSchritt(env));
   } catch (e) { console.warn('[plan]', e && e.message); }
   finally { rwPlanLaeuftGerade = false; }
 }
@@ -8114,7 +8122,7 @@ function rwBotMerkmale(k, h, abIndex) {
     let mn14 = Infinity, mnI = -1, mx14 = -Infinity, mxI = -1; for (let j = i - 14; j < i; j++) { if (c[j] < mn14) { mn14 = c[j]; mnI = j; } if (c[j] > mx14) { mx14 = c[j]; mxI = j; } }
     let atrS = 0, atrN = 0; for (let j = i - 49; j < i; j++) if (atr[j]) { atrS += atr[j]; atrN++; }
     rows.push({
-      at: k[i].date, close: c[i], phase,
+      at: k[i].date, close: c[i], phase, open: k[i].open != null ? +k[i].open : null, high: +k[i].high, low: +k[i].low, volume: v[i],
       rsi: rund(rsi[i], 10), bbpos: rund((c[i] - m20) / (2 * sd), 100),
       mom6: rund(c[i] / c[i - 6] - 1, 10000), mom30: rund(c[i] / c[i - 30] - 1, 10000),
       dist200: rund(c[i] / s200 - 1, 10000), slope200: rund(s200 / s200alt - 1, 100000),
@@ -8130,9 +8138,9 @@ function rwBotMerkmale(k, h, abIndex) {
   }
   return rows;
 }
-const RW_BOT_SPALTEN = ['coin', 'ebene', 'at', 'close', 'phase', 'rsi', 'bbpos', 'mom6', 'mom30', 'dist200', 'slope200', 'volr', 'atrp',
+const RW_BOT_SPALTEN = ['coin', 'ebene', 'at', 'open', 'high', 'low', 'close', 'volume', 'phase', 'rsi', 'bbpos', 'mom6', 'mom30', 'dist200', 'slope200', 'volr', 'atrp',
   'tief30', 'hoch30', 'serie', 'dochtu', 'dochto', 'bbwpct', 'divbull', 'divbear', 'atrv', 'ret'];
-const RW_BOT_NEUE_SPALTEN = ['tief30 INTEGER', 'hoch30 INTEGER', 'serie INTEGER', 'dochtu REAL', 'dochto REAL', 'bbwpct REAL', 'divbull INTEGER', 'divbear INTEGER', 'atrv REAL'];
+const RW_BOT_NEUE_SPALTEN = ['open REAL', 'high REAL', 'low REAL', 'volume REAL', 'tief30 INTEGER', 'hoch30 INTEGER', 'serie INTEGER', 'dochtu REAL', 'dochto REAL', 'bbwpct REAL', 'divbull INTEGER', 'divbear INTEGER', 'atrv REAL'];
 async function rwBotSchreiben(env, coin, iv, rows, ersetzen) {
   const proZeile = RW_BOT_SPALTEN.length, jeStmt = Math.floor(99 / proZeile); // D1: max. ~100 Parameter je Abfrage
   const stmts = [];
@@ -8487,6 +8495,91 @@ async function botTrendbruch(env, iv) {
   try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('trendbruch:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
 }
 
+
+// ===== ELLIOTT-TEST IM WORKER (woechentlich, in Portionen) =====
+// Gleiche Messung wie der Browser-Test "Elliott genau": je Schritt die volle Chart-Analyse, dann pruefen, ob das Ziel vor
+// der Ungueltigkeit erreicht wurde -- verglichen mit der rechnerischen Erwartung aus den Abstaenden. Pro Lauf nur eine
+// Portion (Rechenzeit), Zwischenstand in der Datenbank; fertig -> Tabelle 'elliott:tabelle' (die App liest sie).
+const RW_EW_PORTION = 150; // ~6 s Rechenzeit je Lauf
+function rwMarktphase(c, i) {
+  if (i < 220) return null; let s = 0, sa = 0; for (let j = i - 199; j <= i; j++) s += c[j]; for (let j = i - 219; j <= i - 20; j++) sa += c[j];
+  const s200 = s / 200, alt = sa / 200; return c[i] > s200 && s200 > alt ? 'auf' : c[i] < s200 && s200 < alt ? 'ab' : 'seit';
+}
+const rwEwKonfW = c => c >= 85 ? 'hoch' : c >= 70 ? 'mittel' : 'niedrig';
+async function botElliottSchritt(env) {
+  await botSammlerTabellen(env);
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_ew_recs (coin TEXT, ebene TEXT, i INTEGER, at INTEGER, phase TEXT, konf TEXT, markt TEXT, ziel REAL, erg TEXT, p0 REAL, ohne INTEGER, PRIMARY KEY (coin, ebene, at))').run();
+  const jobRoh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:job'").first().catch(() => null);
+  let job = jobRoh ? JSON.parse(jobRoh.v) : null;
+  const tab = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null);
+  const tabAlter = tab ? Date.now() - (JSON.parse(tab.v).at || 0) : Infinity;
+  if (!job) {
+    if (tabAlter < 7 * 864e5) return { status: 'aktuell' };
+    // Start erst, wenn die Historie mit Kerzen (Hoch/Tief) hochgeladen ist
+    const ok = await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_faelle WHERE ebene = '4h' AND high IS NOT NULL").first().catch(() => null);
+    if (!ok || ok.n < 5000) return { status: 'wartet auf Historie mit Kerzen (Backtest-Seite: Historie hochladen)' };
+    job = { start: Date.now(), paare: [], idx: 0, pos: null }; for (const iv of ['4h', '1d']) for (const c of RW_BOT_COINS) job.paare.push([c, iv]);
+    await env.DB.prepare('DELETE FROM bot_ew_recs').run();
+  }
+  let rest = RW_EW_PORTION;
+  while (rest > 0 && job.idx < job.paare.length) {
+    const [coin, iv] = job.paare[job.idx];
+    const rows = ((await env.DB.prepare('SELECT at, open, high, low, close, volume FROM bot_faelle WHERE coin = ? AND ebene = ? AND high IS NOT NULL ORDER BY at').bind(coin, iv).all()).results) || [];
+    const k = rows.map(r => ({ date: r.at, open: r.open != null ? r.open : r.close, high: r.high, low: r.low, close: r.close, value: r.close, volume: r.volume || 0 }));
+    const L = iv === '1d' ? 30 : 42, SCHRITT = iv === '1d' ? 2 : 4, c = k.map(x => x.close);
+    if (k.length < 400) { job.idx++; job.pos = null; continue; }
+    let i = job.pos == null ? 300 : job.pos; const stmts = [];
+    for (; i < k.length - L && rest > 0; i += SCHRITT, rest--) {
+      let A = null; try { const D = k.slice(Math.max(0, i - 700), i + 1); A = RW_ANALYSE.analyze({ data: D, viewStart: Math.max(0, D.length - 250), viewEnd: D.length - 1, logScale: true, dochtFilter: true }); } catch (e) { continue; }
+      const E = A && A.elliott; if (!E || !E.targets || !E.targets[0] || !E.invalidation) continue;
+      const markt = rwMarktphase(c, i); if (!markt) continue;
+      const c0 = c[i], tg = E.targets[0].price, inv = E.invalidation.price, dir = tg > c0 ? 'up' : 'down';
+      if (!(tg > 0) || !(inv > 0) || (dir === 'up' && !(inv < c0)) || (dir === 'down' && !(inv > c0))) {
+        stmts.push(env.DB.prepare('INSERT OR REPLACE INTO bot_ew_recs (coin, ebene, i, at, phase, ohne) VALUES (?,?,?,?,?,1)').bind(coin, iv, i, k[i].date, E.phase)); continue; }
+      let erg = null;
+      for (let j = i + 1; j <= Math.min(k.length - 1, i + L); j++) { const hT = dir === 'up' ? k[j].high >= tg : k[j].low <= tg, hI = dir === 'up' ? k[j].low <= inv : k[j].high >= inv; if (hI) { erg = 'ungueltig'; break; } if (hT) { erg = 'ziel'; break; } }
+      const dT = Math.abs(Math.log(tg / c0)), dI = Math.abs(Math.log(inv / c0));
+      stmts.push(env.DB.prepare('INSERT OR REPLACE INTO bot_ew_recs (coin, ebene, i, at, phase, konf, markt, ziel, erg, p0, ohne) VALUES (?,?,?,?,?,?,?,?,?,?,0)')
+        .bind(coin, iv, i, k[i].date, E.phase, rwEwKonfW(E.confidence || 0), markt, +tg.toPrecision(5), erg, dI / (dT + dI)));
+    }
+    if (stmts.length) await env.DB.batch(stmts);
+    if (i >= k.length - L) { job.idx++; job.pos = null; } else job.pos = i;
+  }
+  if (job.idx >= job.paare.length) {
+    const tabelle = { at: Date.now() };
+    for (const iv of ['4h', '1d']) tabelle[iv] = await botElliottAuswerten(env, iv);
+    await env.DB.batch([env.DB.prepare("INSERT OR REPLACE INTO bot_status (k, v) VALUES ('elliott:tabelle', ?)").bind(JSON.stringify(tabelle)), env.DB.prepare("DELETE FROM bot_status WHERE k = 'elliott:job'")]);
+    return { status: 'fertig', bestanden: ['4h', '1d'].reduce((a, iv) => a + tabelle[iv].zeilen.filter(z => z.bestanden).length, 0) };
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO bot_status (k, v) VALUES ('elliott:job', ?)").bind(JSON.stringify(job)).run();
+  return { status: 'laeuft', paar: job.idx + 1 + '/' + job.paare.length, pos: job.pos };
+}
+async function botElliottAuswerten(env, iv) {
+  const recs = ((await env.DB.prepare('SELECT coin, i, phase, konf, markt, ziel, erg, p0, ohne FROM bot_ew_recs WHERE ebene = ? ORDER BY coin, i').bind(iv).all()).results) || [];
+  const proCoin = {}; for (const r of recs) (proCoin[r.coin] = proCoin[r.coin] || []).push(r);
+  const gruppen = {}, stabil = {};
+  for (const coin in proCoin) {
+    const liste = proCoin[coin], mid = liste.length ? (liste[0].i + liste[liste.length - 1].i) / 2 : 0; let vor = null;
+    for (const r of liste) {
+      if (vor && !vor.ohne) { const s0 = (stabil[vor.phase] = stabil[vor.phase] || { n: 0, gleich: 0 }); s0.n++; if (r.phase === vor.phase && !r.ohne && Math.abs(r.ziel / vor.ziel - 1) < 0.03) s0.gleich++; }
+      vor = r; if (r.ohne || !r.erg) continue;
+      for (const [art, key] of [['phase', r.phase], ['phase+konf', r.phase + '|' + r.konf], ['phase+markt', r.phase + '|' + r.markt], ['phase+konf+markt', r.phase + '|' + r.konf + '|' + r.markt], ['konf', r.konf]]) {
+        const g = (gruppen[art + ':' + key] = gruppen[art + ':' + key] || { art, key, n: 0, hit: 0, p0: 0, coins: {}, h1: { n: 0, d: 0 }, h2: { n: 0, d: 0 } });
+        const hit = r.erg === 'ziel' ? 1 : 0; g.n++; g.hit += hit; g.p0 += r.p0;
+        const cc = (g.coins[coin] = g.coins[coin] || { n: 0, d: 0 }); cc.n++; cc.d += hit - r.p0;
+        const h = r.i < mid ? g.h1 : g.h2; h.n++; h.d += hit - r.p0;
+      }
+    }
+  }
+  const zeilen = Object.values(gruppen).map(g => {
+    const coinsMit = Object.values(g.coins).filter(x => x.n >= 5), coinsPlus = coinsMit.filter(x => x.d / x.n > 0.02).length;
+    const v = (g.hit - g.p0) / g.n, h1 = g.h1.n ? g.h1.d / g.h1.n : null, h2 = g.h2.n ? g.h2.d / g.h2.n : null;
+    return { art: g.art, key: g.key, n: g.n, treffer: Math.round(100 * g.hit / g.n), erwartet: Math.round(100 * g.p0 / g.n), coinsPlus, coinsMit: coinsMit.length,
+      bestanden: g.n >= 40 && v >= 0.05 && coinsPlus >= 3 && h1 != null && h2 != null && h1 > 0 && h2 > 0 };
+  }).filter(z => z.n >= 20).sort((a, b) => (b.treffer - b.erwartet) - (a.treffer - a.erwartet));
+  return { zeilen, stabilitaet: Object.fromEntries(Object.entries(stabil).filter(([, x]) => x.n >= 10).map(([k, x]) => [k, Math.round(100 * x.gleich / x.n)])) };
+}
+
 async function botStand(env) {
   try {
     const z = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN ret IS NOT NULL THEN 1 ELSE 0 END) AS mit FROM bot_faelle').first();
@@ -8747,6 +8840,84 @@ const RW_PHASEN_SIGNALE = {
     { key: 'bbUnten', phase: 'seit', dir: 'up', treffer: 65, basis: 55, coins: '3/5' },
   ] },
 };
+let RW_BOT_SIG = null, rwBotSigZeit = 0;
+const RW_BOT_SITUATION = {
+  rsiTief: r => r.rsi < 30, rsiHoch: r => r.rsi > 70, bbUnten: r => r.bbpos < -1, bbOben: r => r.bbpos > 1,
+  fallKurz: r => r.mom6 < -3 * r.atrp, steigKurz: r => r.mom6 > 3 * r.atrp, weitUnter200: r => r.dist200 < -0.2, weitUeber200: r => r.dist200 > 0.2,
+  volSpitze: r => r.volr > 2.5, bbUntenVol: r => r.bbpos < -1 && r.volr > 1.5, bbObenVol: r => r.bbpos > 1 && r.volr > 1.5,
+  rsiTiefFall: r => r.rsi < 30 && r.mom30 < -0.15, ruhig: r => Math.abs(r.bbpos) < 0.3 && r.atrp < 0.015,
+  neuTief30: r => r.tief30 === 1, neuHoch30: r => r.hoch30 === 1, rotSerie4: r => r.serie <= -4, gruenSerie4: r => r.serie >= 4,
+  hammer: r => r.dochtu > 0.6, sternschnuppe: r => r.dochto > 0.6, squeeze: r => r.bbwpct != null && r.bbwpct < 0.1,
+  squeezeAusbruchAuf: r => r.bbwpct != null && r.bbwpct < 0.2 && r.bbpos > 1, squeezeAusbruchAb: r => r.bbwpct != null && r.bbwpct < 0.2 && r.bbpos < -1,
+  divBull: r => r.divbull === 1, divBear: r => r.divbear === 1, volVersiegt: r => r.volr < 0.5 && Math.abs(r.mom6) > 2 * r.atrp,
+  atrSprung: r => r.atrv != null && r.atrv > 1.8, tiefHammerVol: r => r.tief30 === 1 && r.dochtu > 0.5 && r.volr > 1.5,
+  hochSternVol: r => r.hoch30 === 1 && r.dochto > 0.5 && r.volr > 1.5,
+};
+function rwBotMerkmale(k, h, abIndex) {
+  // WICHTIG: diese Funktion steht 1:1 auch in app.js (Bot-Markierungen) -- bei Aenderungen beide anpassen.
+  const n = k.length, c = k.map(x => x.close), v = k.map(x => x.volume || 0);
+  const pre = [0], preV = [0]; for (let i = 0; i < n; i++) { pre.push(pre[i] + c[i]); preV.push(preV[i] + v[i]); }
+  const sma = (i, p) => i >= p - 1 ? (pre[i + 1] - pre[i + 1 - p]) / p : null;
+  const smaV = (i, p) => i >= p - 1 ? (preV[i + 1] - preV[i + 1 - p]) / p : null;
+  const rsi = new Array(n).fill(null), atr = new Array(n).fill(null);
+  let g = 0, l = 0, a = 0;
+  for (let i = 1; i < n; i++) {
+    const d = c[i] - c[i - 1], gu = Math.max(d, 0), ld = Math.max(-d, 0);
+    const tr = Math.max(k[i].high - k[i].low, Math.abs(k[i].high - c[i - 1]), Math.abs(k[i].low - c[i - 1]));
+    if (i <= 14) { g += gu / 14; l += ld / 14; a += tr / 14; } else { g = (g * 13 + gu) / 14; l = (l * 13 + ld) / 14; a = (a * 13 + tr) / 14; }
+    if (i >= 14) { rsi[i] = 100 - 100 / (1 + g / (l || 1e-12)); atr[i] = a; }
+  }
+  const bbw = new Array(n).fill(null);
+  const rows = [];
+  let serie = 0;
+  for (let i = 1; i < n; i++) {
+    serie = c[i] > c[i - 1] ? (serie > 0 ? serie + 1 : 1) : c[i] < c[i - 1] ? (serie < 0 ? serie - 1 : -1) : 0;
+    const m20 = sma(i, 20);
+    if (m20 != null) { let q = 0; for (let j = i - 19; j <= i; j++) q += (c[j] - m20) * (c[j] - m20); bbw[i] = 4 * Math.sqrt(q / 20) / m20; }
+    if (i < Math.max(230, abIndex || 0)) continue;
+    const s200 = sma(i, 200), s200alt = sma(i - 20, 200);
+    if (s200 == null || s200alt == null || m20 == null) continue;
+    const sd = bbw[i] * m20 / 4 || 1e-12;
+    const phase = c[i] > s200 && s200 > s200alt ? 'auf' : c[i] < s200 && s200 < s200alt ? 'ab' : 'seit';
+    const vm = smaV(i - 1, 20);
+    const rund = (x, st) => x == null || !isFinite(x) ? null : Math.round(x * st) / st;
+    // neue Merkmale
+    let mn = Infinity, mx = -Infinity; for (let j = i - 29; j < i; j++) { mn = Math.min(mn, c[j]); mx = Math.max(mx, c[j]); }
+    const spanne = (k[i].high - k[i].low) || 1e-12, koerperU = Math.min(k[i].open != null ? k[i].open : c[i - 1], c[i]), koerperO = Math.max(k[i].open != null ? k[i].open : c[i - 1], c[i]);
+    let rang = 0, zahl = 0; for (let j = i - 119; j <= i; j++) if (bbw[j] != null) { zahl++; if (bbw[j] < bbw[i]) rang++; }
+    let mn14 = Infinity, mnI = -1, mx14 = -Infinity, mxI = -1; for (let j = i - 14; j < i; j++) { if (c[j] < mn14) { mn14 = c[j]; mnI = j; } if (c[j] > mx14) { mx14 = c[j]; mxI = j; } }
+    let atrS = 0, atrN = 0; for (let j = i - 49; j < i; j++) if (atr[j]) { atrS += atr[j]; atrN++; }
+    rows.push({
+      at: k[i].date, close: c[i], phase,
+      rsi: rund(rsi[i], 10), bbpos: rund((c[i] - m20) / (2 * sd), 100),
+      mom6: rund(c[i] / c[i - 6] - 1, 10000), mom30: rund(c[i] / c[i - 30] - 1, 10000),
+      dist200: rund(c[i] / s200 - 1, 10000), slope200: rund(s200 / s200alt - 1, 100000),
+      volr: rund(vm ? v[i] / vm : null, 100), atrp: rund(atr[i] ? atr[i] / c[i] : null, 10000),
+      tief30: c[i] < mn ? 1 : 0, hoch30: c[i] > mx ? 1 : 0, serie,
+      dochtu: rund((koerperU - k[i].low) / spanne, 100), dochto: rund((k[i].high - koerperO) / spanne, 100),
+      bbwpct: zahl >= 60 ? rund(rang / zahl, 100) : null,
+      divbull: mnI >= 0 && c[i] < mn14 && rsi[i] != null && rsi[mnI] != null && rsi[i] > rsi[mnI] + 2 ? 1 : 0,
+      divbear: mxI >= 0 && c[i] > mx14 && rsi[i] != null && rsi[mxI] != null && rsi[i] < rsi[mxI] - 2 ? 1 : 0,
+      atrv: atrN && atr[i] ? rund(atr[i] / (atrS / atrN), 100) : null,
+      ret: k[i + h] ? rund(c[i + h] / c[i] - 1, 100000) : null,
+    });
+  }
+  return rows;
+}
+function rwTrendbruch(k, cfg) {
+  if (!cfg || !Array.isArray(k) || k.length < cfg.p + 40) return null;
+  const c = k.map(x => +(x.close != null ? x.close : x.value)), n = c.length, ma = new Array(n).fill(null);
+  if (cfg.typ === 'sma') { let s = 0; for (let i = 0; i < n; i++) { s += c[i]; if (i >= cfg.p) s -= c[i - cfg.p]; if (i >= cfg.p - 1) ma[i] = s / cfg.p; } }
+  else { const a = 2 / (cfg.p + 1); let e = null; for (let i = 0; i < n; i++) { e = e == null ? c[i] : c[i] * a + e * (1 - a); if (i >= cfg.p - 1) ma[i] = e; } }
+  let drin = true, seit = null; const ev = [], zustand = new Array(n).fill(null);
+  for (let i = cfg.p + 30; i < n; i++) {
+    if (ma[i] == null || ma[i - 1] == null) { zustand[i] = drin; continue; }
+    if (drin && c[i] < ma[i] && c[i - 1] >= ma[i - 1]) { drin = false; seit = k[i].date; ev.push({ i, date: k[i].date, typ: 'aus', high: +(k[i].high != null ? k[i].high : c[i]), low: +(k[i].low != null ? k[i].low : c[i]) }); }
+    else if (!drin && c[i] > ma[i] && ma[i - 5] != null && ma[i] > ma[i - 5]) { drin = true; seit = k[i].date; ev.push({ i, date: k[i].date, typ: 'ein', high: +(k[i].high != null ? k[i].high : c[i]), low: +(k[i].low != null ? k[i].low : c[i]) }); }
+    zustand[i] = drin;
+  }
+  return { ev, ma, drin, seit, cfg, zustand };
+}
 function rwPhasenSignal(k) {
   if (!Array.isArray(k) || k.length < 230) return null;
   const n = k.length, c = k.map(x => +x.close), t = k.map(x => +new Date(x.date));
@@ -8761,10 +8932,28 @@ function rwPhasenSignal(k) {
   const rsi = 100 - 100 / (1 + g / (l || 1e-9));
   const aktiv = { bbUnten: last < m20 - 2 * sd, bbOben: last > m20 + 2 * sd, rsiTief: rsi < 30, rsiHoch: rsi > 70 };
   const tab = ebene ? RW_PHASEN_SIGNALE[ebene] : null;
-  const signale = tab ? tab.liste.filter(x => x.phase === phase && aktiv[x.key]).map(x => ({ ...x, h: tab.h, ebene })) : [];
+  let signale = tab ? tab.liste.filter(x => x.phase === phase && aktiv[x.key]).map(x => ({ ...x, h: tab.h, ebene })) : [];
+  // Gelernte Tabelle des Bots hat Vorrang (gleiche Merkmal-Formeln wie im Worker)
+  const botTab = ebene && RW_BOT_SIG ? RW_BOT_SIG[ebene] : null;
+  if (botTab && Array.isArray(botTab.signale)) {
+    const kk = k.slice(-400).map(x => ({ date: +new Date(x.date), open: +x.open, high: +x.high, low: +x.low, close: +x.close, volume: +x.volume || 0 }));
+    const rr = rwBotMerkmale(kk, 0, kk.length - 1); const f = rr[rr.length - 1] || {};
+    signale = botTab.signale.filter(x => x.phase === phase && RW_BOT_SITUATION[x.key] && RW_BOT_SITUATION[x.key](f))
+      .map(x => ({ ...x, h: botTab.horizont, ebene, quelle: 'bot' }));
+  }
   signale.sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis));
   const warnung = phase === 'auf' && (aktiv.rsiHoch || aktiv.bbOben) ? 'aufUeberkauft' : null;
-  return { phase, ebene, rsi: Math.round(rsi), signal: signale[0] || null, weitere: signale.slice(1), warnung };
+  return { phase, ebene, rsi: Math.round(rsi), signal: signale[0] || null, weitere: signale.slice(1), warnung,
+    bot: botTab ? { at: botTab.at, anzahl: botTab.signale.length, n: botTab.n, live: RW_BOT_SIG.live || null } : null,
+    tb: (() => { const cfg = ebene && RW_BOT_SIG && RW_BOT_SIG.trendbruch ? RW_BOT_SIG.trendbruch[ebene] : null;
+      if (!cfg) { // erklaeren, warum nichts angezeigt wird
+        const T = ebene && RW_BOT_SIG && RW_BOT_SIG.trendbruchTest ? RW_BOT_SIG.trendbruchTest[ebene] : null;
+        if (!ebene || !RW_BOT_SIG) return null;
+        if (!T) return { status: 'ungetestet' };
+        const best = (T.varianten || []).slice().sort((a, b) => b.besserBei - a.besserBei)[0];
+        return { status: 'durchgefallen', best };
+      }
+      const T = rwTrendbruch(k, cfg); return T ? { drin: T.drin, seit: T.seit, cfg } : null; })() };
 }
 const TPAnalysis = (() => {
   const ln = v => Math.log(Math.max(v, 1e-12));
