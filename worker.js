@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-0715'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-0850'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7829,7 +7829,7 @@ async function syncPodcastMeldung(env) {
 const RW_LIVE_COINS = ['RUNE', 'BTC', 'ETH', 'SOL'];
 const RW_LIVE_H = { '4h': [6, 18, 42], '1d': [3, 7, 14] };
 async function rwLiveKerzen(sym, iv, n) {
-  const j = await rwKlinesHolen(`symbol=${sym}USDT&interval=${iv}&limit=${n}`);
+  const { rows: j } = await rwKlinesHolen(sym, iv, n, null);
   const jetzt = Date.now();
   return j.filter(k => Number(k[6]) < jetzt).map(k => ({ date: Number(k[0]), open: +k[1], high: +k[2], low: +k[3], close: +k[4], value: +k[4], volume: +k[5] })); // nur geschlossene Kerzen
 }
@@ -7907,18 +7907,55 @@ async function rwDiagLauf(env, name, fn) {
 async function rwLaufInfo(env, name) {
   try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('lauf:' + name).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
 }
-// Kerzen mit Ausweich-Adressen (falls ein Binance-Spiegel aus der Cloud gesperrt ist)
-const RW_KLINES_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com', 'https://api1.binance.com', 'https://api4.binance.com'];
-async function rwKlinesHolen(pfadUndQuery) {
-  let letzter = null;
-  for (const h of RW_KLINES_HOSTS) {
-    try {
-      const r = await fetchWithTimeout(h + '/api/v3/klines?' + pfadUndQuery, { timeoutMs: 12000 });
-      if (r.ok) return await r.json();
-      letzter = h + ' HTTP ' + r.status;
-    } catch (e) { letzter = h + ' ' + (e && e.message || e); }
+// KERZEN-QUELLEN (gemeldet: alle Binance-Adressen liefern aus Cloudflare "HTTP 403" -- Binance sperrt
+// Rechenzentren). Reihenfolge: Binance (falls doch erreichbar) -> CryptoCompare (alle 8 Coins, mit Historie)
+// -> Kraken (letzte 720 Kerzen). Ergebnis immer im Binance-Format [open, o, h, l, c, v, close].
+const RW_KLINES_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com'];
+let rwBinanceGesperrt = false;
+const RW_KRAKEN_PAAR = { BTC: 'XBTUSD', ETH: 'ETHUSD', SOL: 'SOLUSD', XRP: 'XRPUSD', DOGE: 'XDGUSD', AVAX: 'AVAXUSD', RUNE: 'RUNEUSD', BNB: 'BNBUSD' };
+async function rwKlinesHolen(sym, iv, limit, endTime) {
+  const fehler = [];
+  const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  if (!rwBinanceGesperrt) {
+    for (const h of RW_KLINES_HOSTS) {
+      try {
+        const r = await fetchWithTimeout(`${h}/api/v3/klines?symbol=${sym}USDT&interval=${iv}&limit=${Math.min(1000, limit)}` + (endTime ? `&endTime=${endTime}` : ''), { timeoutMs: 8000 });
+        if (r.ok) { const j = await r.json(); if (Array.isArray(j) && j.length) return { rows: j, quelle: 'binance' }; }
+        fehler.push(h.replace('https://', '') + ' ' + r.status);
+        if (r.status === 403 || r.status === 451) { rwBinanceGesperrt = true; break; }
+      } catch (e) { fehler.push(h.replace('https://', '') + ' ' + (e && e.message || e)); }
+    }
   }
-  throw new Error('klines nicht erreichbar: ' + letzter);
+  // CryptoCompare: 4H = Stundenkerzen zu je 4 zusammengefasst, Tag = Tageskerzen
+  try {
+    const basis = iv === '1d' ? 'histoday' : 'histohour';
+    const url = `https://min-api.cryptocompare.com/data/v2/${basis}?fsym=${sym}&tsym=USD&limit=${Math.min(2000, limit)}` + (iv === '1d' ? '' : '&aggregate=4') + (endTime ? `&toTs=${Math.floor(endTime / 1000)}` : '');
+    const r = await fetchWithTimeout(url, { timeoutMs: 12000 });
+    if (r.ok) {
+      const j = await r.json();
+      const d = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
+      if (j && j.Response !== 'Error' && d && d.length) {
+        const rows = d.filter(x => x && x.close > 0).map(x => [x.time * 1000, x.open, x.high, x.low, x.close, x.volumefrom, x.time * 1000 + ivMs - 1]);
+        if (rows.length) return { rows, quelle: 'cryptocompare' };
+      }
+      fehler.push('cryptocompare ' + (j && j.Message ? String(j.Message).slice(0, 60) : 'leer'));
+    } else fehler.push('cryptocompare ' + r.status);
+  } catch (e) { fehler.push('cryptocompare ' + (e && e.message || e)); }
+  // Kraken: nur die letzten 720 Kerzen, ohne Blaettern
+  try {
+    const paar = RW_KRAKEN_PAAR[sym];
+    if (paar && !endTime) {
+      const r = await fetchWithTimeout(`https://api.kraken.com/0/public/OHLC?pair=${paar}&interval=${iv === '1d' ? 1440 : 240}`, { timeoutMs: 12000 });
+      const j = r.ok ? await r.json() : null;
+      const key = j && j.result ? Object.keys(j.result).find(k => k !== 'last') : null;
+      if (key && Array.isArray(j.result[key]) && j.result[key].length) {
+        const rows = j.result[key].map(x => [x[0] * 1000, +x[1], +x[2], +x[3], +x[4], +x[6], x[0] * 1000 + ivMs - 1]).slice(-limit);
+        return { rows, quelle: 'kraken' };
+      }
+      fehler.push('kraken ' + (j && j.error && j.error.length ? j.error[0] : (r.status || 'leer')));
+    }
+  } catch (e) { fehler.push('kraken ' + (e && e.message || e)); }
+  throw new Error('keine Kursquelle erreichbar: ' + fehler.join(' | '));
 }
 
 // ===== LERNENDER BOT · SCHRITT 1: MERKMALE SAMMELN =====
@@ -7928,12 +7965,14 @@ async function rwKlinesHolen(pfadUndQuery) {
 const RW_BOT_COINS = ['RUNE', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'AVAX'];
 const RW_BOT_EBENEN = { '4h': { h: 18, hist: 3000 }, '1d': { h: 7, hist: 1500 } };
 async function rwBotKerzen(sym, iv, anzahl) {
-  let ende = Date.now(), alle = [];
-  while (alle.length < anzahl) {
-    const j = await rwKlinesHolen(`symbol=${sym}USDT&interval=${iv}&limit=1000&endTime=${ende}`); if (!Array.isArray(j) || !j.length) break;
+  let ende = Date.now(), alle = [], runden = 0;
+  while (alle.length < anzahl && runden++ < 8) {
+    const { rows: j, quelle } = await rwKlinesHolen(sym, iv, Math.min(1000, anzahl - alle.length + 5), alle.length ? ende : null); if (!Array.isArray(j) || !j.length) break;
     alle = j.map(x => ({ date: Number(x[0]), schluss: Number(x[6]), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] })).concat(alle);
-    ende = Number(j[0][0]) - 1; if (j.length < 1000) break;
+    ende = Number(j[0][0]) - 1; if (quelle === 'kraken' || j.length < 50) break;
   }
+  // doppelte Zeitpunkte (Quellen-Ueberlappung) entfernen, sortieren
+  const gesehen = new Set(); alle = alle.filter(x => !gesehen.has(x.date) && gesehen.add(x.date)).sort((a, b) => a.date - b.date);
   const jetzt = Date.now();
   return alle.filter(x => x.schluss < jetzt).slice(-anzahl);
 }
