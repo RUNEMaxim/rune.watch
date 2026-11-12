@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-2200'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8509,16 +8509,18 @@ const rwEwKonfW = c => c >= 85 ? 'hoch' : c >= 70 ? 'mittel' : 'niedrig';
 async function botElliottSchritt(env) {
   await botSammlerTabellen(env);
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_ew_recs (coin TEXT, ebene TEXT, i INTEGER, at INTEGER, phase TEXT, konf TEXT, markt TEXT, ziel REAL, erg TEXT, p0 REAL, ohne INTEGER, PRIMARY KEY (coin, ebene, at))').run();
+  try { await env.DB.prepare('ALTER TABLE bot_ew_recs ADD COLUMN anteil REAL').run(); } catch (e) {}
   const jobRoh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:job'").first().catch(() => null);
   let job = jobRoh ? JSON.parse(jobRoh.v) : null;
+  if (job && job.v !== 2) job = null; // aelterer Lauf ohne "anteil" -> neu beginnen
   const tab = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null);
   const tabAlter = tab ? Date.now() - (JSON.parse(tab.v).at || 0) : Infinity;
   if (!job) {
-    if (tabAlter < 7 * 864e5) return { status: 'aktuell' };
+    if (tabAlter < 7 * 864e5 && tab && JSON.parse(tab.v).v === 2) return { status: 'aktuell' };
     // Start erst, wenn die Historie mit Kerzen (Hoch/Tief) hochgeladen ist
     const ok = await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_faelle WHERE ebene = '4h' AND high IS NOT NULL").first().catch(() => null);
     if (!ok || ok.n < 5000) return { status: 'wartet auf Historie mit Kerzen (Backtest-Seite: Historie hochladen)' };
-    job = { start: Date.now(), paare: [], idx: 0, pos: null }; for (const iv of ['4h', '1d']) for (const c of RW_BOT_COINS) job.paare.push([c, iv]);
+    job = { v: 2, start: Date.now(), paare: [], idx: 0, pos: null }; for (const iv of ['4h', '1d']) for (const c of RW_BOT_COINS) job.paare.push([c, iv]);
     await env.DB.prepare('DELETE FROM bot_ew_recs').run();
   }
   let rest = RW_EW_PORTION;
@@ -8536,17 +8538,20 @@ async function botElliottSchritt(env) {
       const c0 = c[i], tg = E.targets[0].price, inv = E.invalidation.price, dir = tg > c0 ? 'up' : 'down';
       if (!(tg > 0) || !(inv > 0) || (dir === 'up' && !(inv < c0)) || (dir === 'down' && !(inv > c0))) {
         stmts.push(env.DB.prepare('INSERT OR REPLACE INTO bot_ew_recs (coin, ebene, i, at, phase, ohne) VALUES (?,?,?,?,?,1)').bind(coin, iv, i, k[i].date, E.phase)); continue; }
-      let erg = null;
-      for (let j = i + 1; j <= Math.min(k.length - 1, i + L); j++) { const hT = dir === 'up' ? k[j].high >= tg : k[j].low <= tg, hI = dir === 'up' ? k[j].low <= inv : k[j].high >= inv; if (hI) { erg = 'ungueltig'; break; } if (hT) { erg = 'ziel'; break; } }
+      let erg = null, best = c0;
+      for (let j = i + 1; j <= Math.min(k.length - 1, i + L); j++) { const hT = dir === 'up' ? k[j].high >= tg : k[j].low <= tg, hI = dir === 'up' ? k[j].low <= inv : k[j].high >= inv;
+        if (hI) { erg = 'ungueltig'; break; } best = dir === 'up' ? Math.max(best, k[j].high) : Math.min(best, k[j].low); if (hT) { erg = 'ziel'; break; } }
       const dT = Math.abs(Math.log(tg / c0)), dI = Math.abs(Math.log(inv / c0));
-      stmts.push(env.DB.prepare('INSERT OR REPLACE INTO bot_ew_recs (coin, ebene, i, at, phase, konf, markt, ziel, erg, p0, ohne) VALUES (?,?,?,?,?,?,?,?,?,?,0)')
-        .bind(coin, iv, i, k[i].date, E.phase, rwEwKonfW(E.confidence || 0), markt, +tg.toPrecision(5), erg, dI / (dT + dI)));
+      // ANTEIL: wie viel der Strecke zum Ziel wurde erreicht (0 = nichts, 1 = Ziel), bevor die Zaehlung kippte -> realistisches Ziel
+      const anteil = Math.max(0, Math.min(1.5, Math.abs(Math.log(best / c0)) / (dT || 1e-9)));
+      stmts.push(env.DB.prepare('INSERT OR REPLACE INTO bot_ew_recs (coin, ebene, i, at, phase, konf, markt, ziel, erg, p0, ohne, anteil) VALUES (?,?,?,?,?,?,?,?,?,?,0,?)')
+        .bind(coin, iv, i, k[i].date, E.phase, rwEwKonfW(E.confidence || 0), markt, +tg.toPrecision(5), erg, dI / (dT + dI), +anteil.toFixed(3)));
     }
     if (stmts.length) await env.DB.batch(stmts);
     if (i >= k.length - L) { job.idx++; job.pos = null; } else job.pos = i;
   }
   if (job.idx >= job.paare.length) {
-    const tabelle = { at: Date.now() };
+    const tabelle = { at: Date.now(), v: 2 };
     for (const iv of ['4h', '1d']) tabelle[iv] = await botElliottAuswerten(env, iv);
     await env.DB.batch([env.DB.prepare("INSERT OR REPLACE INTO bot_status (k, v) VALUES ('elliott:tabelle', ?)").bind(JSON.stringify(tabelle)), env.DB.prepare("DELETE FROM bot_status WHERE k = 'elliott:job'")]);
     return { status: 'fertig', bestanden: ['4h', '1d'].reduce((a, iv) => a + tabelle[iv].zeilen.filter(z => z.bestanden).length, 0) };
@@ -8555,7 +8560,7 @@ async function botElliottSchritt(env) {
   return { status: 'laeuft', paar: job.idx + 1 + '/' + job.paare.length, pos: job.pos };
 }
 async function botElliottAuswerten(env, iv) {
-  const recs = ((await env.DB.prepare('SELECT coin, i, phase, konf, markt, ziel, erg, p0, ohne FROM bot_ew_recs WHERE ebene = ? ORDER BY coin, i').bind(iv).all()).results) || [];
+  const recs = ((await env.DB.prepare('SELECT coin, i, phase, konf, markt, ziel, erg, p0, ohne, anteil FROM bot_ew_recs WHERE ebene = ? ORDER BY coin, i').bind(iv).all()).results) || [];
   const proCoin = {}; for (const r of recs) (proCoin[r.coin] = proCoin[r.coin] || []).push(r);
   const gruppen = {}, stabil = {};
   for (const coin in proCoin) {
@@ -8564,8 +8569,8 @@ async function botElliottAuswerten(env, iv) {
       if (vor && !vor.ohne) { const s0 = (stabil[vor.phase] = stabil[vor.phase] || { n: 0, gleich: 0 }); s0.n++; if (r.phase === vor.phase && !r.ohne && Math.abs(r.ziel / vor.ziel - 1) < 0.03) s0.gleich++; }
       vor = r; if (r.ohne || !r.erg) continue;
       for (const [art, key] of [['phase', r.phase], ['phase+konf', r.phase + '|' + r.konf], ['phase+markt', r.phase + '|' + r.markt], ['phase+konf+markt', r.phase + '|' + r.konf + '|' + r.markt], ['konf', r.konf]]) {
-        const g = (gruppen[art + ':' + key] = gruppen[art + ':' + key] || { art, key, n: 0, hit: 0, p0: 0, coins: {}, h1: { n: 0, d: 0 }, h2: { n: 0, d: 0 } });
-        const hit = r.erg === 'ziel' ? 1 : 0; g.n++; g.hit += hit; g.p0 += r.p0;
+        const g = (gruppen[art + ':' + key] = gruppen[art + ':' + key] || { art, key, n: 0, hit: 0, p0: 0, coins: {}, h1: { n: 0, d: 0 }, h2: { n: 0, d: 0 }, anteile: [] });
+        const hit = r.erg === 'ziel' ? 1 : 0; g.n++; g.hit += hit; g.p0 += r.p0; if (r.anteil != null) g.anteile.push(r.anteil);
         const cc = (g.coins[coin] = g.coins[coin] || { n: 0, d: 0 }); cc.n++; cc.d += hit - r.p0;
         const h = r.i < mid ? g.h1 : g.h2; h.n++; h.d += hit - r.p0;
       }
@@ -8574,7 +8579,10 @@ async function botElliottAuswerten(env, iv) {
   const zeilen = Object.values(gruppen).map(g => {
     const coinsMit = Object.values(g.coins).filter(x => x.n >= 5), coinsPlus = coinsMit.filter(x => x.d / x.n > 0.02).length;
     const v = (g.hit - g.p0) / g.n, h1 = g.h1.n ? g.h1.d / g.h1.n : null, h2 = g.h2.n ? g.h2.d / g.h2.n : null;
+    // realistisches Ziel: der Anteil der Zielstrecke, den der Kurs in mind. 60 % der Faelle erreicht hat (40-%-Quantil)
+    const an = g.anteile.slice().sort((a, b) => a - b), q = p => an.length >= 20 ? +an[Math.floor(p * (an.length - 1))].toFixed(2) : null;
     return { art: g.art, key: g.key, n: g.n, treffer: Math.round(100 * g.hit / g.n), erwartet: Math.round(100 * g.p0 / g.n), coinsPlus, coinsMit: coinsMit.length,
+      anteil60: q(0.4), anteil80: q(0.2),
       bestanden: g.n >= 40 && v >= 0.05 && coinsPlus >= 3 && h1 != null && h2 != null && h1 > 0 && h2 > 0 };
   }).filter(z => z.n >= 20).sort((a, b) => (b.treffer - b.erwartet) - (a.treffer - a.erwartet));
   return { zeilen, stabilitaet: Object.fromEntries(Object.entries(stabil).filter(([, x]) => x.n >= 10).map(([k, x]) => [k, Math.round(100 * x.gleich / x.n)])) };
