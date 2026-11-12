@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-1130'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-1400'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3110,7 +3110,7 @@ async function handleStats(request, env, ctx) {
         })()}
         <div class="sec">Learning bot \u00b7 step 1: collecting</div>
         ${(() => { const B = stats.botStand || {}; return tile('bot1', 'Cases collected', B.faelle || null,
-          `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} (four per hour)`); })()}
+          `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} \u00b7 with extended features ${B.historieNeu || 0} / ${B.historieGesamt || 16}`); })()}
         ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet` :
             `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 80)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 80)}` : ' \u00b7 ok');
           return tile('bot2', 'Run status', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot)); })()}
@@ -3122,8 +3122,8 @@ async function handleStats(request, env, ctx) {
             (S.signale.length ? ': ' + S.signale.slice(0, 4).map(x => `${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}%/${x.basis}%`).join(', ') : '') +
             (S.aenderung && (S.aenderung.neu.length || S.aenderung.weg.length) ? ` \u00b7 new: ${S.aenderung.neu.length}, dropped: ${S.aenderung.weg.length}` : '');
           return tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
-            sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d)) + tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
-            `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')); })()}
+            sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d)) + (false ? tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
+            `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')) : ''); })()}
       </div>
     </section>
     <section class="page">
@@ -5447,19 +5447,17 @@ export default {
           .filter(x => x.date > 0 && x.close > 0).sort((a, c) => a.date - c.date);
         await botSammlerTabellen(env);
         const rows = rwBotMerkmale(k, RW_BOT_EBENEN[iv].h, 0);
-        await rwBotSchreiben(env, coin, iv, rows);
-        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, 'fertig').run();
+        await rwBotSchreiben(env, coin, iv, rows, true); // ersetzen: so bekommen auch alte Faelle die neuen Merkmale
+        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, 'fertig-v2').run();
         return json({ ok: true, coin, ebene: iv, faelle: rows.length }, env);
       }
       if (url.pathname === '/bot-pruefung') {
         // Sofort einen Lauf ausloesen und Fehler sehen (nur mit Statistik-Schluessel).
         if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
         if (url.searchParams.get('lernen') === '1') {
-          const l4 = await rwDiagLauf(env, 'lernen4h', () => botLernen(env, '4h'));
-          const l1 = await rwDiagLauf(env, 'lernen1d', () => botLernen(env, '1d'));
           const s4 = await rwDiagLauf(env, 'signale4h', () => botSignaleLernen(env, '4h'));
           const s1 = await rwDiagLauf(env, 'signale1d', () => botSignaleLernen(env, '1d'));
-          return json({ signale4h: s4, signale1d: s1, modell4h: l4.ergebnis, modell1d: l1.ergebnis }, env);
+          return json({ signale4h: s4, signale1d: s1 }, env);
         }
         const live = await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
         const bot = await rwDiagLauf(env, 'bot', () => botSammler(env));
@@ -5662,7 +5660,7 @@ async function rwPlanLaeufe(env) {
     for (const iv of ['4h', '1d']) {
       const M = await botModell(env, iv), a = await alter('lernen' + iv);
       // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
-      if (a > 7 * 864e5 || (!M && a > 864e5)) await rwDiagLauf(env, 'lernen' + iv, () => botLernen(env, iv));
+      // (Gesamt-Modell je Kerze stillgelegt: bestand den Probelauf nicht -- ersetzt durch die Signal-Tabelle)
       if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
     }
   } catch (e) { console.warn('[plan]', e && e.message); }
@@ -8050,6 +8048,7 @@ async function rwBotKerzen(sym, iv, anzahl) {
   return alle.filter(x => x.schluss < jetzt).slice(-anzahl);
 }
 function rwBotMerkmale(k, h, abIndex) {
+  // WICHTIG: diese Funktion steht 1:1 auch in app.js (Bot-Markierungen) -- bei Aenderungen beide anpassen.
   const n = k.length, c = k.map(x => x.close), v = k.map(x => x.volume || 0);
   const pre = [0], preV = [0]; for (let i = 0; i < n; i++) { pre.push(pre[i] + c[i]); preV.push(preV[i] + v[i]); }
   const sma = (i, p) => i >= p - 1 ? (pre[i + 1] - pre[i + 1 - p]) / p : null;
@@ -8062,43 +8061,66 @@ function rwBotMerkmale(k, h, abIndex) {
     if (i <= 14) { g += gu / 14; l += ld / 14; a += tr / 14; } else { g = (g * 13 + gu) / 14; l = (l * 13 + ld) / 14; a = (a * 13 + tr) / 14; }
     if (i >= 14) { rsi[i] = 100 - 100 / (1 + g / (l || 1e-12)); atr[i] = a; }
   }
+  const bbw = new Array(n).fill(null);
   const rows = [];
-  for (let i = Math.max(230, abIndex || 0); i < n; i++) {
-    const s200 = sma(i, 200), s200alt = sma(i - 20, 200), m20 = sma(i, 20);
+  let serie = 0;
+  for (let i = 1; i < n; i++) {
+    serie = c[i] > c[i - 1] ? (serie > 0 ? serie + 1 : 1) : c[i] < c[i - 1] ? (serie < 0 ? serie - 1 : -1) : 0;
+    const m20 = sma(i, 20);
+    if (m20 != null) { let q = 0; for (let j = i - 19; j <= i; j++) q += (c[j] - m20) * (c[j] - m20); bbw[i] = 4 * Math.sqrt(q / 20) / m20; }
+    if (i < Math.max(230, abIndex || 0)) continue;
+    const s200 = sma(i, 200), s200alt = sma(i - 20, 200);
     if (s200 == null || s200alt == null || m20 == null) continue;
-    let q = 0; for (let j = i - 19; j <= i; j++) q += (c[j] - m20) * (c[j] - m20); const sd = Math.sqrt(q / 20) || 1e-12;
+    const sd = bbw[i] * m20 / 4 || 1e-12;
     const phase = c[i] > s200 && s200 > s200alt ? 'auf' : c[i] < s200 && s200 < s200alt ? 'ab' : 'seit';
     const vm = smaV(i - 1, 20);
     const rund = (x, st) => x == null || !isFinite(x) ? null : Math.round(x * st) / st;
+    // neue Merkmale
+    let mn = Infinity, mx = -Infinity; for (let j = i - 29; j < i; j++) { mn = Math.min(mn, c[j]); mx = Math.max(mx, c[j]); }
+    const spanne = (k[i].high - k[i].low) || 1e-12, koerperU = Math.min(k[i].open != null ? k[i].open : c[i - 1], c[i]), koerperO = Math.max(k[i].open != null ? k[i].open : c[i - 1], c[i]);
+    let rang = 0, zahl = 0; for (let j = i - 119; j <= i; j++) if (bbw[j] != null) { zahl++; if (bbw[j] < bbw[i]) rang++; }
+    let mn14 = Infinity, mnI = -1, mx14 = -Infinity, mxI = -1; for (let j = i - 14; j < i; j++) { if (c[j] < mn14) { mn14 = c[j]; mnI = j; } if (c[j] > mx14) { mx14 = c[j]; mxI = j; } }
+    let atrS = 0, atrN = 0; for (let j = i - 49; j < i; j++) if (atr[j]) { atrS += atr[j]; atrN++; }
     rows.push({
       at: k[i].date, close: c[i], phase,
       rsi: rund(rsi[i], 10), bbpos: rund((c[i] - m20) / (2 * sd), 100),
       mom6: rund(c[i] / c[i - 6] - 1, 10000), mom30: rund(c[i] / c[i - 30] - 1, 10000),
       dist200: rund(c[i] / s200 - 1, 10000), slope200: rund(s200 / s200alt - 1, 100000),
       volr: rund(vm ? v[i] / vm : null, 100), atrp: rund(atr[i] ? atr[i] / c[i] : null, 10000),
+      tief30: c[i] < mn ? 1 : 0, hoch30: c[i] > mx ? 1 : 0, serie,
+      dochtu: rund((koerperU - k[i].low) / spanne, 100), dochto: rund((k[i].high - koerperO) / spanne, 100),
+      bbwpct: zahl >= 60 ? rund(rang / zahl, 100) : null,
+      divbull: mnI >= 0 && c[i] < mn14 && rsi[i] != null && rsi[mnI] != null && rsi[i] > rsi[mnI] + 2 ? 1 : 0,
+      divbear: mxI >= 0 && c[i] > mx14 && rsi[i] != null && rsi[mxI] != null && rsi[i] < rsi[mxI] - 2 ? 1 : 0,
+      atrv: atrN && atr[i] ? rund(atr[i] / (atrS / atrN), 100) : null,
       ret: k[i + h] ? rund(c[i + h] / c[i] - 1, 100000) : null,
     });
   }
   return rows;
 }
-const RW_BOT_SPALTEN = ['coin', 'ebene', 'at', 'close', 'phase', 'rsi', 'bbpos', 'mom6', 'mom30', 'dist200', 'slope200', 'volr', 'atrp', 'ret'];
-async function rwBotSchreiben(env, coin, iv, rows) {
-  const proZeile = RW_BOT_SPALTEN.length, jeStmt = Math.floor(90 / proZeile); // D1: max. ~100 Parameter je Abfrage
+const RW_BOT_SPALTEN = ['coin', 'ebene', 'at', 'close', 'phase', 'rsi', 'bbpos', 'mom6', 'mom30', 'dist200', 'slope200', 'volr', 'atrp',
+  'tief30', 'hoch30', 'serie', 'dochtu', 'dochto', 'bbwpct', 'divbull', 'divbear', 'atrv', 'ret'];
+const RW_BOT_NEUE_SPALTEN = ['tief30 INTEGER', 'hoch30 INTEGER', 'serie INTEGER', 'dochtu REAL', 'dochto REAL', 'bbwpct REAL', 'divbull INTEGER', 'divbear INTEGER', 'atrv REAL'];
+async function rwBotSchreiben(env, coin, iv, rows, ersetzen) {
+  const proZeile = RW_BOT_SPALTEN.length, jeStmt = Math.floor(99 / proZeile); // D1: max. ~100 Parameter je Abfrage
   const stmts = [];
   for (let i = 0; i < rows.length; i += jeStmt) {
     const teil = rows.slice(i, i + jeStmt);
     const platz = teil.map(() => '(' + RW_BOT_SPALTEN.map(() => '?').join(',') + ')').join(',');
-    const werte = []; for (const r of teil) werte.push(coin, iv, r.at, r.close, r.phase, r.rsi, r.bbpos, r.mom6, r.mom30, r.dist200, r.slope200, r.volr, r.atrp, r.ret);
-    stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO bot_faelle (${RW_BOT_SPALTEN.join(',')}) VALUES ${platz}`).bind(...werte));
+    const werte = []; for (const r of teil) werte.push(...RW_BOT_SPALTEN.map(sp => sp === 'coin' ? coin : sp === 'ebene' ? iv : (r[sp] === undefined ? null : r[sp])));
+    stmts.push(env.DB.prepare(`INSERT OR ${ersetzen ? 'REPLACE' : 'IGNORE'} INTO bot_faelle (${RW_BOT_SPALTEN.join(',')}) VALUES ${platz}`).bind(...werte));
   }
   for (let i = 0; i < stmts.length; i += 200) await env.DB.batch(stmts.slice(i, i + 200));
 }
+let rwBotSpaltenOk = false;
 async function botSammlerTabellen(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_faelle (coin TEXT, ebene TEXT, at INTEGER, close REAL, phase TEXT, rsi REAL, bbpos REAL,
     mom6 REAL, mom30 REAL, dist200 REAL, slope200 REAL, volr REAL, atrp REAL, ret REAL, PRIMARY KEY (coin, ebene, at))`).run();
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
+  if (!rwBotSpaltenOk) { for (const sp of RW_BOT_NEUE_SPALTEN) { try { await env.DB.prepare('ALTER TABLE bot_faelle ADD COLUMN ' + sp).run(); } catch (e) {} } rwBotSpaltenOk = true; }
 }
 async function botSammler(env) {
+  await botSammlerTabellen(env);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_faelle (coin TEXT, ebene TEXT, at INTEGER, close REAL, phase TEXT, rsi REAL, bbpos REAL,
     mom6 REAL, mom30 REAL, dist200 REAL, slope200 REAL, volr REAL, atrp REAL, ret REAL, PRIMARY KEY (coin, ebene, at))`).run();
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
@@ -8251,10 +8273,27 @@ const RW_SITUATIONEN = {
   bbObenVol: r => r.bbpos != null && r.bbpos > 1 && r.volr > 1.5,
   rsiTiefFall: r => r.rsi != null && r.rsi < 30 && r.mom30 < -0.15,
   ruhig: r => r.atrp != null && r.bbpos != null && Math.abs(r.bbpos) < 0.3 && r.atrp < 0.015,
+  // ---- Erweiterung ----
+  neuTief30: r => r.tief30 === 1,
+  neuHoch30: r => r.hoch30 === 1,
+  rotSerie4: r => r.serie != null && r.serie <= -4,
+  gruenSerie4: r => r.serie != null && r.serie >= 4,
+  hammer: r => r.dochtu != null && r.dochtu > 0.6,
+  sternschnuppe: r => r.dochto != null && r.dochto > 0.6,
+  squeeze: r => r.bbwpct != null && r.bbwpct < 0.1,
+  squeezeAusbruchAuf: r => r.bbwpct != null && r.bbwpct < 0.2 && r.bbpos > 1,
+  squeezeAusbruchAb: r => r.bbwpct != null && r.bbwpct < 0.2 && r.bbpos < -1,
+  divBull: r => r.divbull === 1,
+  divBear: r => r.divbear === 1,
+  volVersiegt: r => r.volr != null && r.volr < 0.5 && r.mom6 != null && r.atrp != null && Math.abs(r.mom6) > 2 * r.atrp,
+  atrSprung: r => r.atrv != null && r.atrv > 1.8,
+  tiefHammerVol: r => r.tief30 === 1 && r.dochtu > 0.5 && r.volr > 1.5,
+  hochSternVol: r => r.hoch30 === 1 && r.dochto > 0.5 && r.volr > 1.5,
 };
 async function botSignaleLernen(env, iv) {
   const H = RW_BOT_EBENEN[iv].h;
-  const rows = ((await env.DB.prepare('SELECT coin, at, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, ret FROM bot_faelle WHERE ebene = ? AND ret IS NOT NULL').bind(iv).all()).results) || [];
+  await botSammlerTabellen(env);
+  const rows = ((await env.DB.prepare('SELECT coin, at, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, tief30, hoch30, serie, dochtu, dochto, bbwpct, divbull, divbear, atrv, ret FROM bot_faelle WHERE ebene = ? AND ret IS NOT NULL').bind(iv).all()).results) || [];
   if (rows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: rows.length };
   const ats = rows.map(r => r.at).sort((a, b) => a - b), mitte = ats[Math.floor(ats.length / 2)];
   const basis = {}; for (const r of rows) { const b = (basis[r.phase] = basis[r.phase] || { n: 0, up: 0 }); b.n++; if (r.ret > 0) b.up++; }
@@ -8299,7 +8338,8 @@ async function botStand(env) {
   try {
     const z = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN ret IS NOT NULL THEN 1 ELSE 0 END) AS mit FROM bot_faelle').first();
     const st = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v LIKE 'fertig%'").first()) || {};
-    return { faelle: z ? z.n : 0, mitErgebnis: z ? z.mit : 0, historieFertig: st.n || 0, historieGesamt: RW_BOT_COINS.length * Object.keys(RW_BOT_EBENEN).length };
+    const v2 = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v = 'fertig-v2'").first().catch(() => null)) || {};
+    return { faelle: z ? z.n : 0, mitErgebnis: z ? z.mit : 0, historieFertig: st.n || 0, historieNeu: v2.n || 0, historieGesamt: RW_BOT_COINS.length * Object.keys(RW_BOT_EBENEN).length };
   } catch (e) { return { faelle: 0, mitErgebnis: 0, historieFertig: 0, historieGesamt: 16 }; }
 }
 
