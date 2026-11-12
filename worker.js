@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3111,8 +3111,7 @@ async function handleStats(request, env, ctx) {
           const seit = new Date(L.seit).toISOString().slice(0, 10);
           const zeile = (name, a) => a ? `${name}: after bullish ${a.bullUp ?? '\u2013'} % up (${a.bullN}) \u00b7 after bearish ${a.bearDown ?? '\u2013'} % down (${a.bearN}) \u00b7 base ${a.basisUp} % up \u00b7 Brier ${a.brier} (random ${a.brierZufall})` : `${name}: waiting for results`;
           return tile('live1', 'Signals recorded', L.n, `since ${seit}`) +
-            tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>')) +
-            tile('live3', 'Phase signals (new engine)', L.phasenSig ? L.phasenSig.n : null, L.phasenSig && L.phasenSig.ausgewertet ? `${L.phasenSig.treffer} % correct after 3 days (4H) / 7 days (1D) \u00b7 ${L.phasenSig.ausgewertet} evaluated \u00b7 backtest: 56\u201365 %` : 'signals appear only in special situations \u00b7 waiting for results');
+            tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>'));
         })()}
         <div class="sec">Learning bot \u00b7 step 1: collecting</div>
         ${(() => { const B = stats.botStand || {}; return tile('bot1', 'Cases collected', B.faelle || null,
