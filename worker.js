@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-0850'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-0900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7912,6 +7912,7 @@ async function rwLaufInfo(env, name) {
 // -> Kraken (letzte 720 Kerzen). Ergebnis immer im Binance-Format [open, o, h, l, c, v, close].
 const RW_KLINES_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com'];
 let rwBinanceGesperrt = false;
+let rwLetzteQuelle = null;
 const RW_KRAKEN_PAAR = { BTC: 'XBTUSD', ETH: 'ETHUSD', SOL: 'SOLUSD', XRP: 'XRPUSD', DOGE: 'XDGUSD', AVAX: 'AVAXUSD', RUNE: 'RUNEUSD', BNB: 'BNBUSD' };
 async function rwKlinesHolen(sym, iv, limit, endTime) {
   const fehler = [];
@@ -7920,7 +7921,7 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
     for (const h of RW_KLINES_HOSTS) {
       try {
         const r = await fetchWithTimeout(`${h}/api/v3/klines?symbol=${sym}USDT&interval=${iv}&limit=${Math.min(1000, limit)}` + (endTime ? `&endTime=${endTime}` : ''), { timeoutMs: 8000 });
-        if (r.ok) { const j = await r.json(); if (Array.isArray(j) && j.length) return { rows: j, quelle: 'binance' }; }
+        if (r.ok) { const j = await r.json(); if (Array.isArray(j) && j.length) { rwLetzteQuelle = 'binance'; return { rows: j, quelle: 'binance' }; } }
         fehler.push(h.replace('https://', '') + ' ' + r.status);
         if (r.status === 403 || r.status === 451) { rwBinanceGesperrt = true; break; }
       } catch (e) { fehler.push(h.replace('https://', '') + ' ' + (e && e.message || e)); }
@@ -7930,13 +7931,15 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
   try {
     const basis = iv === '1d' ? 'histoday' : 'histohour';
     const url = `https://min-api.cryptocompare.com/data/v2/${basis}?fsym=${sym}&tsym=USD&limit=${Math.min(2000, limit)}` + (iv === '1d' ? '' : '&aggregate=4') + (endTime ? `&toTs=${Math.floor(endTime / 1000)}` : '');
-    const r = await fetchWithTimeout(url, { timeoutMs: 12000 });
+    // Optionaler kostenloser Schluessel (Secret CRYPTOCOMPARE_API_KEY) -- ohne Schluessel blockt CryptoCompare oft.
+    const ccKey = currentEnv && currentEnv.CRYPTOCOMPARE_API_KEY;
+    const r = await fetchWithTimeout(url, { timeoutMs: 12000, headers: ccKey ? { authorization: 'Apikey ' + ccKey } : {} });
     if (r.ok) {
       const j = await r.json();
       const d = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
       if (j && j.Response !== 'Error' && d && d.length) {
         const rows = d.filter(x => x && x.close > 0).map(x => [x.time * 1000, x.open, x.high, x.low, x.close, x.volumefrom, x.time * 1000 + ivMs - 1]);
-        if (rows.length) return { rows, quelle: 'cryptocompare' };
+        if (rows.length) { rwLetzteQuelle = 'cryptocompare'; return { rows, quelle: 'cryptocompare' }; }
       }
       fehler.push('cryptocompare ' + (j && j.Message ? String(j.Message).slice(0, 60) : 'leer'));
     } else fehler.push('cryptocompare ' + r.status);
@@ -7950,7 +7953,7 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
       const key = j && j.result ? Object.keys(j.result).find(k => k !== 'last') : null;
       if (key && Array.isArray(j.result[key]) && j.result[key].length) {
         const rows = j.result[key].map(x => [x[0] * 1000, +x[1], +x[2], +x[3], +x[4], +x[6], x[0] * 1000 + ivMs - 1]).slice(-limit);
-        return { rows, quelle: 'kraken' };
+        rwLetzteQuelle = 'kraken'; return { rows, quelle: 'kraken' };
       }
       fehler.push('kraken ' + (j && j.error && j.error.length ? j.error[0] : (r.status || 'leer')));
     }
@@ -8027,12 +8030,21 @@ async function botSammler(env) {
   const status = new Map(((await env.DB.prepare('SELECT k, v FROM bot_status').all()).results || []).map(r => [r.k, r.v]));
   // 1) Historie: je Lauf genau ein noch fehlendes Coin/Zeitebene-Paar nachladen
   for (const iv in RW_BOT_EBENEN) for (const coin of RW_BOT_COINS) {
-    if (status.get('hist:' + coin + ':' + iv) === 'fertig') continue;
+    const st = status.get('hist:' + coin + ':' + iv);
+    if (st === 'fertig-kurz' && !(env.CRYPTOCOMPARE_API_KEY)) continue;
+    if (st === 'fertig') {
+      // aelterer Stand ohne Quellen-Merker: war die Historie kurz (Kraken) und gibt es jetzt einen Schluessel -> nachladen
+      if (!env.CRYPTOCOMPARE_API_KEY) continue;
+      const z = await env.DB.prepare('SELECT COUNT(*) AS n FROM bot_faelle WHERE coin = ? AND ebene = ?').bind(coin, iv).first().catch(() => null);
+      if (!z || z.n >= RW_BOT_EBENEN[iv].hist * 0.5) continue;
+    }
+    rwLetzteQuelle = null;
     const k = await rwBotKerzen(coin, iv, RW_BOT_EBENEN[iv].hist);
     const rows = rwBotMerkmale(k, RW_BOT_EBENEN[iv].h, 0);
     await rwBotSchreiben(env, coin, iv, rows);
-    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, 'fertig').run();
-    return { historie: coin + ' ' + iv, faelle: rows.length };
+    const kurz = rwLetzteQuelle === 'kraken';
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, kurz ? 'fertig-kurz' : 'fertig').run();
+    return { historie: coin + ' ' + iv, faelle: rows.length, quelle: rwLetzteQuelle };
   }
   // 2) Laufend: neue Kerzen anhaengen, offene Ergebnisse nachtragen
   for (const iv in RW_BOT_EBENEN) for (const coin of RW_BOT_COINS) {
@@ -8051,7 +8063,7 @@ async function botSammler(env) {
 async function botStand(env) {
   try {
     const z = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN ret IS NOT NULL THEN 1 ELSE 0 END) AS mit FROM bot_faelle').first();
-    const st = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v = 'fertig'").first()) || {};
+    const st = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v LIKE 'fertig%'").first()) || {};
     return { faelle: z ? z.n : 0, mitErgebnis: z ? z.mit : 0, historieFertig: st.n || 0, historieGesamt: RW_BOT_COINS.length * Object.keys(RW_BOT_EBENEN).length };
   } catch (e) { return { faelle: 0, mitErgebnis: 0, historieFertig: 0, historieGesamt: 16 }; }
 }
