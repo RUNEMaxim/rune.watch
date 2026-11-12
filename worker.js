@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-1500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-1600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3120,11 +3120,12 @@ async function handleStats(request, env, ctx) {
             const e = L && L.ergebnis; return `${name}: ` + (e && e.uebernommen === false ? `not adopted (${e.test ? 'Brier ' + e.test.brier + ' vs base ' + e.test.brierBasis : ''})` : L && L.fehler ? 'ERROR ' + L.fehler : 'not trained yet'); };
           const B = stats.botLive || {};
           const sig = (name, S) => !S ? `${name}: not learned yet` : `${name}: ${S.signale.length} reliable situations (learned ${new Date(S.at).toISOString().slice(0, 10)} from ${S.n} cases)` +
-            (S.signale.length ? ': ' + S.signale.slice(0, 4).map(x => `${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}%/${x.basis}%`).join(', ') : '') +
+            (S.signale.length ? ': ' + S.signale.slice(0, 4).map(x => `${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}%/${x.basis}%` + (x.bewegung != null ? ` \u00b7 \u00f8 ${x.bewegung}% vs ${x.bewegungBasis}% \u00b7 target first ${x.zielVorStopp}% vs ${x.zielBasis}%` : '')).join('<br>') : '') +
             (S.aenderung && (S.aenderung.neu.length || S.aenderung.weg.length) ? ` \u00b7 new: ${S.aenderung.neu.length}, dropped: ${S.aenderung.weg.length}` : '');
           const LV = stats.botSigLive || {};
           const liveTile = tile('bot5', 'Bot signals \u00b7 live hit rate', LV.ausgewertet ? Math.round(100 * LV.quote) + ' %' : null,
             LV.n ? `${LV.richtig} of ${LV.ausgewertet} correct` + (LV.erwartet != null ? ` (backtest promised ${LV.erwartet} %)` : '') + ` \u00b7 ${LV.offen} still open \u00b7 since ${new Date(LV.seit).toISOString().slice(0, 10)}` +
+              (LV.bewegung != null ? `<br>Avg move in signal direction: ${LV.bewegung > 0 ? '+' : ''}${LV.bewegung} %` : '') + (LV.zielN ? ` \u00b7 target before stop (1 ATR): ${LV.zielTreffer} of ${LV.zielN} (${LV.zielVorStopp} %)` : '') +
               (LV.letzte && LV.letzte.length ? '<br>Latest: ' + LV.letzte.map(x => `${x.coin} ${x.ebene} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.ergebnis == null ? '\u2026' : x.ergebnis ? '\u2713' : '\u2717'}`).join(', ') : '')
               : 'first signals appear when a learned situation occurs (a few per week across 8 coins)');
           return liveTile + tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
@@ -8301,11 +8302,25 @@ const RW_SITUATIONEN = {
 async function botSignaleLernen(env, iv) {
   const H = RW_BOT_EBENEN[iv].h;
   await botSammlerTabellen(env);
-  const rows = ((await env.DB.prepare('SELECT coin, at, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, tief30, hoch30, serie, dochtu, dochto, bbwpct, divbull, divbear, atrv, ret FROM bot_faelle WHERE ebene = ? AND ret IS NOT NULL').bind(iv).all()).results) || [];
+  const alle = ((await env.DB.prepare('SELECT coin, at, close, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, tief30, hoch30, serie, dochtu, dochto, bbwpct, divbull, divbear, atrv, ret FROM bot_faelle WHERE ebene = ?').bind(iv).all()).results) || [];
+  // ZIEL VOR STOPP: je Coin die Schlusskurse in Zeitfolge; Ziel/Stopp = 1 Schwankungsbreite (ATR) in/gegen Signalrichtung
+  const proCoinReihe = {}; for (const r of alle) (proCoinReihe[r.coin] = proCoinReihe[r.coin] || []).push(r);
+  for (const c in proCoinReihe) { proCoinReihe[c].sort((a, b) => a.at - b.at); proCoinReihe[c].forEach((r, i) => { r._i = i; }); }
+  const zielStopp = (r, dir) => { // 1 = Ziel zuerst, 0 = Stopp zuerst, null = keins von beiden in der Frist
+    const reihe = proCoinReihe[r.coin], a = r.atrp; if (!a || !reihe) return null;
+    const ziel = dir === 'up' ? r.close * (1 + a) : r.close * (1 - a), stopp = dir === 'up' ? r.close * (1 - a) : r.close * (1 + a);
+    for (let j = r._i + 1; j <= Math.min(reihe.length - 1, r._i + H); j++) { const c = reihe[j].close;
+      if (dir === 'up' ? c >= ziel : c <= ziel) return 1; if (dir === 'up' ? c <= stopp : c >= stopp) return 0; }
+    return null; };
+  const kennzahlen = (g, dir) => { let sm = 0, z = 0, zn = 0; for (const r of g) { sm += dir === 'up' ? r.ret : -r.ret; const e = zielStopp(r, dir); if (e != null) { zn++; z += e; } }
+    return { bewegung: g.length ? +(100 * sm / g.length).toFixed(2) : null, zielVorStopp: zn ? Math.round(100 * z / zn) : null }; };
+  const rows = alle.filter(r => r.ret != null);
   if (rows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: rows.length };
   const ats = rows.map(r => r.at).sort((a, b) => a - b), mitte = ats[Math.floor(ats.length / 2)];
   const basis = {}; for (const r of rows) { const b = (basis[r.phase] = basis[r.phase] || { n: 0, up: 0 }); b.n++; if (r.ret > 0) b.up++; }
   const uebernommen = [], geprueft = [];
+  const vglCache = {};
+  const vergleich = (ph, dir) => (vglCache[ph + dir] = vglCache[ph + dir] || kennzahlen(rows.filter(r => r.phase === ph), dir));
   for (const ph of ['auf', 'ab', 'seit']) {
     if (!basis[ph] || basis[ph].n < 500) continue;
     const bq = basis[ph].up / basis[ph].n;
@@ -8325,7 +8340,12 @@ async function botSignaleLernen(env, iv) {
       const eintrag = { phase: ph, key, dir, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
         h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2) };
       geprueft.push(eintrag);
-      if (vorsprung >= 0.05 && z >= 2 && coinsOk >= 4 && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) uebernommen.push(eintrag);
+      if (vorsprung >= 0.05 && z >= 2 && coinsOk >= 4 && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
+        // Zusatz-Kennzahlen nur fuer aufgenommene Situationen (spart Rechenzeit), jeweils mit Vergleich zur Phase
+        const k1 = kennzahlen(g, dir), vgl = vergleich(ph, dir);
+        Object.assign(eintrag, { bewegung: k1.bewegung, bewegungBasis: vgl.bewegung, zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
+        uebernommen.push(eintrag);
+      }
     }
   }
   uebernommen.sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis));
@@ -8356,14 +8376,26 @@ async function botSignalLiveMitschreiben(env, coin, iv, neue) {
 }
 async function botSignalLiveBilanz(env) {
   try {
-    const rows = ((await env.DB.prepare(`SELECT s.coin, s.ebene, s.at, s.key, s.dir, s.treffer, s.basis, f.ret AS ret FROM bot_sig_live s
+    const rows = ((await env.DB.prepare(`SELECT s.coin, s.ebene, s.at, s.key, s.dir, s.treffer, s.basis, s.close AS close, f.ret AS ret, f.atrp AS atrp FROM bot_sig_live s
       LEFT JOIN bot_faelle f ON f.coin = s.coin AND f.ebene = s.ebene AND f.at = s.at WHERE s.folge = 0`).all()).results) || [];
     const fertig = rows.filter(r => r.ret != null), ok = fertig.filter(r => (r.ret > 0) === (r.dir === 'up')).length;
+    // Ø Bewegung in Signalrichtung + Ziel vor Stopp (1 ATR), fuer die letzten 200 ausgewerteten Signale
+    let sm = 0, zt = 0, zn = 0;
+    for (const r of fertig.sort((a, b) => b.at - a.at).slice(0, 200)) {
+      sm += r.dir === 'up' ? r.ret : -r.ret;
+      if (!r.atrp || !r.close) continue;
+      const H = r.ebene === '1d' ? 7 : 18;
+      const pfad = ((await env.DB.prepare('SELECT close FROM bot_faelle WHERE coin = ? AND ebene = ? AND at > ? ORDER BY at LIMIT ?').bind(r.coin, r.ebene, r.at, H).all()).results) || [];
+      const ziel = r.dir === 'up' ? r.close * (1 + r.atrp) : r.close * (1 - r.atrp), stopp = r.dir === 'up' ? r.close * (1 - r.atrp) : r.close * (1 + r.atrp);
+      for (const p of pfad) { if (r.dir === 'up' ? p.close >= ziel : p.close <= ziel) { zn++; zt++; break; } if (r.dir === 'up' ? p.close <= stopp : p.close >= stopp) { zn++; break; } }
+    }
+    const nB = Math.min(fertig.length, 200);
     const erwartet = fertig.length ? fertig.reduce((a, r) => a + r.treffer, 0) / fertig.length : null;
     const proEbene = {}; for (const r of fertig) { const e = (proEbene[r.ebene] = proEbene[r.ebene] || { n: 0, ok: 0 }); e.n++; if ((r.ret > 0) === (r.dir === 'up')) e.ok++; }
     const seit = rows.length ? Math.min(...rows.map(r => r.at)) : null;
     return { n: rows.length, offen: rows.length - fertig.length, ausgewertet: fertig.length, richtig: ok, quote: fertig.length ? ok / fertig.length : null,
       erwartet: erwartet == null ? null : Math.round(erwartet), seit, proEbene,
+      bewegung: nB ? +(100 * sm / nB).toFixed(2) : null, zielVorStopp: zn ? Math.round(100 * zt / zn) : null, zielN: zn, zielTreffer: zt,
       letzte: rows.sort((a, b) => b.at - a.at).slice(0, 5).map(r => ({ coin: r.coin, ebene: r.ebene, at: r.at, key: r.key, dir: r.dir, ergebnis: r.ret == null ? null : (r.ret > 0) === (r.dir === 'up') })) };
   } catch (e) { return { n: 0, offen: 0, ausgewertet: 0, richtig: 0, quote: null }; }
 }
