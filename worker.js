@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-0900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-0930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5409,6 +5409,20 @@ export default {
         const erg = await runebondEmpfehlungen(env).catch(e => ({ fehler: String(e && e.message || e) }));
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
       }
+      if (url.pathname === '/bot-historie' && request.method === 'POST') {
+        // Lange Historie vom Browser (Backtest-Seite) annehmen: der Browser darf Binance abrufen, Cloudflare nicht.
+        if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+        const b = await request.json().catch(() => null);
+        const coin = b && String(b.coin || '').toUpperCase(), iv = b && b.ebene;
+        if (!b || !RW_BOT_COINS.includes(coin) || !RW_BOT_EBENEN[iv] || !Array.isArray(b.kerzen) || b.kerzen.length < 240 || b.kerzen.length > 4000) return json({ error: 'BAD_REQUEST' }, env, 400);
+        const k = b.kerzen.map(x => ({ date: Number(x[0]), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] }))
+          .filter(x => x.date > 0 && x.close > 0).sort((a, c) => a.date - c.date);
+        await botSammlerTabellen(env);
+        const rows = rwBotMerkmale(k, RW_BOT_EBENEN[iv].h, 0);
+        await rwBotSchreiben(env, coin, iv, rows);
+        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, 'fertig').run();
+        return json({ ok: true, coin, ebene: iv, faelle: rows.length }, env);
+      }
       if (url.pathname === '/bot-pruefung') {
         // Sofort einen Lauf ausloesen und Fehler sehen (nur mit Statistik-Schluessel).
         if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
@@ -7913,6 +7927,7 @@ async function rwLaufInfo(env, name) {
 const RW_KLINES_HOSTS = ['https://data-api.binance.vision', 'https://api.binance.com'];
 let rwBinanceGesperrt = false;
 let rwLetzteQuelle = null;
+let rwKrakenZuletzt = 0;
 const RW_KRAKEN_PAAR = { BTC: 'XBTUSD', ETH: 'ETHUSD', SOL: 'SOLUSD', XRP: 'XRPUSD', DOGE: 'XDGUSD', AVAX: 'AVAXUSD', RUNE: 'RUNEUSD', BNB: 'BNBUSD' };
 async function rwKlinesHolen(sym, iv, limit, endTime) {
   const fehler = [];
@@ -7948,6 +7963,8 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
   try {
     const paar = RW_KRAKEN_PAAR[sym];
     if (paar && !endTime) {
+      const warte = rwKrakenZuletzt + 1300 - Date.now(); if (warte > 0) await new Promise(r => setTimeout(r, warte)); // Kraken: ~1 Abruf/s
+      rwKrakenZuletzt = Date.now();
       const r = await fetchWithTimeout(`https://api.kraken.com/0/public/OHLC?pair=${paar}&interval=${iv === '1d' ? 1440 : 240}`, { timeoutMs: 12000 });
       const j = r.ok ? await r.json() : null;
       const key = j && j.result ? Object.keys(j.result).find(k => k !== 'last') : null;
@@ -8022,6 +8039,11 @@ async function rwBotSchreiben(env, coin, iv, rows) {
     stmts.push(env.DB.prepare(`INSERT OR IGNORE INTO bot_faelle (${RW_BOT_SPALTEN.join(',')}) VALUES ${platz}`).bind(...werte));
   }
   for (let i = 0; i < stmts.length; i += 200) await env.DB.batch(stmts.slice(i, i + 200));
+}
+async function botSammlerTabellen(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_faelle (coin TEXT, ebene TEXT, at INTEGER, close REAL, phase TEXT, rsi REAL, bbpos REAL,
+    mom6 REAL, mom30 REAL, dist200 REAL, slope200 REAL, volr REAL, atrp REAL, ret REAL, PRIMARY KEY (coin, ebene, at))`).run();
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
 }
 async function botSammler(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_faelle (coin TEXT, ebene TEXT, at INTEGER, close REAL, phase TEXT, rsi REAL, bbpos REAL,
