@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8030,7 +8030,7 @@ const RW_KLINES_HOSTS = ['https://data-api.binance.vision', 'https://api.binance
 let rwBinanceGesperrt = false;
 let rwLetzteQuelle = null;
 let rwKrakenZuletzt = 0;
-const RW_KRAKEN_PAAR = { BTC: 'XBTUSD', ETH: 'ETHUSD', SOL: 'SOLUSD', XRP: 'XRPUSD', DOGE: 'XDGUSD', AVAX: 'AVAXUSD', RUNE: 'RUNEUSD', BNB: 'BNBUSD' };
+const RW_KRAKEN_PAAR = { BTC: 'XBTUSD', ETH: 'ETHUSD', SOL: 'SOLUSD', XRP: 'XRPUSD', DOGE: 'XDGUSD', AVAX: 'AVAXUSD', RUNE: 'RUNEUSD', BNB: 'BNBUSD', BCH: 'BCHUSD', LTC: 'LTCUSD', ATOM: 'ATOMUSD', ZEC: 'ZECUSD', NEAR: 'NEARUSD' };
 async function rwKlinesHolen(sym, iv, limit, endTime) {
   const fehler = [];
   const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
@@ -8084,7 +8084,7 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
 // Fuer 8 Coins (4H + Tag) je Kerze einfache, schnell berechenbare Merkmale + spaeteres Ergebnis (Kursveraenderung nach
 // 3 Tagen bei 4H bzw. 7 Tagen bei Tag). Einmalig wird die Historie nachgeladen (je Lauf ein Coin/Zeitebene), danach
 // kommen laufend neue Kerzen dazu und offene Ergebnisse werden nachgetragen. Nur oeffentliche Marktdaten.
-const RW_BOT_COINS = ['RUNE', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'AVAX'];
+const RW_BOT_COINS = ['RUNE', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'AVAX', 'BCH', 'LTC', 'ATOM', 'ZEC', 'NEAR']; // TCY/RUJI: nicht bei Binance, zu kurze Historie
 const RW_BOT_EBENEN = { '4h': { h: 18, hist: 3000 }, '1d': { h: 7, hist: 1500 } };
 async function rwBotKerzen(sym, iv, anzahl) {
   let ende = Date.now(), alle = [], runden = 0;
@@ -8384,7 +8384,7 @@ async function botSignaleLernen(env, iv) {
       const eintrag = { phase: ph, key, dir, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
         h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2) };
       geprueft.push(eintrag);
-      if (vorsprung >= 0.05 && z >= 2 && coinsOk >= 4 && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
+      if (vorsprung >= 0.05 && z >= 2 && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
         // Zusatz-Kennzahlen nur fuer aufgenommene Situationen (spart Rechenzeit), jeweils mit Vergleich zur Phase
         const k1 = kennzahlen(g, dir), vgl = vergleich(ph, dir);
         Object.assign(eintrag, { bewegung: k1.bewegung, bewegungBasis: vgl.bewegung, zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
@@ -8490,7 +8490,7 @@ async function botTrendbruchLernen(env, iv) {
     const r2 = x => x == null ? null : Math.round(100 * x);
     return { linie: v.typ.toUpperCase() + ' ' + v.p, typ: v.typ, p: v.p, coins: coins.length, besserBei: besser, ddMit: r2(ddMit), ddOhne: r2(ddOhne),
       ertragFaktor: faktor == null ? null : +faktor.toFixed(2), fehlalarme: r2(fehlQuote), signaleProCoin: +(coins.reduce((a, x) => a + x.wechsel, 0) / Math.max(1, coins.length)).toFixed(1),
-      bestanden: coins.length >= 5 && besser >= 5 && faktor != null && faktor >= 0.7,
+      bestanden: coins.length >= 5 && besser >= Math.max(5, Math.ceil(coins.length * 0.6)) && faktor != null && faktor >= 0.7,
       details: coins.map(x => ({ coin: x.coin, ddMit: r2(x.dd), ddOhne: r2(x.bhDd), ertragMit: r2(x.ertrag), ertragOhne: r2(x.bhErtrag) })) };
   });
   const okRoh = varianten.filter(v => v.bestanden).sort((a, b) => (b.ddMit - b.ddOhne) - (a.ddMit - a.ddOhne) || b.ertragFaktor - a.ertragFaktor);
@@ -8605,7 +8605,7 @@ async function botElliottAuswerten(env, iv) {
     const an = g.anteile.slice().sort((a, b) => a - b), q = p => an.length >= 20 ? +an[Math.floor(p * (an.length - 1))].toFixed(2) : null;
     return { art: g.art, key: g.key, n: g.n, treffer: Math.round(100 * g.hit / g.n), erwartet: Math.round(100 * g.p0 / g.n), coinsPlus, coinsMit: coinsMit.length,
       anteil60: q(0.4), anteil80: q(0.2),
-      bestanden: g.n >= 40 && v >= 0.05 && coinsPlus >= 3 && h1 != null && h2 != null && h1 > 0 && h2 > 0 };
+      bestanden: g.n >= 40 && v >= 0.05 && coinsPlus >= Math.max(3, Math.ceil(coinsMit.length * 0.4)) && h1 != null && h2 != null && h1 > 0 && h2 > 0 };
   }).filter(z => z.n >= 20).sort((a, b) => (b.treffer - b.erwartet) - (a.treffer - a.erwartet));
   return { zeilen, stabilitaet: Object.fromEntries(Object.entries(stabil).filter(([, x]) => x.n >= 10).map(([k, x]) => [k, Math.round(100 * x.gleich / x.n)])) };
 }
@@ -11493,7 +11493,10 @@ const TPAnalysis = (() => {
       // 70 Kerzen -- mit 120 waere die Grad-Wahl dort NIE aktiv geworden, obwohl gerade dort die
       // grosse Struktur gefragt ist.
       if (modus !== 'fine' && (winLen >= 60 || modus === 'coarse')) {
-        const feinste = Math.min(0.22, atrPct * 1.8);
+        // GELERNTE FEINHEIT wirkt jetzt auf die eigentliche Wellensuche (vorher nur auf eine Rueckfall-Zaehlung --
+        // gemeldet: "im Daily wurde die Zaehlung nicht feiner"): Faktor > 1 = kleinere Schwellen = feinere Wellen.
+        const fz = zzFaktor > 0 ? zzFaktor : 1;
+        const feinste = Math.min(0.22, atrPct * 1.8) / fz;
         // GRAD-WAHL NACH QUALITAET (gemeldet: "willkuerlich"): Bisher gewann die GROBSTE Stufe, die
         // ueberhaupt eine Zaehlung hergab -- egal wie schlecht sie passte. Ein einziger Wendepunkt,
         // der auf der groben Stufe auftauchte oder verschwand, liess die ganze Zaehlung auf einen
@@ -11501,7 +11504,7 @@ const TPAnalysis = (() => {
         // Stufen bewertet; es gewinnt die beste Zaehlung, groebere Stufen bekommen einen kleinen
         // Vorsprung (die grosse Struktur bleibt bevorzugt, wenn sie ungefaehr gleich gut passt).
         const stufenErg = [];
-        for (const pct of (modus === 'coarse' ? [0.6, 0.4, 0.28, 0.2, 0.14, 0.1] : [0.6, 0.4, 0.28, 0.2])) {
+        for (const pct of (modus === 'coarse' ? [0.6, 0.4, 0.28, 0.2, 0.14, 0.1] : [0.6, 0.4, 0.28, 0.2]).map(p => +(p / fz).toFixed(4))) {
           if (pct <= feinste && modus !== 'coarse') { degreeLog.push(pct + ': übersprungen (feiner als ' + feinste.toFixed(2) + ')'); break; }
           const zz = zigzagUpTo(data, to, pct);
           const inWin = zz.pivots.filter(p => p.idx >= from);
