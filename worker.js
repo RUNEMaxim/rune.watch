@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-1030'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-1045'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3109,12 +3109,12 @@ async function handleStats(request, env, ctx) {
         <div class="sec">Learning bot \u00b7 step 1: collecting</div>
         ${(() => { const B = stats.botStand || {}; return tile('bot1', 'Cases collected', B.faelle || null,
           `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} (four per hour)`); })()}
-        ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet (runs at minute ${n === 'Live' ? '30' : '33/38/43/48'} UTC)` :
+        ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet` :
             `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 80)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 80)}` : ' \u00b7 ok');
           return tile('bot2', 'Run status', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot)); })()}
         ${(() => { const pct = v => v == null ? '\u2013' : (100 * v).toFixed(1) + ' %';
           const m = (name, M, L) => { if (M && M.modell) return `${name}: model from ${new Date(M.at).toISOString().slice(0, 10)} \u00b7 test hit rate ${pct(M.test.treffer)} (base ${pct(Math.max(M.basis, 1 - M.basis))}) \u00b7 Brier ${M.test.brier} vs ${M.test.brierBasis}` + (M.gelernt && M.gelernt.length ? ` \u00b7 learned: ${M.gelernt.join(', ')}` : '');
-            const e = L && L.ergebnis; return `${name}: ` + (e && e.uebernommen === false ? `not adopted (${e.test ? 'Brier ' + e.test.brier + ' vs base ' + e.test.brierBasis : ''})` : L && L.fehler ? 'ERROR ' + L.fehler : 'not trained yet (runs at minute 53)'); };
+            const e = L && L.ergebnis; return `${name}: ` + (e && e.uebernommen === false ? `not adopted (${e.test ? 'Brier ' + e.test.brier + ' vs base ' + e.test.brierBasis : ''})` : L && L.fehler ? 'ERROR ' + L.fehler : 'not trained yet'); };
           const B = stats.botLive || {};
           return tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
             `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')); })()}
@@ -5616,14 +5616,7 @@ export default {
       // LIVE-MITSCHREIBER + LERNENDER BOT in eigenen Aufrufen (gemeldet: "keine Ergebnisse"): vorher liefen sie
       // vorn im grossen Durchgang und teilten sich dessen Budget. Jetzt: Minute 30 = Live-Signale,
       // Minuten 33/38/43/48 = Bot (Historie also 4 Paare pro Stunde, danach laufend).
-      const minute = new Date().getUTCMinutes();
-      if (minute === 30) ctx.waitUntil(rwDiagLauf(env, 'live', () => liveMitschreiber(env)));
-      if (minute === 33 || minute === 38 || minute === 43 || minute === 48) ctx.waitUntil(rwDiagLauf(env, 'bot', () => botSammler(env)));
-      if (minute === 53) ctx.waitUntil((async () => {
-        const jetzt = new Date(), sonntag = jetzt.getUTCDay() === 0 && jetzt.getUTCHours() === 3;
-        for (const iv of ['4h', '1d']) { const M = await botModell(env, iv); const L = await rwLaufInfo(env, 'lernen' + iv);
-          if (sonntag || ((!M) && (!L || Date.now() - L.at > 6 * 36e5))) await rwDiagLauf(env, 'lernen' + iv, () => botLernen(env, iv)); }
-      })());
+      ctx.waitUntil(rwPlanLaeufe(env));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -5640,8 +5633,27 @@ export default {
       return;
     }
     ctx.waitUntil(runRefreshCycle(env));
+    // FIX (gemeldet: "Run status" blieb stehen): falls kein Minuten-Takt eingerichtet ist, laufen die Bot-Teile
+    // hier mit -- sie pruefen selbst, ob sie faellig sind.
+    ctx.waitUntil(rwPlanLaeufe(env));
   },
 };
+// Faelligkeit statt fester Minuten: funktioniert mit jedem Cron-Takt (minuetlich oder stuendlich).
+let rwPlanLaeuftGerade = false;
+async function rwPlanLaeufe(env) {
+  if (rwPlanLaeuftGerade) return; rwPlanLaeuftGerade = true;
+  try {
+    const alter = async n => { const L = await rwLaufInfo(env, n); return L ? Date.now() - L.at : Infinity; };
+    if (await alter('live') > 55 * 60e3) await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
+    if (await alter('bot') > 14 * 60e3) await rwDiagLauf(env, 'bot', () => botSammler(env));
+    for (const iv of ['4h', '1d']) {
+      const M = await botModell(env, iv), a = await alter('lernen' + iv);
+      // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
+      if (a > 7 * 864e5 || (!M && a > 864e5)) await rwDiagLauf(env, 'lernen' + iv, () => botLernen(env, iv));
+    }
+  } catch (e) { console.warn('[plan]', e && e.message); }
+  finally { rwPlanLaeuftGerade = false; }
+}
 
 const NODE_HISTORY_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
