@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-0930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-1030'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2778,6 +2778,11 @@ async function handleStats(request, env, ctx) {
     botStand: await botStand(env),
     laufLive: await rwLaufInfo(env, 'live'),
     laufBot: await rwLaufInfo(env, 'bot'),
+    botModell4h: await botModell(env, '4h'),
+    botModell1d: await botModell(env, '1d'),
+    botLernlauf4h: await rwLaufInfo(env, 'lernen4h'),
+    botLernlauf1d: await rwLaufInfo(env, 'lernen1d'),
+    botLive: await botLiveBilanz(env),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
       const frisch = runebondEmpfehlungen(env).catch(() => null);
@@ -3107,6 +3112,12 @@ async function handleStats(request, env, ctx) {
         ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet (runs at minute ${n === 'Live' ? '30' : '33/38/43/48'} UTC)` :
             `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 80)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 80)}` : ' \u00b7 ok');
           return tile('bot2', 'Run status', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot)); })()}
+        ${(() => { const pct = v => v == null ? '\u2013' : (100 * v).toFixed(1) + ' %';
+          const m = (name, M, L) => { if (M && M.modell) return `${name}: model from ${new Date(M.at).toISOString().slice(0, 10)} \u00b7 test hit rate ${pct(M.test.treffer)} (base ${pct(Math.max(M.basis, 1 - M.basis))}) \u00b7 Brier ${M.test.brier} vs ${M.test.brierBasis}` + (M.gelernt && M.gelernt.length ? ` \u00b7 learned: ${M.gelernt.join(', ')}` : '');
+            const e = L && L.ergebnis; return `${name}: ` + (e && e.uebernommen === false ? `not adopted (${e.test ? 'Brier ' + e.test.brier + ' vs base ' + e.test.brierBasis : ''})` : L && L.fehler ? 'ERROR ' + L.fehler : 'not trained yet (runs at minute 53)'); };
+          const B = stats.botLive || {};
+          return tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
+            `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')); })()}
       </div>
     </section>
     <section class="page">
@@ -5409,6 +5420,12 @@ export default {
         const erg = await runebondEmpfehlungen(env).catch(e => ({ fehler: String(e && e.message || e) }));
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
       }
+      if (url.pathname === '/bot-prognose') {
+        const coin = String(url.searchParams.get('coin') || 'RUNE').toUpperCase(), iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
+        if (!RW_BOT_COINS.includes(coin)) return json({ error: 'UNKNOWN_COIN' }, env, 400);
+        const [pr, live] = await Promise.all([botPrognose(env, coin, iv), botLiveBilanz(env)]);
+        return json({ ...pr, live }, env);
+      }
       if (url.pathname === '/bot-historie' && request.method === 'POST') {
         // Lange Historie vom Browser (Backtest-Seite) annehmen: der Browser darf Binance abrufen, Cloudflare nicht.
         if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
@@ -5426,6 +5443,11 @@ export default {
       if (url.pathname === '/bot-pruefung') {
         // Sofort einen Lauf ausloesen und Fehler sehen (nur mit Statistik-Schluessel).
         if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+        if (url.searchParams.get('lernen') === '1') {
+          const l4 = await rwDiagLauf(env, 'lernen4h', () => botLernen(env, '4h'));
+          const l1 = await rwDiagLauf(env, 'lernen1d', () => botLernen(env, '1d'));
+          return json({ lernen4h: l4, lernen1d: l1, prognoseRUNE: await botPrognose(env, 'RUNE', '4h') }, env);
+        }
         const live = await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
         const bot = await rwDiagLauf(env, 'bot', () => botSammler(env));
         return json({ live, bot, stand: await botStand(env), liveBilanz: await liveBilanz(env) }, env);
@@ -5597,6 +5619,11 @@ export default {
       const minute = new Date().getUTCMinutes();
       if (minute === 30) ctx.waitUntil(rwDiagLauf(env, 'live', () => liveMitschreiber(env)));
       if (minute === 33 || minute === 38 || minute === 43 || minute === 48) ctx.waitUntil(rwDiagLauf(env, 'bot', () => botSammler(env)));
+      if (minute === 53) ctx.waitUntil((async () => {
+        const jetzt = new Date(), sonntag = jetzt.getUTCDay() === 0 && jetzt.getUTCHours() === 3;
+        for (const iv of ['4h', '1d']) { const M = await botModell(env, iv); const L = await rwLaufInfo(env, 'lernen' + iv);
+          if (sonntag || ((!M) && (!L || Date.now() - L.at > 6 * 36e5))) await rwDiagLauf(env, 'lernen' + iv, () => botLernen(env, iv)); }
+      })());
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -8076,12 +8103,108 @@ async function botSammler(env) {
       if (k.length < 240) continue;
       const rows = rwBotMerkmale(k, H, k.length - H - 3);
       await rwBotSchreiben(env, coin, iv, rows.slice(-3)); // nur die neuesten Kerzen neu einfuegen
+      const M = await botModell(env, iv);
+      if (M && M.modell) {
+        await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_prognosen (coin TEXT, ebene TEXT, at INTEGER, p REAL, PRIMARY KEY (coin, ebene, at))').run();
+        const neu = rows.slice(-3).filter(r => r.ret == null);
+        if (neu.length) await env.DB.batch(neu.map(r => env.DB.prepare('INSERT OR IGNORE INTO bot_prognosen (coin, ebene, at, p) VALUES (?, ?, ?, ?)').bind(coin, iv, r.at, +rwBotP(M.modell, rwBotVektor(r)).toFixed(4))));
+      }
       const offen = rows.filter(r => r.ret != null);       // Ergebnisse, die jetzt feststehen
       if (offen.length) await env.DB.batch(offen.map(r => env.DB.prepare('UPDATE bot_faelle SET ret = ? WHERE coin = ? AND ebene = ? AND at = ? AND ret IS NULL').bind(r.ret, coin, iv, r.at)));
     } catch (e) { console.warn('[bot] laufend', coin, iv, e && e.message); RW_DIAG.push(`bot ${coin} ${iv}: ${e && e.message || e}`); }
   }
   return { laufend: true };
 }
+
+// ===== LERNENDER BOT · SCHRITT 2: LERNEN (woechentlich, mit Probelauf) =====
+// Logistische Regression je Zeitebene: Wahrscheinlichkeit, dass der Kurs nach 3 Tagen (4H) bzw. 7 Tagen (Tag) hoeher steht.
+// Schutzregeln: (1) Zeit-Trennung -- gelernt wird auf aelteren Daten, geprueft auf den neuesten 20 % (mit Abstand,
+// damit keine Ueberlappung durchsickert); (2) ein Modell wird nur uebernommen, wenn es dort besser ist als die
+// reine Basisrate UND nicht schlechter als das bisherige; (3) neuere Faelle zaehlen mehr (Halbwertszeit 1 Jahr);
+// (4) Regularisierung gegen Auswendiglernen. Danach wird auf allen Daten neu angepasst.
+const RW_BOT_MERKMALE = ['Abwärtstrend', 'Seitwärts', 'RSI', 'Bollinger-Lage', 'Momentum kurz', 'Momentum lang', 'Abstand 200er', 'Neigung 200er', 'Volumen', 'Schwankung',
+  'RSI im Abwärtstrend', 'Band im Abwärtstrend', 'RSI seitwärts', 'Band seitwärts', 'RSI im Aufwärtstrend', 'Band im Aufwärtstrend'];
+const rwClip = (x, a, b) => (x == null || !isFinite(x) ? 0 : Math.max(a, Math.min(b, x)));
+function rwBotVektor(r) {
+  const ab = r.phase === 'ab' ? 1 : 0, seit = r.phase === 'seit' ? 1 : 0, auf = 1 - ab - seit;
+  const rsi = rwClip((r.rsi - 50) / 20, -2.5, 2.5), bb = rwClip(r.bbpos, -3, 3);
+  return [ab, seit, rsi, bb, rwClip(r.mom6 * 10, -3, 3), rwClip(r.mom30 * 5, -3, 3), rwClip(r.dist200 * 5, -3, 3), rwClip(r.slope200 * 50, -3, 3),
+    rwClip(Math.log(r.volr || 1), -2, 2), rwClip(r.atrp * 20, -3, 3), ab * rsi, ab * bb, seit * rsi, seit * bb, auf * rsi, auf * bb];
+}
+const rwSig = z => 1 / (1 + Math.exp(-z));
+function rwBotTrainieren(X, y, g, iter = 300, lr = 0.15, l2 = 1e-3) {
+  const d = X[0].length, n = X.length; const w = new Array(d).fill(0); let b = 0; const sg = g.reduce((a, x) => a + x, 0) || 1;
+  for (let it = 0; it < iter; it++) {
+    const gw = new Array(d).fill(0); let gb = 0;
+    for (let i = 0; i < n; i++) { const xi = X[i]; let z = b; for (let j = 0; j < d; j++) z += w[j] * xi[j]; const e = (rwSig(z) - y[i]) * g[i]; gb += e; for (let j = 0; j < d; j++) gw[j] += e * xi[j]; }
+    b -= lr * gb / sg; for (let j = 0; j < d; j++) w[j] -= lr * (gw[j] / sg + l2 * w[j]);
+  }
+  return { w, b };
+}
+const rwBotP = (m, x) => { let z = m.b; for (let j = 0; j < m.w.length; j++) z += m.w[j] * x[j]; return rwSig(z); };
+async function botLernen(env, iv) {
+  const H = RW_BOT_EBENEN[iv].h, ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  const rows = ((await env.DB.prepare('SELECT * FROM bot_faelle WHERE ebene = ? AND ret IS NOT NULL ORDER BY at').bind(iv).all()).results) || [];
+  if (rows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: rows.length };
+  const ats = rows.map(r => r.at).sort((a, b) => a - b), testAb = ats[Math.floor(ats.length * 0.8)], tMax = ats[ats.length - 1];
+  const gewicht = r => Math.pow(0.5, (tMax - r.at) / (365 * 864e5));
+  const train = rows.filter(r => r.at < testAb - H * ivMs), test = rows.filter(r => r.at >= testAb);
+  const Xt = train.map(rwBotVektor), yt = train.map(r => (r.ret > 0 ? 1 : 0)), gt = train.map(gewicht);
+  const m = rwBotTrainieren(Xt, yt, gt);
+  const basis = yt.reduce((a, y, i) => a + y * gt[i], 0) / gt.reduce((a, x) => a + x, 0);
+  const pruef = mod => { let bm = 0, bb = 0, ok = 0, klar = 0, klarOk = 0;
+    for (const r of test) { const y = r.ret > 0 ? 1 : 0, p = mod ? rwBotP(mod, rwBotVektor(r)) : basis; bm += (p - y) ** 2; bb += (basis - y) ** 2; if ((p > 0.5) === (y === 1)) ok++; if (Math.abs(p - 0.5) > 0.05) { klar++; if ((p > 0.5) === (y === 1)) klarOk++; } }
+    return { brier: bm / test.length, brierBasis: bb / test.length, treffer: ok / test.length, klarAnteil: klar / test.length, klarTreffer: klar ? klarOk / klar : null }; };
+  const neu = pruef(m);
+  const altRoh = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('modell:' + iv).first().catch(() => null);
+  const alt = altRoh ? JSON.parse(altRoh.v) : null;
+  const altPruef = alt && alt.modell ? pruef(alt.modell) : null;
+  const besserAlsBasis = neu.brier < neu.brierBasis, nichtSchlechter = !altPruef || neu.brier <= altPruef.brier + 0.0005;
+  const info = { ebene: iv, at: Date.now(), nTrain: train.length, nTest: test.length, basis: +basis.toFixed(4),
+    test: Object.fromEntries(Object.entries(neu).map(([k, v]) => [k, v == null ? null : +v.toFixed(4)])), altTest: altPruef ? +altPruef.brier.toFixed(4) : null };
+  if (!(besserAlsBasis && nichtSchlechter)) {
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('lernlauf:' + iv, JSON.stringify({ ...info, uebernommen: false, grund: !besserAlsBasis ? 'schlägt die Basisrate nicht' : 'schlechter als bisheriges Modell' })).run();
+    return { ...info, uebernommen: false };
+  }
+  // bestanden -> auf allen Daten neu anpassen
+  const Xa = rows.map(rwBotVektor), ya = rows.map(r => (r.ret > 0 ? 1 : 0)), ga = rows.map(gewicht);
+  const fin = rwBotTrainieren(Xa, ya, ga);
+  const basisAll = ya.reduce((a, y, i) => a + y * ga[i], 0) / ga.reduce((a, x) => a + x, 0);
+  // Was hat sich gegenueber dem alten Modell am staerksten veraendert?
+  let gelernt = [];
+  if (alt && alt.modell) gelernt = fin.w.map((w, j) => ({ j, d: w - alt.modell.w[j] })).sort((a, b) => Math.abs(b.d) - Math.abs(a.d)).slice(0, 2)
+    .filter(x => Math.abs(x.d) > 0.02).map(x => `${RW_BOT_MERKMALE[x.j]} ${x.d > 0 ? 'stärker' : 'schwächer'} gewichtet`);
+  const modell = { modell: { w: fin.w.map(x => +x.toFixed(5)), b: +fin.b.toFixed(5) }, basis: +basisAll.toFixed(4), ...info, uebernommen: true, gelernt, n: rows.length };
+  await env.DB.batch([
+    env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('modell:' + iv, JSON.stringify(modell)),
+    env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('lernlauf:' + iv, JSON.stringify({ ...info, uebernommen: true, gelernt })),
+  ]);
+  return { ...info, uebernommen: true, gelernt };
+}
+async function botModell(env, iv) {
+  try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('modell:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
+}
+// Prognose fuer die juengste Kerze eines Coins (fuer die App) -- mit den zwei wichtigsten Gruenden
+async function botPrognose(env, coin, iv) {
+  const M = await botModell(env, iv);
+  const r = await env.DB.prepare('SELECT * FROM bot_faelle WHERE coin = ? AND ebene = ? ORDER BY at DESC LIMIT 1').bind(coin, iv).first().catch(() => null);
+  if (!r) return { coin, ebene: iv, status: 'keine Daten' };
+  if (!M || !M.modell) return { coin, ebene: iv, status: 'noch kein Modell', phase: r.phase, at: r.at };
+  const x = rwBotVektor(r), p = rwBotP(M.modell, x);
+  const gruende = M.modell.w.map((w, j) => ({ j, c: w * x[j] })).filter(g => Math.abs(g.c) > 0.02).sort((a, b) => Math.abs(b.c) - Math.abs(a.c)).slice(0, 2)
+    .map(g => ({ merkmal: RW_BOT_MERKMALE[g.j], richtung: g.c > 0 ? 'up' : 'down' }));
+  return { coin, ebene: iv, at: r.at, phase: r.phase, p: +p.toFixed(3), basis: M.basis, horizont: iv === '1d' ? '7d' : '3d', gruende,
+    modell: { at: M.at, n: M.n, testTreffer: M.test.treffer, testBrier: M.test.brier, testBrierBasis: M.test.brierBasis, klarTreffer: M.test.klarTreffer, gelernt: M.gelernt || [] } };
+}
+async function botLiveBilanz(env) {
+  try {
+    const rows = ((await env.DB.prepare('SELECT p.p AS p, f.ret AS ret FROM bot_prognosen p JOIN bot_faelle f ON f.coin = p.coin AND f.ebene = p.ebene AND f.at = p.at WHERE f.ret IS NOT NULL').all()).results) || [];
+    const gesamt = await env.DB.prepare('SELECT COUNT(*) AS n FROM bot_prognosen').first().catch(() => null);
+    const ok = rows.filter(r => (r.p > 0.5) === (r.ret > 0)).length;
+    return { n: gesamt ? gesamt.n : 0, ausgewertet: rows.length, treffer: rows.length ? ok / rows.length : null };
+  } catch (e) { return { n: 0, ausgewertet: 0, treffer: null }; }
+}
+
 async function botStand(env) {
   try {
     const z = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN ret IS NOT NULL THEN 1 ELSE 0 END) AS mit FROM bot_faelle').first();
