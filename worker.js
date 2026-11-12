@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-14-1600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-14-1700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2785,6 +2785,8 @@ async function handleStats(request, env, ctx) {
     botLive: await botLiveBilanz(env),
     botSignale4h: await botSignale(env, '4h'),
     botSigLive: await botSignalLiveBilanz(env),
+    botTb4h: await botTrendbruch(env, '4h'),
+    botTb1d: await botTrendbruch(env, '1d'),
     botSignale1d: await botSignale(env, '1d'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
@@ -3128,7 +3130,10 @@ async function handleStats(request, env, ctx) {
               (LV.bewegung != null ? `<br>Avg move in signal direction: ${LV.bewegung > 0 ? '+' : ''}${LV.bewegung} %` : '') + (LV.zielN ? ` \u00b7 target before stop (1 ATR): ${LV.zielTreffer} of ${LV.zielN} (${LV.zielVorStopp} %)` : '') +
               (LV.letzte && LV.letzte.length ? '<br>Latest: ' + LV.letzte.map(x => `${x.coin} ${x.ebene} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.ergebnis == null ? '\u2026' : x.ergebnis ? '\u2713' : '\u2717'}`).join(', ') : '')
               : 'first signals appear when a learned situation occurs (a few per week across 8 coins)');
-          return liveTile + tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
+          const tbz = (name, T) => !T ? `${name}: not tested yet` : T.gewaehlt ? `${name}: ${T.gewaehlt.linie} \u00b7 max drawdown ${T.gewaehlt.ddMit} % instead of ${T.gewaehlt.ddOhne} % (median, better for ${T.gewaehlt.besserBei}/${T.gewaehlt.coins} coins) \u00b7 keeps ${Math.round(100 * T.gewaehlt.ertragFaktor)} % of hold return \u00b7 false alarms ${T.gewaehlt.fehlalarme} %`
+            : `${name}: no variant passed (` + T.varianten.map(v => `${v.linie}: dd ${v.ddMit}/${v.ddOhne} %, better ${v.besserBei}/${v.coins}`).join('; ') + ')';
+          const tbTile = tile('bot6', 'Trend break (risk signal)', null, tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h));
+          return liveTile + tbTile + tile('bot4', 'Learned signal table', (stats.botSignale4h ? stats.botSignale4h.signale.length : 0) + (stats.botSignale1d ? stats.botSignale1d.signale.length : 0) || null,
             sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d)) + (false ? tile('bot3', 'Step 2: model', null, m('4H', stats.botModell4h, stats.botLernlauf4h) + '<br>' + m('Daily', stats.botModell1d, stats.botLernlauf1d) +
             `<br>Live predictions: ${B.n || 0} \u00b7 evaluated ${B.ausgewertet || 0}` + (B.ausgewertet ? ` \u00b7 ${pct(B.treffer)} correct` : '')) : ''); })()}
       </div>
@@ -5434,9 +5439,9 @@ export default {
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
       }
       if (url.pathname === '/bot-signale') {
-        const [a, b, live] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env)]);
+        const [a, b, live, tb4, tb1] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d')]);
         const kurz = x => x ? { at: x.at, horizont: x.horizont, n: x.n, signale: x.signale, aenderung: x.aenderung } : null;
-        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=900' } });
+        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=900' } });
       }
       if (url.pathname === '/bot-prognose') {
         const coin = String(url.searchParams.get('coin') || 'RUNE').toUpperCase(), iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
@@ -5464,7 +5469,9 @@ export default {
         if (url.searchParams.get('lernen') === '1') {
           const s4 = await rwDiagLauf(env, 'signale4h', () => botSignaleLernen(env, '4h'));
           const s1 = await rwDiagLauf(env, 'signale1d', () => botSignaleLernen(env, '1d'));
-          return json({ signale4h: s4, signale1d: s1 }, env);
+          const t1 = await rwDiagLauf(env, 'trendbruch1d', () => botTrendbruchLernen(env, '1d'));
+          const t4 = await rwDiagLauf(env, 'trendbruch4h', () => botTrendbruchLernen(env, '4h'));
+          return json({ trendbruch1d: t1, trendbruch4h: t4, signale4h: s4, signale1d: s1 }, env);
         }
         const live = await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
         const bot = await rwDiagLauf(env, 'bot', () => botSammler(env));
@@ -5669,6 +5676,7 @@ async function rwPlanLaeufe(env) {
       // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
       // (Gesamt-Modell je Kerze stillgelegt: bestand den Probelauf nicht -- ersetzt durch die Signal-Tabelle)
       if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
+      if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
   } catch (e) { console.warn('[plan]', e && e.message); }
   finally { rwPlanLaeuftGerade = false; }
@@ -8401,6 +8409,61 @@ async function botSignalLiveBilanz(env) {
 }
 async function botSignale(env, iv) {
   try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('signale:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
+}
+
+
+// ===== TRENDBRUCH-SIGNAL (Risiko, keine Vorhersage) =====
+// Regel: Schluss faellt unter die Linie -> "raus". Wieder "rein", sobald ein Schluss ueber der Linie liegt und die
+// Linie wieder steigt. Gemessen wird NICHT die Trefferquote, sondern:
+// groesster Rueckgang (Drawdown) mit Regel vs. einfach halten, Ertrag, Fehlalarme (Wiedereinstieg teurer als Ausstieg).
+// Drei Linien werden verglichen; uebernommen wird nur eine, die bei mind. 5 von 8 Coins den Drawdown um >= 10 Punkte
+// senkt und im Median mind. 70 % des Halte-Ertrags behaelt (Faktor auf 1+Ertrag).
+const RW_TB_VARIANTEN = [{ typ: 'ema', p: 20 }, { typ: 'sma', p: 50 }, { typ: 'sma', p: 100 }];
+function rwLinie(c, v) {
+  const n = c.length, out = new Array(n).fill(null);
+  if (v.typ === 'sma') { let s = 0; for (let i = 0; i < n; i++) { s += c[i]; if (i >= v.p) s -= c[i - v.p]; if (i >= v.p - 1) out[i] = s / v.p; } }
+  else { const k = 2 / (v.p + 1); let e = null; for (let i = 0; i < n; i++) { e = e == null ? c[i] : c[i] * k + e * (1 - k); if (i >= v.p - 1) out[i] = e; } }
+  return out;
+}
+function rwTrendbruchSim(c, v) {
+  const ma = rwLinie(c, v); let drin = true, eq = 1, peak = 1, dd = 0, bh = 1, bhPeak = 1, bhDd = 0, aus = null, wechsel = 0, fehl = 0;
+  const start = v.p + 30;
+  for (let i = start; i < c.length; i++) {
+    const r = c[i] / c[i - 1];
+    if (drin) eq *= r; bh *= r;
+    peak = Math.max(peak, eq); dd = Math.min(dd, eq / peak - 1); bhPeak = Math.max(bhPeak, bh); bhDd = Math.min(bhDd, bh / bhPeak - 1);
+    if (ma[i] == null || ma[i - 1] == null) continue;
+    // raus: Schluss faellt unter die Linie. Wieder rein: Schluss ueber der Linie UND Linie steigt (5 Kerzen) --
+    // so loesen kurze Gegenbewegungen im Abwaertstrend keinen Wiedereinstieg aus.
+    if (drin && c[i] < ma[i] && c[i - 1] >= ma[i - 1]) { drin = false; aus = c[i]; wechsel++; }
+    else if (!drin && c[i] > ma[i] && ma[i - 5] != null && ma[i] > ma[i - 5]) { drin = true; if (aus != null && c[i] > aus) fehl++; aus = null; }
+  }
+  return { ertrag: eq - 1, dd, bhErtrag: bh - 1, bhDd, wechsel, fehl };
+}
+async function botTrendbruchLernen(env, iv) {
+  const alle = ((await env.DB.prepare('SELECT coin, at, close FROM bot_faelle WHERE ebene = ? ORDER BY coin, at').bind(iv).all()).results) || [];
+  const proCoin = {}; for (const r of alle) (proCoin[r.coin] = proCoin[r.coin] || []).push(r.close);
+  const med = a => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : null; };
+  const varianten = RW_TB_VARIANTEN.map(v => {
+    const coins = Object.entries(proCoin).filter(([, c]) => c.length >= 400).map(([coin, c]) => ({ coin, ...rwTrendbruchSim(c, v) }));
+    const besser = coins.filter(x => (x.dd - x.bhDd) >= 0.10).length; // dd negativ: weniger negativ = besser
+    const faktor = med(coins.map(x => (1 + x.ertrag) / (1 + x.bhErtrag)));
+    const ddMit = med(coins.map(x => x.dd)), ddOhne = med(coins.map(x => x.bhDd));
+    const fehlQuote = coins.reduce((a, x) => a + x.fehl, 0) / Math.max(1, coins.reduce((a, x) => a + x.wechsel, 0));
+    const r2 = x => x == null ? null : Math.round(100 * x);
+    return { linie: v.typ.toUpperCase() + ' ' + v.p, typ: v.typ, p: v.p, coins: coins.length, besserBei: besser, ddMit: r2(ddMit), ddOhne: r2(ddOhne),
+      ertragFaktor: faktor == null ? null : +faktor.toFixed(2), fehlalarme: r2(fehlQuote), signaleProCoin: +(coins.reduce((a, x) => a + x.wechsel, 0) / Math.max(1, coins.length)).toFixed(1),
+      bestanden: coins.length >= 5 && besser >= 5 && faktor != null && faktor >= 0.7,
+      details: coins.map(x => ({ coin: x.coin, ddMit: r2(x.dd), ddOhne: r2(x.bhDd), ertragMit: r2(x.ertrag), ertragOhne: r2(x.bhErtrag) })) };
+  });
+  const ok = varianten.filter(v => v.bestanden).sort((a, b) => (b.ddMit - b.ddOhne) - (a.ddMit - a.ddOhne) || b.ertragFaktor - a.ertragFaktor);
+  const info = { ebene: iv, at: Date.now(), gewaehlt: ok[0] ? { typ: ok[0].typ, p: ok[0].p, linie: ok[0].linie, ddMit: ok[0].ddMit, ddOhne: ok[0].ddOhne, ertragFaktor: ok[0].ertragFaktor, fehlalarme: ok[0].fehlalarme, coins: ok[0].coins, besserBei: ok[0].besserBei } : null,
+    varianten: varianten.map(({ details, ...rest }) => rest) };
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('trendbruch:' + iv, JSON.stringify(info)).run();
+  return { ...info, details: varianten.map(v => ({ linie: v.linie, details: v.details })) };
+}
+async function botTrendbruch(env, iv) {
+  try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('trendbruch:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
 }
 
 async function botStand(env) {
