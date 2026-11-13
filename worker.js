@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5444,6 +5444,27 @@ export default {
         // wie viele Anfragen RUNEBond liefert, wie viele Memos geprueft sind, Beispiel-Memos und unsere Kennungen.
         const erg = await runebondEmpfehlungen(env).catch(e => ({ fehler: String(e && e.message || e) }));
         return json({ ergebnis: erg, beispiele: RB_PRUEF_BEISPIELE.slice(0, 12), apiSchluessel: !!env.RUNEBOND_API_KEY, affiliateVariable: String(env.RUNEBOND_AFFILIATE || '') }, env);
+      }
+      if (url.pathname === '/rune-mcap') {
+        // HISTORISCHE MARKETCAP (umlaufendes Angebot) von CoinGecko, ueber den Worker abgerufen: das Handy
+        // scheiterte am Abruflimit der kostenlosen Schnittstelle. 6 h im Cloudflare-Cache. Optionaler
+        // Schluessel: Secret COINGECKO_API_KEY (Demo-Key reicht).
+        const cache = caches.default, cKey = new Request('https://rune-mcap.cache/v1');
+        let hit = await cache.match(cKey);
+        if (!hit) {
+          const h = { accept: 'application/json' };
+          if (env.COINGECKO_API_KEY) h['x-cg-demo-api-key'] = env.COINGECKO_API_KEY;
+          let r = null;
+          try { r = await fetch('https://api.coingecko.com/api/v3/coins/thorchain/market_chart?vs_currency=usd&days=max&interval=daily', { headers: h }); } catch (e) { r = null; }
+          if (!r || !r.ok) return json({ error: 'COINGECKO_' + (r ? r.status : 'NETZ') }, env, 502);
+          const j = await r.json().catch(() => null);
+          const mc = j && Array.isArray(j.market_caps) ? j.market_caps.filter(x => Array.isArray(x) && x[1] > 0).map(x => [x[0], Math.round(x[1])]) : [];
+          if (mc.length < 30) return json({ error: 'COINGECKO_LEER' }, env, 502);
+          hit = new Response(JSON.stringify({ at: Date.now(), market_caps: mc }), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=21600' } });
+          await cache.put(cKey, hit.clone());
+        }
+        const body = await hit.text();
+        return new Response(body, { headers: { 'content-type': 'application/json', 'Access-Control-Allow-Origin': '*', 'cache-control': 'public, max-age=3600' } });
       }
       if (url.pathname === '/bot-signale') {
         const [a, b, live, tb4, tb1, ewRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
