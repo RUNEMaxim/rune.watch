@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8703,9 +8703,18 @@ async function refreshChurnsCache(env) {
         .map(c => ({ h: parseInt(c.height, 10), t: Math.floor(parseInt(c.date, 10) / 1e6) }))
         .filter(c => c.h && c.t)
         .sort((a, b) => b.h - a.h)[0];
-      const datum = bekannteZeit
+      // EXAKTE BLOCKZEIT (gewuenscht: "es gibt doch Zeitstempel fuer die Churns", wichtig fuer die Steuer):
+      // Midgard kennt den neuesten Churn manchmal noch nicht -- dann die echte Zeit des Churn-Blocks von THORNode
+      // holen statt sie aus 6 s je Block zu schaetzen. Schaetzung nur noch als letzter Rueckfall.
+      let exakt = null;
+      try {
+        const blk = await fetchFromBases(getThornodeBases(), `/cosmos/base/tendermint/v1beta1/blocks/${letzte}`);
+        const zeit = blk && blk.block && blk.block.header && blk.block.header.time;
+        if (zeit) { const ms = Date.parse(zeit); if (ms > 0) exakt = ms; }
+      } catch (e) {}
+      const datum = exakt || (bekannteZeit
         ? bekannteZeit.t + (letzte - bekannteZeit.h) * 6000
-        : Date.now();
+        : Date.now());
       fresh.push({ height: letzte, dateMs: Math.min(datum, Date.now()) });
       console.log('[rune-rewards-backend] Churn-Hoehe aus /thorchain/network ergaenzt:', letzte);
     }
@@ -8713,10 +8722,20 @@ async function refreshChurnsCache(env) {
     console.warn('[rune-rewards-backend] Netzwerk-Hoehe nicht abrufbar:', e?.message || String(e));
   }
 
-  if (!fresh.length) return;
-
-  const stmt = env.DB.prepare('INSERT OR IGNORE INTO churns_cache (height, date_ms) VALUES (?, ?)');
-  await env.DB.batch(fresh.map((c) => stmt.bind(c.height, c.dateMs)));
+  if (fresh.length) {
+    const stmt = env.DB.prepare('INSERT OR IGNORE INTO churns_cache (height, date_ms) VALUES (?, ?)');
+    await env.DB.batch(fresh.map((c) => stmt.bind(c.height, c.dateMs)));
+  }
+  // NACHKORRIGIEREN: frueher geschaetzte Zeiten durch Midgards echte Churn-Zeit ersetzen (die juengsten Churns),
+  // auch in den bereits berechneten Reward-Zeilen -- so stimmt der Zeitpunkt der Auszahlung auf die Sekunde.
+  try {
+    const echt = raw.map((c) => ({ height: parseInt(c.height, 10), dateMs: Math.floor(parseInt(c.date, 10) / 1e6) }))
+      .filter((c) => c.height && c.dateMs && c.height <= knownHeight).sort((a, b) => b.height - a.height).slice(0, 6);
+    if (echt.length) await env.DB.batch(echt.flatMap((c) => [
+      env.DB.prepare('UPDATE churns_cache SET date_ms = ? WHERE height = ? AND date_ms != ?').bind(c.dateMs, c.height, c.dateMs),
+      env.DB.prepare('UPDATE bond_history_rows SET churn_timestamp = ? WHERE churn_height = ? AND churn_timestamp != ?').bind(c.dateMs, c.height, c.dateMs),
+    ]));
+  } catch (e) { console.warn('[rune-rewards-backend] Churn-Zeiten nachkorrigieren:', e && e.message); }
 }
 
 async function refreshOneAddress(env, addressRow, now) {
