@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0800'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3118,7 +3118,9 @@ async function handleStats(request, env, ctx) {
           `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} \u00b7 with extended features ${B.historieNeu || 0} / ${B.historieGesamt || 16}`); })()}
         ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet` :
             `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 80)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 80)}` : ' \u00b7 ok');
-          return tile('bot2', 'Run status', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot)); })()}
+          // Grosse Zahl statt Strich: OK oder Zahl der Probleme
+          const nProb = [stats.laufLive, stats.laufBot].reduce((a, L) => a + (!L ? 0 : (L.fehler ? 1 : 0) + (L.einzelFehler ? L.einzelFehler.length : 0)), 0);
+          return tile('bot2', 'Run status', nProb ? nProb + (nProb === 1 ? ' issue' : ' issues') : 'OK', zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot)); })()}
         ${(() => { const pct = v => v == null ? '\u2013' : (100 * v).toFixed(1) + ' %';
           const m = (name, M, L) => { if (M && M.modell) return `${name}: model from ${new Date(M.at).toISOString().slice(0, 10)} \u00b7 test hit rate ${pct(M.test.treffer)} (base ${pct(Math.max(M.basis, 1 - M.basis))}) \u00b7 Brier ${M.test.brier} vs ${M.test.brierBasis}` + (M.gelernt && M.gelernt.length ? ` \u00b7 learned: ${M.gelernt.join(', ')}` : '');
             const e = L && L.ergebnis; return `${name}: ` + (e && e.uebernommen === false ? `not adopted (${e.test ? 'Brier ' + e.test.brier + ' vs base ' + e.test.brierBasis : ''})` : L && L.fehler ? 'ERROR ' + L.fehler : 'not trained yet'); };
@@ -3127,14 +3129,14 @@ async function handleStats(request, env, ctx) {
             (S.signale.length ? ': ' + S.signale.slice(0, 4).map(x => `${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}%/${x.basis}%` + (x.bewegung != null ? ` \u00b7 \u00f8 ${x.bewegung}% vs ${x.bewegungBasis}% \u00b7 target first ${x.zielVorStopp}% vs ${x.zielBasis}%` : '')).join('<br>') : '') +
             (S.aenderung && (S.aenderung.neu.length || S.aenderung.weg.length) ? ` \u00b7 new: ${S.aenderung.neu.length}, dropped: ${S.aenderung.weg.length}` : '');
           const LV = stats.botSigLive || {};
-          const liveTile = tile('bot5', 'Bot signals \u00b7 live hit rate', LV.ausgewertet ? Math.round(100 * LV.quote) + ' %' : null,
+          const liveTile = tile('bot5', 'Bot signals \u00b7 live hit rate', LV.ausgewertet ? Math.round(100 * LV.quote) + ' %' : LV.offen ? LV.offen + ' open' : null,
             LV.n ? `${LV.richtig} of ${LV.ausgewertet} correct` + (LV.erwartet != null ? ` (backtest promised ${LV.erwartet} %)` : '') + ` \u00b7 ${LV.offen} still open \u00b7 since ${new Date(LV.seit).toISOString().slice(0, 10)}` +
               (LV.bewegung != null ? `<br>Avg move in signal direction: ${LV.bewegung > 0 ? '+' : ''}${LV.bewegung} %` : '') + (LV.zielN ? ` \u00b7 target before stop (1 ATR): ${LV.zielTreffer} of ${LV.zielN} (${LV.zielVorStopp} %)` : '') +
               (LV.letzte && LV.letzte.length ? '<br>Latest: ' + LV.letzte.map(x => `${x.coin} ${x.ebene} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.ergebnis == null ? '\u2026' : x.ergebnis ? '\u2713' : '\u2717'}`).join(', ') : '')
               : 'first signals appear when a learned situation occurs (a few per week across 8 coins)');
           const tbz = (name, T) => !T ? `${name}: not tested yet` : T.gewaehlt ? `${name}: ${T.gewaehlt.linie} \u00b7 max drawdown ${T.gewaehlt.ddMit} % instead of ${T.gewaehlt.ddOhne} % (median, better for ${T.gewaehlt.besserBei}/${T.gewaehlt.coins} coins) \u00b7 keeps ${Math.round(100 * T.gewaehlt.ertragFaktor)} % of hold return \u00b7 false alarms ${T.gewaehlt.fehlalarme} %`
             : `${name}: no variant passed (` + T.varianten.map(v => `${v.linie}: dd ${v.ddMit}/${v.ddOhne} %, better ${v.besserBei}/${v.coins}`).join('; ') + ')';
-          const tbTile = tile('bot6', 'Trend break (risk signal)', null, tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h));
+          const tbTile = tile('bot6', 'Trend break (risk signal)', (stats.botTb1d && stats.botTb1d.gewaehlt ? stats.botTb1d.gewaehlt.linie : null), tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h));
           const EW = stats.botEwTab, EL = stats.botEwLauf && stats.botEwLauf.ergebnis;
           void EL;
           const ewTile = tile('bot7', 'Elliott (trained)', EW ? EW.b4 + EW.b1 : null,
