@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0800'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-0900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5469,10 +5469,11 @@ export default {
         return new Response(body, { headers: { 'content-type': 'application/json', 'Access-Control-Allow-Origin': '*', 'cache-control': 'public, max-age=3600' } });
       }
       if (url.pathname === '/bot-signale') {
-        const [a, b, live, tb4, tb1, ewRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
-          env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null)]);
+        const [a, b, live, tb4, tb1, ewRoh, muRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
+          env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null),
+          env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first().catch(() => null)]);
         const kurz = x => x ? { at: x.at, horizont: x.horizont, n: x.n, signale: x.signale, aenderung: x.aenderung } : null;
-        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
+        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, muster: muRoh ? JSON.parse(muRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
@@ -5481,6 +5482,28 @@ export default {
         if (!RW_BOT_COINS.includes(coin)) return json({ error: 'UNKNOWN_COIN' }, env, 400);
         const [pr, live] = await Promise.all([botPrognose(env, coin, iv), botLiveBilanz(env)]);
         return json({ ...pr, live }, env);
+      }
+      if (url.pathname === '/muster-tabelle' && request.method === 'POST') {
+        // Ergebnis von "Muster trainieren" (Browser): Ziel-Quoten je Muster/Richtung/Anteil/Marktphase ueber alle Coins
+        if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+        const b = await request.json().catch(() => null);
+        if (!b || typeof b !== 'object') return json({ error: 'BAD_REQUEST' }, env, 400);
+        const sauber = { at: Date.now() };
+        let bestanden = 0;
+        for (const tab of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) {
+          const T = b[tab]; if (!T || typeof T !== 'object') continue;
+          const o = {};
+          for (const [k, z] of Object.entries(T).slice(0, 2000)) {
+            if (!/^[a-zA-Z]+\|(up|down)\|[0-9.]+\|(alle|auf|ab|seit|x)$/.test(k) || !z || typeof z !== 'object') continue;
+            if (!z.ok) continue; // nur bestandene speichern -- die App nutzt nur diese (haelt /bot-signale klein)
+            o[k] = { q: +z.q || 0, n: +z.n || 0, coins: +z.coins || 0, ok: true };
+            bestanden++;
+          }
+          sauber[tab] = o;
+        }
+        await botSammlerTabellen(env);
+        await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('muster:tabelle', JSON.stringify(sauber)).run();
+        return json({ ok: true, bestanden }, env);
       }
       if (url.pathname === '/elliott-tabelle' && request.method === 'POST') {
         // Ergebnis des Elliott-Genauigkeitstests (laeuft im Browser, weil die volle Analyse dort schneller ist)
