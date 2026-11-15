@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-0900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-15-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5496,7 +5496,8 @@ export default {
           for (const [k, z] of Object.entries(T).slice(0, 2000)) {
             if (!/^[a-zA-Z]+\|(up|down)\|[0-9.]+\|(alle|auf|ab|seit|x)$/.test(k) || !z || typeof z !== 'object') continue;
             if (!z.ok) continue; // nur bestandene speichern -- die App nutzt nur diese (haelt /bot-signale klein)
-            o[k] = { q: +z.q || 0, n: +z.n || 0, coins: +z.coins || 0, ok: true };
+            if (z.erw == null || !isFinite(+z.erw)) continue; // ohne Zufalls-Vergleich nicht mehr uebernehmen
+            o[k] = { q: +z.q || 0, erw: +z.erw, n: +z.n || 0, coins: +z.coins || 0, ok: true };
             bestanden++;
           }
           sauber[tab] = o;
