@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1830'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1850'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7180,7 +7180,9 @@ async function handleKi(request, env, url) {
     const laufKurz = lauf ? { zeit: new Date(lauf.at).toISOString().slice(0, 16) + ' UTC', ms: lauf.ms, fehler: lauf.fehler, einzelFehler: lauf.einzelFehler } : 'noch kein KI-Lauf';
     let schrittInfo = null; try { schrittInfo = JSON.parse(await pushState(env, 'ki_news_schritt') || 'null'); } catch (e) {}
     // Diagnose ZUERST (am Handy sieht man sonst nur die lange Meldungsliste)
-    return json(r ? { diagnose: { letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...JSON.parse(r.v), letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
+    // "aktiv" = es entsteht WIRKLICH gerade eine Ausgabe (Flag des Schritt-Ablaufs), nicht nur ein alter Schritt-Eintrag
+    const aktiv = (await pushState(env, 'ki_news_aktiv').catch(() => null)) === '1';
+    return json(r ? { diagnose: { aktiv, letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...JSON.parse(r.v), letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, diagnose: { aktiv, schritt: schrittInfo }, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
