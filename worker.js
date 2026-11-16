@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2210'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2230'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2795,6 +2795,8 @@ async function handleStats(request, env, ctx) {
       const o = { at: t.at, tab: {} }; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.tab[k] = t[k] ? Object.values(t[k]).filter(z => z && z.ok && z.erw != null).length : 0; return o; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
     botExp: await botExperimentBilanz(env),
+    botGegen4h: await botGegen(env, '4h'),
+    botGegen1d: await botGegen(env, '1d'),
     botCheck4h: await botCheck(env, '4h'),
     botCheck1d: await botCheck(env, '1d'),
     runebondRef: await (async () => {
@@ -3178,6 +3180,16 @@ async function handleStats(request, env, ctx) {
             const wert = (C4 && C4.walk) || (C1 && C1.walk) ? `4H ${kurzF(C4)} \u00b7 D ${kurzF(C1)}` : null;
             const farbe = [C4, C1].some(C => C && C.fazit === 'knapp-haelt') ? GELB : (C4 && C4.walk) || (C1 && C1.walk) ? GRUEN : GRAU;
             h += karte('bot9', 'Signal check \u00b7 all chart signals', wert, 'Do unconfirmed signals work? Tested on data the bot never saw.', teil('4H', C4) + '<br><br>' + teil('Daily', C1), farbe); }
+          // Gegenpruefung der unsicheren Signale
+          { const FN = k => (RW_GEGEN_FILTER[k] || {}).en || k, vz = v => v == null ? '\u2013' : (v > 0 ? '+' : '') + v;
+            const teil = (name, G) => !G || !G.tabelle ? `<b>${name}</b>: ${G && G.status ? G.status : 'not run yet'}` :
+              `<b>${name}</b> (checked ${d10(G.at)}, unseen data from ${d10(G.testAb)}): ${G.getestet} combinations tested, ~${G.zufallErwartet} would pass by pure chance \u2192 <b>${G.bestanden.length} passed</b>` +
+              (G.bestanden.length ? '<br>' + G.bestanden.map(x => `\u00a0\u00a0\u2713 ${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.horizont} + ${FN(x.filter)}: ${x.quote} % vs ${x.normal} % \u00b7 unseen ${vz(x.testVor)} pts (evidence ${x.testZ})`).join('<br>') : '') +
+              (G.knapp && G.knapp.length ? '<br><u>Passed learning, failed on unseen data:</u><br>' + G.knapp.map(x => `\u00a0\u00a0${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} + ${FN(x.filter)}: ${vz(x.lernVor)} \u2192 ${vz(x.testVor)} pts (${x.testN})`).join('<br>') : '');
+            const G4 = stats.botGegen4h, G1 = stats.botGegen1d, nb = (G4 && G4.bestanden ? G4.bestanden.length : 0) + (G1 && G1.bestanden ? G1.bestanden.length : 0);
+            const erw = (G4 && G4.zufallErwartet || 0) + (G1 && G1.zufallErwartet || 0), lief = (G4 && G4.tabelle) || (G1 && G1.tabelle);
+            h += karte('bot11', 'Cross-check \u00b7 unconfirmed signals', lief ? `${nb} passed` : null, lief ? `each dashed signal split by one extra condition \u00b7 ~${erw.toFixed(1)} expected by chance` : 'runs automatically after the signal check',
+              teil('4H', G4) + '<br><br>' + teil('Daily', G1), !lief ? GRAU : nb > erw ? GRUEN : GELB); }
           // Live-Experiment Staerke im Aufwaertstrend
           { const X = stats.botExp || {};
             const z = (name, e) => !e || !e.signale ? `<b>${name}</b>: no signal yet` : `<b>${name}</b> (since ${d10(e.seit)}, ${e.horizont}): ` + (e.ereignisse ? `higher in ${e.quote} % of ${e.ereignisse} events vs ${e.normal} % normal in uptrend \u00b7 evidence ${e.z ?? '\u2013'} (convincing from ~2.5)` : 'no result yet') + ` \u00b7 ${e.offen} open`;
@@ -5661,11 +5673,13 @@ export default {
         return new Response(body, { headers: { 'content-type': 'application/json', 'Access-Control-Allow-Origin': '*', 'cache-control': 'public, max-age=3600' } });
       }
       if (url.pathname === '/bot-signale') {
+        const [g4, g1] = await Promise.all([botGegen(env, '4h'), botGegen(env, '1d')]);
+        const gk = G => G && G.tabelle ? { at: G.at, bestanden: G.bestanden, getestet: G.getestet, zufallErwartet: G.zufallErwartet, tabelle: G.tabelle } : null;
         const [a, b, live, tb4, tb1, ewRoh, muRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
           env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null),
           env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first().catch(() => null)]);
         const kurz = x => x ? { at: x.at, horizont: x.horizont, n: x.n, signale: x.signale, abgelehnt: x.abgelehnt || [], aenderung: x.aenderung } : null;
-        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, muster: muRoh ? JSON.parse(muRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
+        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), gegen: { '4h': gk(g4), '1d': gk(g1) }, live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, muster: muRoh ? JSON.parse(muRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
@@ -5674,6 +5688,7 @@ export default {
         if (url.searchParams.get('neu') === '1') {
           if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
           const iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
+          if (url.searchParams.get('gegen') === '1') return json(await botGegenpruefung(env, iv).catch(e => ({ fehler: String(e && e.message || e) })), env);
           return json(await botSignalCheck(env, iv).catch(e => ({ fehler: String(e && e.message || e) })), env);
         }
         const [c4, c1] = await Promise.all([botCheck(env, '4h'), botCheck(env, '1d')]);
@@ -5997,6 +6012,8 @@ async function rwPlanLaeufe(env) {
       const S = await botSignale(env, iv).catch(() => null); if (!S || S.methode !== 'zeitpunkte-hz3') continue;
       const C = await botCheck(env, iv);
       if ((!C || C.tabelleVom !== S.at || Date.now() - C.at > 864e5) && await alter('check' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'check' + iv, () => botSignalCheck(env, iv)); break; }
+      const G = await botGegen(env, iv);
+      if ((!G || G.tabelleVom !== S.at || Date.now() - G.at > 864e5) && await alter('gegen' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'gegen' + iv, () => botGegenpruefung(env, iv)); break; }
     }
     // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
     //  -- Backtest-Seite "Elliott trainieren" -- und speichert das Ergebnis ueber /elliott-tabelle.)
@@ -9576,6 +9593,107 @@ async function botSignalCheck(env, iv) {
 }
 async function botCheck(env, iv) {
   try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('check:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
+}
+// ===== GEGENPRUEFUNG DER UNSICHEREN SIGNALE (gewuenscht: "vielleicht verstecken sich sichere Signale dahinter") =====
+// Nur die gestrichelten Marktlagen (abgelehnt) werden mit je EINER zweiten Bedingung aufgeteilt. Uebernommen wird eine
+// Kombination nur, wenn sie (a) auf den ersten 70 % der Zeit die strengen Regeln besteht UND (b) auf den letzten 30 %
+// -- Daten, die beim Lernen nicht dabei waren -- noch klar besser ist als normal. Weil viele Kombinationen getestet
+// werden, steht im Ergebnis auch, wie viele allein durch Zufall zu erwarten waren.
+const RW_GEGEN_FILTER = {
+  trend: { de: 'übergeordneter Trend passt', en: 'higher-timeframe trend agrees' },
+  btc: { de: 'BTC-Trend passt', en: 'BTC trend agrees' },
+  trendBtc: { de: 'übergeordneter Trend + BTC passen', en: 'higher trend + BTC agree' },
+  kerze: { de: 'nächste Kerze bestätigt', en: 'next candle confirms' },
+  volumen: { de: 'Volumen über Schnitt', en: 'above-average volume' },
+  relativ: { de: 'relative Stärke zu BTC passt', en: 'relative strength vs BTC agrees' },
+};
+async function botGegenpruefung(env, iv) {
+  const S = await botSignale(env, iv);
+  if (!S || S.methode !== 'zeitpunkte-hz3') return { ebene: iv, status: 'Tabelle noch nicht neu gelernt' };
+  const AB = (S.abgelehnt || []).filter(e => RW_SITUATIONEN[e.key]);
+  if (!AB.length) return { ebene: iv, status: 'keine unsicheren Signale' };
+  const alle = ((await env.DB.prepare('SELECT coin, at, close, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, tief30, hoch30, serie, dochtu, dochto, bbwpct, divbull, divbear, atrv FROM bot_faelle WHERE ebene = ?').bind(iv).all()).results) || [];
+  if (alle.length < 2000) return { ebene: iv, status: 'zu wenig Daten' };
+  // UEBERGEORDNETER TREND: fuer 4H die Phase der letzten ABGESCHLOSSENEN Tageskerze; fuer Daily der 30-Tage-Schwung
+  // zusammen mit der Lage zum 200er (beides vorhanden, kein Blick in die Zukunft)
+  const tagPhase = {};
+  if (iv === '4h') {
+    const T = ((await env.DB.prepare("SELECT coin, at, phase FROM bot_faelle WHERE ebene = '1d' ORDER BY at").all()).results) || [];
+    for (const r of T) (tagPhase[r.coin] = tagPhase[r.coin] || []).push(r);
+  }
+  const reihe = {}; for (const r of alle) (reihe[r.coin] = reihe[r.coin] || []).push(r);
+  const btc = new Map();
+  for (const c in reihe) { const R = reihe[c]; R.sort((a, b) => a.at - b.at);
+    const T = tagPhase[c] || []; let j = -1;
+    for (let i = 0; i < R.length; i++) { const r = R[i];
+      if (iv === '4h') { while (j + 1 < T.length && T[j + 1].at + 864e5 <= r.at + 4 * 36e5) j++; r.htf = j >= 0 ? T[j].phase : null; }
+      else r.htf = r.mom30 == null || r.dist200 == null ? null : r.mom30 > 0 && r.dist200 > 0 ? 'auf' : r.mom30 < 0 && r.dist200 < 0 ? 'ab' : 'seit';
+      r.next = i + 1 < R.length ? R[i + 1].close : null; r._R = R; r._i = i;
+      if (c === 'BTC') btc.set(r.at, r); } }
+  const ats = alle.map(r => r.at).sort((a, b) => a - b), cut = ats[Math.floor(ats.length * 0.7)];
+  const passt = (f, r, dir) => { const B = btc.get(r.at), gut = p => p != null && p !== (dir === 'up' ? 'ab' : 'auf');
+    if (f === 'trend') return gut(r.htf);
+    if (f === 'btc') return !!B && gut(B.phase);
+    if (f === 'trendBtc') return gut(r.htf) && !!B && gut(B.phase);
+    if (f === 'kerze') return r.next != null && (dir === 'up' ? r.next > r.close : r.next < r.close);
+    if (f === 'volumen') return r.volr != null && r.volr > 1.2;
+    if (f === 'relativ') return !!B && r.coin !== 'BTC' && r.mom6 != null && B.mom6 != null && (dir === 'up' ? r.mom6 > B.mom6 : r.mom6 < B.mom6);
+    return false; };
+  // Rendite ab Signal (bei "naechste Kerze bestaetigt" erst ab dieser Kerze -- man steigt ja eine Kerze spaeter ein)
+  const ret = (r, hk, spaet) => { const i = r._i + (spaet ? 1 : 0), R = r._R; return i + hk < R.length && R[i].close > 0 ? R[i + hk].close / R[i].close - 1 : null; };
+  const baseCache = {};
+  const basis = (ph, hk, teil) => { const k = ph + hk + teil; if (baseCache[k] != null) return baseCache[k];
+    let n = 0, up = 0; for (const r of alle) { if (r.phase !== ph) continue; const v = ret(r, hk); if (v == null) continue;
+      const endAt = r._R[r._i + hk].at; if (teil === 'train' ? endAt >= cut : teil === 'test' ? r.at < cut : false) continue; n++; if (v > 0) up++; }
+    return (baseCache[k] = n ? up / n : null); };
+  const auswerten = (rows, dir, hk, spaet) => { const ev = new Map();
+    for (const r of rows) { const v = ret(r, hk, spaet); if (v == null) continue; const e = ev.get(r.at) || { n: 0, ok: 0 }; e.n++; if ((v > 0) === (dir === 'up')) e.ok++; ev.set(r.at, e); }
+    const L = [...ev.values()]; return { n: L.length, q: L.length ? L.reduce((a, e) => a + e.ok / e.n, 0) / L.length : null }; };
+  const zWert = (q, b, n, hk) => q == null || b == null || n < 1 ? null : (q - b) / Math.sqrt(b * (1 - b) / (n / Math.max(1, hk / 3)));
+  const pct = x => x == null ? null : Math.round(100 * x);
+  const flach = Object.values(reihe).flat();
+  const ergebnis = [], tabelle = {};
+  let getestet = 0;
+  for (const e of AB) {
+    const hk = Number(e.hk) > 0 ? Number(e.hk) : (iv === '1d' ? 7 : 18), dir = e.dir;
+    const g = flach.filter(r => r.phase === e.phase && RW_SITUATIONEN[e.key](r));
+    const gegenTrend = (e.phase === 'ab' && dir === 'up') || (e.phase === 'auf' && dir === 'down');
+    const minV = gegenTrend ? 0.08 : 0.05, minZ = gegenTrend ? 3.3 : 2.5;
+    const bAll = basis(e.phase, hk, 'alle'), bTr = basis(e.phase, hk, 'train'), bTe = basis(e.phase, hk, 'test');
+    const bD = b => b == null ? null : dir === 'up' ? b : 1 - b;
+    const zeilen = [];
+    for (const f of Object.keys(RW_GEGEN_FILTER)) {
+      const spaet = f === 'kerze';
+      const sub = g.filter(r => passt(f, r, dir));
+      const tr = sub.filter(r => { const i = r._i + (spaet ? 1 : 0) + hk; return i < r._R.length && r._R[i].at < cut; }), te = sub.filter(r => r.at >= cut);
+      const A = auswerten(sub, dir, hk, spaet), TR = auswerten(tr, dir, hk, spaet), TE = auswerten(te, dir, hk, spaet);
+      if (TR.n < 25) { zeilen.push({ f, status: 'zu-wenig', n: A.n, quote: pct(A.q), normal: pct(bD(bAll)) }); continue; }
+      getestet++;
+      const vTr = TR.q - bD(bTr), zTr = zWert(TR.q, bD(bTr), TR.n, hk);
+      const pc = {}; for (const r of tr) { const v = ret(r, hk, spaet); if (v == null) continue; const c = (pc[r.coin] = pc[r.coin] || { n: 0, ok: 0 }); c.n++; if ((v > 0) === (dir === 'up')) c.ok++; }
+      const cm = Object.values(pc).filter(c => c.n >= 10), cOk = cm.filter(c => c.ok / c.n - bD(bTr) >= 0.02).length;
+      const lernOk = vTr >= minV && zTr >= minZ && cOk >= Math.max(3, Math.ceil(cm.length * 0.5));
+      const vTe = TE.q == null ? null : TE.q - bD(bTe), zTe = zWert(TE.q, bD(bTe), TE.n, hk);
+      const testOk = TE.n >= 15 && vTe >= 0.03 && zTe >= 2;
+      const z = { f, status: lernOk && testOk ? 'bestanden' : lernOk ? 'test-durchgefallen' : 'lernen-durchgefallen',
+        n: A.n, quote: pct(A.q), normal: pct(bD(bAll)), lernVor: pct(vTr), lernZ: +(zTr || 0).toFixed(2), coins: cOk, coinsMitDaten: cm.length,
+        testN: TE.n, testVor: vTe == null ? null : pct(vTe), testZ: zTe == null ? null : +zTe.toFixed(2) };
+      zeilen.push(z);
+      ergebnis.push({ phase: e.phase, key: e.key, dir, horizont: e.horizont, hk, ...z });
+    }
+    tabelle[e.phase + ':' + e.key + ':' + dir] = { ohne: { treffer: e.treffer, basis: e.basis }, zeilen };
+  }
+  const bestanden = ergebnis.filter(x => x.status === 'bestanden');
+  const out = { ebene: iv, at: Date.now(), tabelleVom: S.at, testAb: cut, getestet, zufallErwartet: +(getestet * 0.023).toFixed(1),
+    bestanden: bestanden.map(x => ({ phase: x.phase, key: x.key, dir: x.dir, hk: x.hk, horizont: x.horizont, filter: x.f, quote: x.quote, normal: x.normal, testVor: x.testVor, testZ: x.testZ })),
+    knapp: ergebnis.filter(x => x.status === 'test-durchgefallen').sort((a, b) => (b.testVor ?? -99) - (a.testVor ?? -99)).slice(0, 12)
+      .map(x => ({ phase: x.phase, key: x.key, dir: x.dir, horizont: x.horizont, filter: x.f, lernVor: x.lernVor, testVor: x.testVor, testN: x.testN })),
+    tabelle };
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('gegen:' + iv, JSON.stringify(out)).run();
+  return out;
+}
+async function botGegen(env, iv) {
+  try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('gegen:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
 }
 async function botSignale(env, iv) {
   try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('signale:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
