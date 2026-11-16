@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2130'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2200'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2794,6 +2794,8 @@ async function handleStats(request, env, ctx) {
     botMuster: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
       const o = { at: t.at, tab: {} }; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.tab[k] = t[k] ? Object.values(t[k]).filter(z => z && z.ok && z.erw != null).length : 0; return o; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
+    botCheck4h: await botCheck(env, '4h'),
+    botCheck1d: await botCheck(env, '1d'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
       const frisch = runebondEmpfehlungen(env).catch(() => null);
@@ -3158,6 +3160,23 @@ async function handleStats(request, env, ctx) {
               (S.signale.length ? '<br>' + S.signale.slice(0, 6).map(x => `\u00a0\u00a0${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}% vs ${x.basis}%${x.horizont ? ' \u00b7 ' + x.horizont : ''}`).join('<br>') : '');
             const n4 = stats.botSignale4h ? stats.botSignale4h.signale.length : null, n1 = stats.botSignale1d ? stats.botSignale1d.signale.length : null;
             h += karte('bot4', 'Signal situations', (n4 || 0) + (n1 || 0) || null, `4H ${n4 ?? '\u2013'} \u00b7 Daily ${n1 ?? '\u2013'}`, sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d), (n4 || n1) ? GRUEN : GRAU); }
+          // Signal-Check (alle Chart-Dreiecke + ehrlicher Test auf ungesehenen Daten)
+          { const KN = { streng: 'confirmed', knapp: 'narrowly failed', deutlich: 'clearly failed' };
+            const vz = v => v == null ? '\u2013' : (v > 0 ? '+' : '') + v;
+            const teil = (name, C) => { if (!C || !C.chart) return `<b>${name}</b>: ${C && C.status ? C.status : 'not run yet'}`;
+              const ch = k => { const x = C.chart.klassen[k]; return x.signale ? `${KN[k]} ${x.quote} % right vs ${x.normal} % normal (${x.signale} signals${x.letztesJahr ? `; last 12 months ${x.letztesJahr.quote} % of ${x.letztesJahr.signale}` : ''})` : `${KN[k]}: none`; };
+              const ru = k => { const x = C.chart.rune[k]; return x.signale ? `${KN[k]} ${x.richtig}/${x.signale} (${x.quote} % vs ${x.normal} %)` : null; };
+              const wk = k => { const x = C.walk.klassen[k]; return x.mitTest ? `${KN[k]}: learned edge ${vz(x.trainVorsprung)} pts \u2192 on unseen data ${vz(x.testVorsprung)} pts \u00b7 ${x.positiv} of ${x.mitTest} situations still positive (${x.testEreignisse} test cases)` : `${KN[k]}: no test cases`; };
+              const FZ = { 'knapp-haelt': 'narrowly failed situations held up on unseen data \u2192 rules could be loosened', 'streng-richtig': 'unconfirmed situations lost their edge on unseen data \u2192 strict rules are justified', 'knapp-faellt': 'narrowly failed situations did not hold up on unseen data', 'zu wenig Testfaelle': 'too few test cases for a verdict' };
+              return `<b>${name}</b> (checked ${d10(C.at)})<br><u>All chart triangles, full history (in-sample, flattering):</u><br>` + ['streng', 'knapp', 'deutlich'].map(ch).join('<br>') +
+                `<br>RUNE only: ${['streng', 'knapp', 'deutlich'].map(ru).filter(Boolean).join(' \u00b7 ') || 'none'}` +
+                `<br><u>Honest test \u2013 learned until ${d10(C.walk.lernBis)}, tested after:</u><br>` + ['streng', 'knapp', 'deutlich'].map(wk).join('<br>') + `<br><b>Verdict: ${FZ[C.fazit] || C.fazit}</b>` +
+                (C.walk.liste.length ? '<br><u>Situations (learned edge \u2192 unseen):</u><br>' + C.walk.liste.slice(0, 18).map(e => `\u00a0\u00a0${KN[e.klasse]} \u00b7 ${e.phase} ${e.key} ${e.dir === 'up' ? '\u2191' : '\u2193'} ${e.horizont}: ${vz(e.train)} \u2192 ${vz(e.test)} pts (${e.testEv})`).join('<br>') : ''); };
+            const C4 = stats.botCheck4h, C1 = stats.botCheck1d;
+            const kurzF = C => C && C.fazit ? ({ 'knapp-haelt': 'loosen?', 'streng-richtig': 'strict ok', 'knapp-faellt': 'strict ok', 'zu wenig Testfaelle': 'too few' }[C.fazit]) : '\u2013';
+            const wert = (C4 && C4.walk) || (C1 && C1.walk) ? `4H ${kurzF(C4)} \u00b7 D ${kurzF(C1)}` : null;
+            const farbe = [C4, C1].some(C => C && C.fazit === 'knapp-haelt') ? GELB : (C4 && C4.walk) || (C1 && C1.walk) ? GRUEN : GRAU;
+            h += karte('bot9', 'Signal check \u00b7 all chart signals', wert, 'Do unconfirmed signals work? Tested on data the bot never saw.', teil('4H', C4) + '<br><br>' + teil('Daily', C1), farbe); }
           // Muster-Ziele
           { const M = stats.botMuster; const s = M ? Object.values(M.tab).reduce((a, b) => a + b, 0) : null;
             h += karte('bot8', 'Pattern targets', M ? s : null, M ? `trained ${d10(M.at)} \u00b7 only quotes \u2265 5 points better than chance` : 'not trained yet \u2013 backtest page \u2192 \u201cMuster trainieren\u201d',
@@ -5641,6 +5660,16 @@ export default {
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
+      if (url.pathname === '/bot-check') {
+        // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
+        if (url.searchParams.get('neu') === '1') {
+          if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+          const iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
+          return json(await botSignalCheck(env, iv).catch(e => ({ fehler: String(e && e.message || e) })), env);
+        }
+        const [c4, c1] = await Promise.all([botCheck(env, '4h'), botCheck(env, '1d')]);
+        return json({ '4h': c4, '1d': c1 }, env);
+      }
       if (url.pathname === '/bot-prognose') {
         const coin = String(url.searchParams.get('coin') || 'RUNE').toUpperCase(), iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
         if (!RW_BOT_COINS.includes(coin)) return json({ error: 'UNKNOWN_COIN' }, env, 400);
@@ -5953,6 +5982,12 @@ async function rwPlanLaeufe(env) {
       const aS = await alter('signale' + iv);
       if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte-hz3' && aS > 600e3)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
+    }
+    // SIGNAL-CHECK: hoechstens einer je Lauf, taeglich bzw. nach jedem Neulernen der Tabelle
+    for (const iv of ['4h', '1d']) {
+      const S = await botSignale(env, iv).catch(() => null); if (!S || S.methode !== 'zeitpunkte-hz3') continue;
+      const C = await botCheck(env, iv);
+      if ((!C || C.tabelleVom !== S.at || Date.now() - C.at > 864e5) && await alter('check' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'check' + iv, () => botSignalCheck(env, iv)); break; }
     }
     // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
     //  -- Backtest-Seite "Elliott trainieren" -- und speichert das Ergebnis ueber /elliott-tabelle.)
@@ -9369,6 +9404,124 @@ async function botSignalLiveBilanz(env) {
       bewegung: nB ? +(100 * sm / nB).toFixed(2) : null, zielVorStopp: zn ? Math.round(100 * zt / zn) : null, zielN: zn, zielTreffer: zt,
       letzte: rows.sort((a, b) => b.at - a.at).slice(0, 5).map(r => ({ coin: r.coin, ebene: r.ebene, at: r.at, key: r.key, dir: r.dir, ergebnis: r.ret == null ? null : (r.ret > 0) === (r.dir === 'up') })) };
   } catch (e) { return { n: 0, offen: 0, ausgewertet: 0, richtig: 0, quote: null }; }
+}
+// ===== SIGNAL-CHECK (gewuenscht: "alle Signale im Daily und 4H ueberpruefen -- auch die unsicheren, die richtig lagen") =====
+// Zwei Teile:
+// (1) CHART-NACHSPIEL: genau die Dreiecke, die der Chart zeigt (je Kerze die staerkste passende Marktlage, nur Beginn
+//     einer Serie, Ergebnis mit dem eigenen Zeitraum), ueber alle Coins und die ganze Historie -- getrennt nach
+//     bestaetigt / knapp gescheitert / deutlich gescheitert. Achtung: die Tabelle wurde auf DENSELBEN Daten gelernt
+//     (in-sample), die Quoten sind also geschoent.
+// (2) EHRLICHER TEST: auf den ersten 70 % der Zeit lernen (gleiche Regeln), auf den letzten 30 % pruefen. Haelt eine
+//     "knapp gescheiterte" Marktlage dort genauso gut wie eine bestaetigte, sind die Regeln zu streng.
+function botKlasse(e) {
+  const minV = e.gegenTrend ? 8 : 5, minZ = e.gegenTrend ? 3.3 : 2.5, vor = e.treffer - e.basis;
+  const cN = e.coinsMitDaten ? Math.max(4, Math.ceil(e.coinsMitDaten * 0.5)) : null;
+  const ok = [vor >= minV, e.z != null && e.z >= minZ, e.coins != null && cN != null && e.coins >= cN, e.h1 != null && e.h2 != null && e.h1 >= 2 && e.h2 >= 2];
+  const nah = [vor >= minV - 2, e.z != null && e.z >= minZ * 0.8, e.coins != null && cN != null && e.coins >= cN - 1, Math.min(e.h1 ?? -99, e.h2 ?? -99) >= 0];
+  const f = ok.map((x, i) => x ? -1 : i).filter(i => i >= 0);
+  return !f.length ? 'streng' : f.length === 1 && nah[f[0]] ? 'knapp' : 'deutlich';
+}
+async function botSignalCheck(env, iv) {
+  const S = await botSignale(env, iv);
+  if (!S || S.methode !== 'zeitpunkte-hz3') return { ebene: iv, status: 'Tabelle noch nicht neu gelernt' };
+  const alle = ((await env.DB.prepare('SELECT coin, at, close, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, tief30, hoch30, serie, dochtu, dochto, bbwpct, divbull, divbear, atrv FROM bot_faelle WHERE ebene = ?').bind(iv).all()).results) || [];
+  if (alle.length < 2000) return { ebene: iv, status: 'zu wenig Daten' };
+  const KEYS = Object.keys(RW_SITUATIONEN), BIT = {}; KEYS.forEach((k, j) => { BIT[k] = 2 ** j; });
+  const HZ = iv === '1d' ? [[7, '7d'], [14, '14d'], [30, '30d']] : [[18, '3d'], [42, '7d'], [84, '14d']];
+  const reihe = {}; for (const r of alle) (reihe[r.coin] = reihe[r.coin] || []).push(r);
+  for (const c in reihe) { const R = reihe[c]; R.sort((a, b) => a.at - b.at);
+    for (let i = 0; i < R.length; i++) { const r = R[i]; r.m = 0; for (const k of KEYS) if (RW_SITUATIONEN[k](r)) r.m += BIT[k];
+      r.rh = {}; r.endAt = {}; for (const [hk] of HZ) { r.rh[hk] = i + hk < R.length && r.close > 0 ? R[i + hk].close / r.close - 1 : null; r.endAt[hk] = i + hk < R.length ? R[i + hk].at : null; } } }
+  const pct = x => x == null ? null : Math.round(100 * x);
+  const jahr = Date.now() - 365 * 864e5;
+
+  // ---------- (1) CHART-NACHSPIEL ----------
+  const gut = (S.signale || []).map(x => ({ ...x, klasse: 'streng' })), grau = (S.abgelehnt || []).map(x => ({ ...x, klasse: botKlasse(x) }));
+  const leer = () => ({ n: 0, ok: 0, basisSum: 0, n365: 0, ok365: 0, offen: 0 });
+  const K = { streng: leer(), knapp: leer(), deutlich: leer() }, KR = { streng: leer(), knapp: leer(), deutlich: leer() }, SIT = new Map();
+  const evK = { streng: new Map(), knapp: new Map(), deutlich: new Map() };
+  for (const c in reihe) { const R = reihe[c], letzte = {};
+    for (let i = 0; i < R.length; i++) { const r = R[i];
+      const passt = x => x.phase === r.phase && BIT[x.key] && (r.m & BIT[x.key]);
+      let t = gut.filter(passt); if (!t.length) t = grau.filter(passt); if (!t.length) continue;
+      t.sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis));
+      const s0 = t[0], sk = s0.key + s0.dir;
+      if (letzte[sk] != null && i - letzte[sk] <= 3) { letzte[sk] = i; continue; } letzte[sk] = i;
+      const hk = Number(s0.hk) > 0 ? Number(s0.hk) : HZ[0][0], ret = r.rh[hk] !== undefined ? r.rh[hk] : (i + hk < R.length ? R[i + hk].close / r.close - 1 : null);
+      const ziele = [K[s0.klasse]]; if (c === 'RUNE') ziele.push(KR[s0.klasse]);
+      const sKey = s0.klasse + '|' + s0.phase + '|' + s0.key + '|' + s0.dir;
+      if (!SIT.has(sKey)) SIT.set(sKey, { klasse: s0.klasse, phase: s0.phase, key: s0.key, dir: s0.dir, horizont: s0.horizont, grund: s0.grund || null, bt: s0.treffer, ...leer() });
+      ziele.push(SIT.get(sKey));
+      if (ret == null) { for (const z of ziele) z.offen++; continue; }
+      const ok = (ret > 0) === (s0.dir === 'up') ? 1 : 0;
+      for (const z of ziele) { z.n++; z.ok += ok; z.basisSum += s0.basis; if (r.at >= jahr) { z.n365++; z.ok365 += ok; } }
+      const e = evK[s0.klasse].get(r.at) || { n: 0, ok: 0 }; e.n++; e.ok += ok; evK[s0.klasse].set(r.at, e);
+    } }
+  const fertig = z => ({ signale: z.n, richtig: z.ok, quote: z.n ? pct(z.ok / z.n) : null, normal: z.n ? Math.round(z.basisSum / z.n) : null,
+    letztesJahr: z.n365 ? { signale: z.n365, quote: pct(z.ok365 / z.n365) } : null, offen: z.offen });
+  const chart = { klassen: {}, rune: {}, situationen: [] };
+  for (const k of ['streng', 'knapp', 'deutlich']) { chart.klassen[k] = fertig(K[k]); chart.rune[k] = fertig(KR[k]);
+    const ev = [...evK[k].values()]; chart.klassen[k].ereignisse = ev.length; chart.klassen[k].ereignisQuote = ev.length ? pct(ev.reduce((a, e) => a + e.ok / e.n, 0) / ev.length) : null; }
+  chart.situationen = [...SIT.values()].filter(z => z.n >= 5).map(z => ({ klasse: z.klasse, phase: z.phase, key: z.key, dir: z.dir, horizont: z.horizont, grund: z.grund, backtest: z.bt, ...fertig(z) }))
+    .sort((a, b) => (b.quote - b.normal) - (a.quote - a.normal)).slice(0, 40);
+
+  // ---------- (2) EHRLICHER TEST: lernen auf 70 %, pruefen auf 30 % ----------
+  const ats = alle.map(r => r.at).sort((a, b) => a - b), cut = ats[Math.floor(ats.length * 0.7)];
+  const flach = Object.values(reihe).flat();
+  const trainMitte = ats[Math.floor(ats.length * 0.35)];
+  const kand = new Map();
+  for (const [hk, hName] of HZ) {
+    const train = flach.filter(r => r.rh[hk] != null && r.endAt[hk] < cut), test = flach.filter(r => r.rh[hk] != null && r.at >= cut);
+    for (const ph of ['auf', 'ab', 'seit']) {
+      const trP = train.filter(r => r.phase === ph), teP = test.filter(r => r.phase === ph);
+      if (trP.length < 350 || teP.length < 150) continue;
+      const bq = trP.filter(r => r.rh[hk] > 0).length / trP.length, bqT = teP.filter(r => r.rh[hk] > 0).length / teP.length;
+      for (const key of KEYS) {
+        const g = trP.filter(r => r.m & BIT[key]); if (g.length < 70) continue;
+        const dir = g.filter(r => r.rh[hk] > 0).length / g.length >= bq ? 'up' : 'down';
+        const hit = r => (r.rh[hk] > 0) === (dir === 'up');
+        const evQ = (rows, sel) => { const ev = new Map(); for (const r of rows) { if (sel && !sel(r.at)) continue; const e = ev.get(r.at) || { n: 0, ok: 0 }; e.n++; if (hit(r)) e.ok++; ev.set(r.at, e); }
+          const L = [...ev.values()]; return { n: L.length, q: L.length ? L.reduce((a, e) => a + e.ok / e.n, 0) / L.length : null }; };
+        const E = evQ(g); if (E.n < 30) continue;
+        const b = dir === 'up' ? bq : 1 - bq, vor = E.q - b; if (vor <= 0) continue;
+        const z = vor / Math.sqrt(b * (1 - b) / (E.n / Math.max(1, hk / 3)));
+        const proCoin = {}; for (const r of g) { const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, ok: 0 }); c.n++; if (hit(r)) c.ok++; }
+        const cm = Object.values(proCoin).filter(c => c.n >= 15), cOk = cm.filter(c => c.ok / c.n - b >= 0.02).length;
+        const H1 = evQ(g, at => at < trainMitte), H2 = evQ(g, at => at >= trainMitte);
+        const gegenTrend = (ph === 'ab' && dir === 'up') || (ph === 'auf' && dir === 'down');
+        const e = { phase: ph, key, dir, hk, horizont: hName, treffer: pct(E.q), basis: pct(b), z: +z.toFixed(2), coins: cOk, coinsMitDaten: cm.length,
+          h1: H1.n >= 15 ? pct(H1.q - b) : null, h2: H2.n >= 15 ? pct(H2.q - b) : null, gegenTrend, trainEv: E.n };
+        e.klasse = botKlasse(e);
+        const T = evQ(teP.filter(r => r.m & BIT[key])), bT = dir === 'up' ? bqT : 1 - bqT;
+        e.testEv = T.n; e.testTreffer = T.q == null ? null : pct(T.q); e.testBasis = pct(bT); e.testVor = T.q == null ? null : pct(T.q - bT);
+        const k = ph + ':' + key + ':' + dir, alt = kand.get(k);
+        const rang = x => (x.klasse === 'streng' ? 1e6 : 0) + x.z;
+        if (!alt || rang(e) > rang(alt)) kand.set(k, e);
+      }
+    }
+  }
+  const walk = { lernBis: cut, testAb: cut, klassen: {}, liste: [] };
+  for (const k of ['streng', 'knapp', 'deutlich']) {
+    const L = [...kand.values()].filter(e => e.klasse === k && e.testEv >= 10);
+    const sEv = L.reduce((a, e) => a + e.testEv, 0);
+    walk.klassen[k] = { situationen: [...kand.values()].filter(e => e.klasse === k).length, mitTest: L.length, testEreignisse: sEv,
+      trainVorsprung: sEv ? +(L.reduce((a, e) => a + (e.treffer - e.basis) * e.testEv, 0) / sEv).toFixed(1) : null,
+      testVorsprung: sEv ? +(L.reduce((a, e) => a + e.testVor * e.testEv, 0) / sEv).toFixed(1) : null,
+      positiv: L.filter(e => e.testVor > 0).length };
+  }
+  walk.liste = [...kand.values()].filter(e => e.testEv >= 10).sort((a, b) => ({ streng: 0, knapp: 1, deutlich: 2 }[a.klasse] - { streng: 0, knapp: 1, deutlich: 2 }[b.klasse]) || b.z - a.z).slice(0, 45)
+    .map(e => ({ klasse: e.klasse, phase: e.phase, key: e.key, dir: e.dir, horizont: e.horizont, train: e.treffer - e.basis, z: e.z, test: e.testVor, testEv: e.testEv }));
+  const W = walk.klassen;
+  // Fazit nur, wenn genug Testfaelle da sind
+  let fazit = 'zu wenig Testfaelle';
+  if (W.knapp.testEreignisse >= 100 && W.streng.testEreignisse >= 100) fazit = W.knapp.testVorsprung >= W.streng.testVorsprung - 1 && W.knapp.positiv >= 0.6 * W.knapp.mitTest ? 'knapp-haelt' : 'streng-richtig';
+  else if (W.knapp.testEreignisse >= 100 && W.streng.testEreignisse < 100) fazit = W.knapp.testVorsprung >= 2 && W.knapp.positiv >= 0.6 * W.knapp.mitTest ? 'knapp-haelt' : 'knapp-faellt';
+  const out = { ebene: iv, at: Date.now(), tabelleVom: S.at, chart, walk, fazit };
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('check:' + iv, JSON.stringify(out)).run();
+  return out;
+}
+async function botCheck(env, iv) {
+  try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('check:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
 }
 async function botSignale(env, iv) {
   try { const r = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('signale:' + iv).first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; }
