@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2000'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2030'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7254,7 +7254,10 @@ async function kiNewsQuellen(env) {
       return { titel: g('title').slice(0, 200), link: g('link'), datum: tag(Date.parse(g('pubDate'))), auszug: g('description').slice(0, 500) }; }); }).catch(e => { q.blog = 'Fehler ' + e.message; }),
     handleOps(null, env).then(r => r.json()).then(o => { q.devops = { upgrade: o.upgrade || null, aufgaben: o.aufgaben || null, feed: (o.feed || []).slice(0, 6).map(x => ({ titel: String(x.title || '').slice(0, 160), datum: tag(Date.parse(x.date_published || x.date || '')), text: String(x.content_text || x.summary || '').slice(0, 300) })) }; }).catch(() => {}),
     offeneAbstimmungen(env, null, false).then(a => { q.mimirAbstimmungen = a ? { aktiveNodes: a.aktiv, noetig: a.noetig, offen: (a.liste || []).slice(0, 8).map(x => ({ schluessel: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })) } : null; }).catch(() => {}),
-    fetchFromBases(getThornodeBases(), '/thorchain/version').then(v => { q.version = { aktuell: v && v.current, naechste: v && v.next }; }).catch(() => {}),
+    fetchFromBases(getThornodeBases(), '/thorchain/version').then(v => { q.version = { aktuell: v && v.current, naechste: v && v.next, hinweis: 'aktuell = Mindestversion, die alle aktiven Nodes erfuellen; naechste = Version, auf die gerade umgestellt wird' }; }).catch(() => {}),
+    // Versionsstand der aktiven Nodes (gemeldet: News sagte "3.21.3 aktuell", obwohl die meisten schon auf 3.21.5 sind)
+    fetchFromBases(getThornodeBases(), '/thorchain/nodes').then(n => { const v = {}; let aktiv = 0, jail = 0; for (const x of (Array.isArray(n) ? n : [])) { if (x && x.status === 'Active') { aktiv++; v[x.version] = (v[x.version] || 0) + 1; if (x.jail && Number(x.jail.release_height) > 0) jail++; } }
+      q.aktiveNodes = { anzahl: aktiv, jeVersion: v }; }).catch(() => {}),
     pushState(env, 'halts').then(h => { q.angehalten = h ? JSON.parse(h) : []; }).catch(() => {}),
     // MEHR QUELLEN (gemeldet: "nicht alle aktuellsten News"): neueste offene Merge Requests (was gerade kommt),
     // THORNode-Tags (auch ohne Release-Notiz) und frei waehlbare Zusatzseiten per Worker-Variable KI_NEWS_QUELLEN
@@ -7275,13 +7278,18 @@ async function kiNewsQuellen(env) {
 // den Zwischenstand in D1. Bricht ein Lauf ab, setzt der naechste an derselben Stelle fort. Waehrend eine
 // Ausgabe entsteht, laeuft die KI jede zweite Minute.
 const KI_NEWS_ABSCHLUSS = { name: 'meldungen_speichern', description: 'Speichert die fertigen News-Meldungen fuer den rune.watch-News-Kanal.',
-  input_schema: { type: 'object', required: ['meldungen'], properties: { meldungen: { type: 'array', maxItems: 14, items: { type: 'object', required: ['kategorie', 'datum', 'titelDe', 'textDe', 'titelEn', 'textEn'], properties: {
+  input_schema: { type: 'object', required: ['meldungen'], properties: { meldungen: { type: 'array', maxItems: 16, items: { type: 'object', required: ['kategorie', 'datum', 'titelDe', 'titelEn'], properties: {
     kategorie: { type: 'string', enum: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'] }, wichtig: { type: 'boolean' }, datum: { type: 'string', description: 'YYYY-MM-DD' },
-    titelDe: { type: 'string' }, textDe: { type: 'string' }, titelEn: { type: 'string' }, textEn: { type: 'string' }, quelle: { type: 'string' }, link: { type: 'string', description: 'https-URL oder leer' } } } } } } };
-const kiNewsSystem = heute => `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und eigenen Websuchen erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
-Recherche (Websuche, höchstens 4 Suchen, Ergebnisse der letzten 14 Tage): 1) aktuelle THORChain-News dieser Woche, 2) Ankündigungen von @THORChain und Rujira auf X, 3) THORChain Upgrade / ADR / Mimir-Abstimmung / Sicherheit, 4) THORChain Partnerschaften, Integrationen und Ökosystem (TCY, RUNEPool, Secured Assets). Wichtige Ereignisse dürfen nicht fehlen.
-Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Jede neue THORNode-Version (thornodeReleases, thornodeTags, version) der letzten 14 Tage bekommt eine eigene Meldung mit der Versionsnummer im Titel. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
-Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldungen, neueste zuerst, je Sprache Titel + 2 kurze Sätze). Kein Fließtext, keine Zwischenberichte, keine Quellenlisten im Text.`;
+    titelDe: { type: 'string', description: 'Schlagzeile, max. 70 Zeichen' }, titelEn: { type: 'string', description: 'headline, max 70 chars' },
+    zeileDe: { type: 'string', description: 'optional, eine Zeile Kontext, max. 110 Zeichen' }, zeileEn: { type: 'string', description: 'optional, one line of context, max 110 chars' },
+    quelle: { type: 'string', description: 'kurzer Quellenname, z. B. GitLab, THORChain Blog, X @THORChain, devops' }, link: { type: 'string', description: 'https-URL zur Originalquelle' } } } } } } };
+// NEWS-TICKER (gewuenscht: "weniger schreiben -- Schlagzeilen und die jeweiligen Verlinkungen, ein nicer News Channel")
+const kiNewsSystem = heute => `Du bist die Redaktion des News-Tickers von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und eigenen Websuchen erstellst du einen aktuellen Nachrichten-Ticker der letzten 7 Tage (laufende Abstimmungen/Upgrades auch älter).
+Recherche (Websuche, höchstens 4 Suchen): 1) THORChain-News dieser Woche, 2) neueste Posts von @THORChain und @RujiraNetwork auf X, 3) THORChain Upgrade / ADR / Mimir / Sicherheit, 4) Integrationen, Partnerschaften, Ökosystem (TCY, RUNEPool, Secured Assets).
+Stil: Schlagzeilen wie bei einem guten Krypto-News-Ticker: konkret, aktiv, mit Zahl oder Name, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen), nur wenn sie etwas Neues sagt (wen betrifft es, was ändert sich). Keine Erklärtexte.
+Links: Jede Meldung braucht einen Link zur ORIGINALquelle (GitLab-Release oder -MR, Blogpost, X-Post, devops-Eintrag). Ohne passenden Link nur bei Live-Daten (Mimir-Abstimmung, Node-Versionen) – dann quelle = 'THORNode live'.
+Genauigkeit: Nur Fakten aus Quellen bzw. Websuche, nichts erfinden, keine Kursprognosen. Versionen: Nutze aktiveNodes.jeVersion für den echten Stand (z. B. „98 von 110 Nodes auf v3.21.5“); version.aktuell ist nur die Mindestversion. Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum = Datum des Ereignisses. Neueste zuerst.
+Ergebnis: Rufe am Ende meldungen_speichern auf (8 bis 16 Meldungen). Kein Fließtext, keine Zwischenberichte.`;
 async function kiNewsJobLesen(env) { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news_job'").first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; } }
 async function kiNewsJobSchreiben(env, job) { await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify(job)).run(); }
 async function kiNewsLauf(env, erzwingen = false) {
@@ -7290,7 +7298,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   let job = await kiNewsJobLesen(env);
   if (!job || job.fertig) {
     const zuletzt = Number(await pushState(env, 'ki_news_at')) || 0;
-    if (!erzwingen && jetzt - zuletzt < 6 * 36e5) { await pushStateSet(env, 'ki_news_aktiv', '0'); return null; }
+    if (!erzwingen && jetzt - zuletzt < 3 * 36e5) { await pushStateSet(env, 'ki_news_aktiv', '0'); return null; }
     if (!env.ANTHROPIC_API_KEY) return null;
     await pushStateSet(env, 'ki_news_at', jetzt); await pushStateSet(env, 'ki_news_aktiv', '1');
     job = { start: jetzt, phase: 'quellen', runde: 0 };
@@ -7329,11 +7337,12 @@ async function kiNewsLauf(env, erzwingen = false) {
   const inhalt = (j && j.content) || [];
   const fertig = inhalt.find(c => c.type === 'tool_use' && c.name === KI_NEWS_ABSCHLUSS.name);
   if (fertig && fertig.input && Array.isArray(fertig.input.meldungen) && fertig.input.meldungen.length) {
-    const sauber = fertig.input.meldungen.filter(x => x && x.titelDe && x.textDe).slice(0, 14).map(x => ({
+    const sauber = fertig.input.meldungen.filter(x => x && x.titelDe).slice(0, 16).map(x => ({
       kategorie: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'].includes(x.kategorie) ? x.kategorie : 'netzwerk', wichtig: !!x.wichtig,
       datum: /^\d{4}-\d{2}-\d{2}$/.test(String(x.datum)) ? x.datum : heute,
-      titelDe: String(x.titelDe).slice(0, 140), textDe: String(x.textDe).slice(0, 600), titelEn: String(x.titelEn || x.titelDe).slice(0, 140), textEn: String(x.textEn || x.textDe).slice(0, 600),
-      quelle: String(x.quelle || '').slice(0, 60), link: /^https:\/\//.test(String(x.link || '')) ? String(x.link).slice(0, 300) : null }));
+      titelDe: String(x.titelDe).slice(0, 100), titelEn: String(x.titelEn || x.titelDe).slice(0, 100),
+      textDe: String(x.zeileDe || x.textDe || '').slice(0, 160), textEn: String(x.zeileEn || x.textEn || x.zeileDe || '').slice(0, 160),
+      quelle: String(x.quelle || '').slice(0, 40), link: /^https:\/\//.test(String(x.link || '')) ? String(x.link).slice(0, 300) : null }));
     // VERSIONEN NIE VERPASSEN (gemeldet: "3.21.4 ist raus, fehlt")
     try {
       const grenze = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10), vers = new Map();
@@ -7341,8 +7350,8 @@ async function kiNewsLauf(env, erzwingen = false) {
       for (const x of job.tags || []) { const v = String(x.tag || '').replace(/^v/, ''); if (/^\d+\.\d+\.\d+$/.test(v) && x.datum >= grenze && !vers.has(v)) vers.set(v, { datum: x.datum, link: 'https://gitlab.com/thorchain/thornode/-/tags/' + x.tag }); }
       for (const [v, info] of vers) {
         if (sauber.some(e => (e.titelDe + ' ' + e.textDe + ' ' + e.titelEn).includes(v))) continue;
-        sauber.unshift({ kategorie: 'upgrade', wichtig: true, datum: info.datum, titelDe: `THORNode v${v} veröffentlicht`, textDe: `Auf GitLab ist die neue THORNode-Version v${v} erschienen. Node-Betreiber müssen aktualisieren; was sich ändert, steht in den Release-Notizen.`,
-          titelEn: `THORNode v${v} released`, textEn: `The new THORNode version v${v} is out on GitLab. Node operators need to update; the release notes list the changes.`, quelle: 'GitLab', link: info.link || null });
+        sauber.unshift({ kategorie: 'upgrade', wichtig: true, datum: info.datum, titelDe: `THORNode v${v} veröffentlicht`, textDe: '',
+          titelEn: `THORNode v${v} released`, textEn: '', quelle: 'GitLab', link: info.link || null });
       }
       sauber.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
     } catch (e) {}
@@ -7388,7 +7397,7 @@ async function kiNewsSchrittSicher(env) {
   try { const e = await kiNewsLauf(env); if (e && e.n) await pushStateSet(env, 'ki_news_fehler', ''); return e; }
   catch (e) { const m = String(e && e.message || e).slice(0, 300); RW_DIAG.push('ki news: ' + m);
     // Fehlschlag: in 30 Minuten erneut versuchen statt erst in 6 Stunden, Grund fuer die App merken
-    await pushStateSet(env, 'ki_news_at', Date.now() - 5.5 * 36e5).catch(() => {}); await pushStateSet(env, 'ki_news_fehler', m).catch(() => {}); return { fehler: m }; }
+    await pushStateSet(env, 'ki_news_at', Date.now() - 2.5 * 36e5).catch(() => {}); await pushStateSet(env, 'ki_news_fehler', m).catch(() => {}); return { fehler: m }; }
 }
 async function kiKaufsignale(env) {
   const bisRoh = await pushState(env, 'ki_kauf_bis');
