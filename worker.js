@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-15-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-0930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2790,6 +2790,8 @@ async function handleStats(request, env, ctx) {
     botEwLauf: await rwLaufInfo(env, 'elliott'),
     botEwTab: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
       return { at: t.at, cfg: t.cfg || null, b4: t['4h'] ? t['4h'].zeilen.filter(z => z.bestanden).length : 0, b1: t['1d'] ? t['1d'].zeilen.filter(z => z.bestanden).length : 0 }; } catch (e) { return null; } })(),
+    botMuster: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
+      const o = { at: t.at, tab: {} }; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.tab[k] = t[k] ? Object.values(t[k]).filter(z => z && z.ok && z.erw != null).length : 0; return o; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
     runebondRef: await (async () => {
       const alt = runebondRefCache.data;
@@ -2990,6 +2992,19 @@ async function handleStats(request, env, ctx) {
   .tab-nav { flex: 0 0 auto; height: 32px; padding: 0 14px; border: none; border-radius: 999px; background: #2a2a2a; color: #ffffff;
     font: 700 13px/1 Figtree, Inter, system-ui, sans-serif; cursor: pointer; transition: background .15s, color .15s; }
   .tab-nav.active { background: #ffffff; color: #000000; }
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  /* Bot-Karten: Kopf mit Ampel, eine kurze Zeile, Rest zugeklappt */
+  .kopf { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .ampel { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .tile-hint.kurz { font-size: 12px; color: #b3b3b3; margin-top: 4px; }
+  details { margin-top: 8px; }
+  details summary { font-size: 11.5px; color: #8a8a8a; cursor: pointer; list-style: none; user-select: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▸ '; }
+  details[open] summary::before { content: '▾ '; }
+  details .lang { font-size: 11.5px; color: #9a9a9a; line-height: 1.6; margin-top: 6px; padding-left: 10px; border-left: 2px solid #2a2a2a; overflow-wrap: anywhere; }
+  details .lang b { color: #d0d0d0; font-weight: 700; }
   .tab-nav:hover:not(.active) { color: #ffffff; }
 </style>
 </head>
@@ -3000,7 +3015,8 @@ async function handleStats(request, env, ctx) {
   <div class="tabs" role="tablist">
     <button class="tab-nav active" data-page="0" role="tab">Addresses</button>
     <button class="tab-nav" data-page="1" role="tab">Visitors</button>
-    <button class="tab-nav" data-page="2" role="tab">Market</button>
+    <button class="tab-nav" data-page="2" role="tab">Bot</button>
+    <button class="tab-nav" data-page="3" role="tab">Market</button>
   </div>
 
   <div class="pager" id="pager">
@@ -3041,7 +3057,7 @@ async function handleStats(request, env, ctx) {
               <div class="depth-pct" id="v-depth-pct-${row.minDays}">${row.pct == null ? '—' : row.pct + '%'}</div>
               <div class="depth-count" id="v-depth-count-${row.minDays}">(${row.count})</div>
             </div>`).join('')}
-          <div class="tile-hint" style="margin-top:8px;">Share of all recorded addresses (<span id="v-depth-base">${stats.depthBase}</span>) that synced on at least X separate days since recording began. Each step is contained in the one above.</div>
+          <div class="tile-hint" style="margin-top:8px;">Share of all <span id="v-depth-base">${stats.depthBase}</span> addresses that synced on at least X separate days.</div>
         </div>
         ${(() => {
           const ap = stats.aktivPassiv;
@@ -3057,7 +3073,7 @@ async function handleStats(request, env, ctx) {
             </div>
             <div class="tile-label" style="margin:14px 0 8px;">Active days per address</div>
             ${[['1', t.n1], ['2', t.n2], ['5', t.n5], ['10', t.n10]].map(([d, n]) => `<div class="depth-row"><div class="depth-label">≥ ${d} days</div><div class="depth-bar-track"><div class="depth-bar-fill" style="width:${t.n1 ? Math.round((n || 0) / t.n1 * 100) : 0}%"></div></div><div class="depth-pct">${n || 0}</div><div class="depth-count"></div></div>`).join('')}
-            <div class="tile-hint" style="margin-top:8px;">Active = the user did something on a visible page within 5 minutes before the sync. Passive = tab open in the background, timers. Real power users have many active days.</div>
+            <details><summary>What is active / passive?</summary><div class="lang">Active = the user did something on a visible page within 5 minutes before the sync. Passive = tab open in the background, timers. Real power users have many active days.</div></details>
           </div>`;
         })()}
         ${(() => {
@@ -3071,11 +3087,10 @@ async function handleStats(request, env, ctx) {
               <tr><th style="text-align:left; opacity:.6; font-weight:500;">week of</th><th style="opacity:.6; font-weight:500;">n</th>${Array.from({ length: maxW }, (_, i) => `<th style="opacity:.6; font-weight:500;">W${i}</th>`).join('')}</tr>
               ${k.map(x => `<tr><td style="white-space:nowrap; padding-right:4px;">${(deDate(x.start) || '').replace(/ \d{4}$/, '')}</td><td style="text-align:center; opacity:.8;">${x.n}</td>${Array.from({ length: maxW }, (_, i) => zelle(x.anteile[i])).join('')}</tr>`).join('')}
             </table></div>
-            <div class="tile-hint" style="margin-top:8px;">Addresses grouped by the week of their first sync (n). W1, W2 … = share (%) of that group that synced again 1, 2 … weeks later. W0 is always 100.</div>
+            <details><summary>How to read this</summary><div class="lang">Addresses grouped by the week of their first sync (n). W1, W2 … = share (%) of that group that synced again 1, 2 … weeks later. W0 is always 100.</div></details>
           </div>`;
         })()}
       </div>
-      <div class="swipe-hint">← swipe for visitors →</div>
     </section>
 
     <section class="page">
@@ -3085,7 +3100,7 @@ async function handleStats(request, env, ctx) {
         ${tile('vis1', 'Devices – today', stats.visitorsLast1d, 'distinct devices today (UTC)')}
         ${tile('vis7', '\u00d8 devices per day – 7 days', stats.visitorsAvgDay7, 'average of the last 7 full days')}
         ${tile('vis30', '\u00d8 devices per day – 30 days', stats.visitorsAvgDay30, 'average of the last 30 full days')}
-        <div class="tile wide" style="font-size:12px;color:var(--muted,#888);line-height:1.5">Counted without storing anything on the device (daily changing code). Devices can be counted per day, but not across several days \u2013 multi-day totals, returning devices and \u201cwith wallet\u201d were removed. Returning users: see the Addresses tab.</div>
+        <div class="tile wide" style="padding:10px 13px"><details style="margin-top:0"><summary>How devices are counted</summary><div class="lang">Counted without storing anything on the device (daily changing code). Devices can be counted per day, but not across several days. Returning users: see the Addresses tab.</div></details></div>
         <!-- Wallet-Anteil entfernt: wird ohne Geraetespeicher nicht mehr erfasst. -->
         <div class="sec">RUNEBond</div>
         ${stats.runebondRef && stats.runebondClicksTotal > 0 ? tile('rbconv', 'Clicks that became a request', Math.round(stats.runebondRef.anfragen / stats.runebondClicksTotal * 1000) / 10 + ' %',
@@ -3104,19 +3119,67 @@ async function handleStats(request, env, ctx) {
           const zeilen = rows.map(r => `${namen[r.q] || r.q}: <b>${Number(r.n) || 0}</b>`).join('<br>');
           return tile('rbsrc', 'Clicks by source', summe, zeilen);
         })()}
-        <div class="sec">Chart analysis \u00b7 live test</div>
+      </div>
+    </section>
+
+    <section class="page">
+      <div class="page-title">3 \u00b7 Learning bot</div>
+      <div class="grid">
         ${(() => {
-          const L = stats.liveTest;
-          if (!L || !L.n) return tile('live0', 'Signals recorded', null, 'starts with the next 4h candle \u00b7 RUNE, BTC, ETH, SOL');
-          const seit = new Date(L.seit).toISOString().slice(0, 10);
-          const zeile = (name, a) => a ? `${name}: after bullish ${a.bullUp ?? '\u2013'} % up (${a.bullN}) \u00b7 after bearish ${a.bearDown ?? '\u2013'} % down (${a.bearN}) \u00b7 base ${a.basisUp} % up \u00b7 Brier ${a.brier} (random ${a.brierZufall})` : `${name}: waiting for results`;
-          return tile('live1', 'Signals recorded', L.n, `since ${seit}`) +
-            tile('live2', 'Hit rates so far', L.kurz ? L.kurz.n : null, [zeile('1 day / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>'));
+          // UEBERSICHTLICHER (gemeldet): je Baustein eine breite Karte -- grosse Zahl, eine kurze Zeile,
+          // alles Weitere zugeklappt unter "Details" statt langer Textbloecke.
+          const d10 = t => t ? new Date(t).toISOString().slice(0, 10) : '\u2013';
+          const karte = (key, label, value, kurz, lang, farbe) => `
+            <div class="tile wide">
+              <div class="kopf"><div class="tile-label" style="margin-top:0">${label}</div>${farbe ? `<span class="ampel" style="background:${farbe}"></span>` : ''}</div>
+              <div class="tile-value" id="v-${key}">${value == null || value === '' ? '\u2014' : value}</div>
+              ${kurz ? `<div class="tile-hint kurz">${kurz}</div>` : ''}
+              ${lang ? `<details><summary>Details</summary><div class="lang">${lang}</div></details>` : ''}
+            </div>`;
+          const GRUEN = '#1ed760', GELB = '#f5c542', ROT = '#ff5c5c', GRAU = '#555';
+          let h = '<div class="sec">Health</div>';
+          // Laufstatus
+          { const zeile = (n, L) => !L ? `${n}: not run yet` :
+              `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 120)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 120)}` : ' \u00b7 ok');
+            const nProb = [stats.laufLive, stats.laufBot].reduce((a, L) => a + (!L ? 0 : (L.fehler ? 1 : 0) + (L.einzelFehler ? L.einzelFehler.length : 0)), 0);
+            h += karte('bot2', 'Run status', nProb ? nProb + (nProb === 1 ? ' issue' : ' issues') : 'OK', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot), nProb ? ROT : GRUEN); }
+          // Live-Trefferquote der Bot-Signale
+          { const LV = stats.botSigLive || {};
+            const wert = LV.ausgewertet ? Math.round(100 * LV.quote) + ' %' : LV.offen ? LV.offen + ' open' : null;
+            const kurz = LV.n ? `${LV.richtig} of ${LV.ausgewertet} correct` + (LV.erwartet != null ? ` \u00b7 backtest said ${LV.erwartet} %` : '') + ` \u00b7 ${LV.offen} open` : 'waiting for the first signal';
+            const lang = LV.n ? `Since ${d10(LV.seit)}` + (LV.bewegung != null ? `<br>Avg move in signal direction: ${LV.bewegung > 0 ? '+' : ''}${LV.bewegung} %` : '') + (LV.zielN ? `<br>Target before stop (1 ATR): ${LV.zielTreffer} of ${LV.zielN} (${LV.zielVorStopp} %)` : '') +
+              (LV.letzte && LV.letzte.length ? '<br>Latest: ' + LV.letzte.map(x => `${x.coin} ${x.ebene} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.ergebnis == null ? '\u2026' : x.ergebnis ? '\u2713' : '\u2717'}`).join(', ') : '') : 'Signals appear when a learned situation occurs (a few per week).';
+            const farbe = !LV.ausgewertet ? GRAU : LV.erwartet != null && 100 * LV.quote < LV.erwartet - 10 ? GELB : GRUEN;
+            h += karte('bot5', 'Bot signals \u00b7 live hit rate', wert, kurz, lang, farbe); }
+          h += '<div class="sec">What the bot has learned</div>';
+          // Gelernte Signal-Tabelle
+          { const sig = (name, S) => !S ? `<b>${name}</b>: not learned yet` : `<b>${name}</b>: ${S.signale.length} reliable (learned ${d10(S.at)} from ${S.n} cases)` +
+              (S.signale.length ? '<br>' + S.signale.slice(0, 6).map(x => `\u00a0\u00a0${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}% vs ${x.basis}%`).join('<br>') : '');
+            const n4 = stats.botSignale4h ? stats.botSignale4h.signale.length : null, n1 = stats.botSignale1d ? stats.botSignale1d.signale.length : null;
+            h += karte('bot4', 'Signal situations', (n4 || 0) + (n1 || 0) || null, `4H ${n4 ?? '\u2013'} \u00b7 Daily ${n1 ?? '\u2013'}`, sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d), (n4 || n1) ? GRUEN : GRAU); }
+          // Muster-Ziele
+          { const M = stats.botMuster; const s = M ? Object.values(M.tab).reduce((a, b) => a + b, 0) : null;
+            h += karte('bot8', 'Pattern targets', M ? s : null, M ? `trained ${d10(M.at)} \u00b7 only quotes \u2265 5 points better than chance` : 'not trained yet \u2013 backtest page \u2192 \u201cMuster trainieren\u201d',
+              M ? Object.entries(M.tab).map(([k, n]) => `${k.replace(':', ' \u00b7 ').toUpperCase()}: ${n}`).join('<br>') : null, M ? (s ? GRUEN : GELB) : GRAU); }
+          // Elliott
+          { const EW = stats.botEwTab;
+            h += karte('bot7', 'Elliott count types', EW ? EW.b4 + EW.b1 : null, EW ? `trained ${d10(EW.at)} \u00b7 4H ${EW.b4} \u00b7 Daily ${EW.b1}` : 'not trained yet \u2013 backtest page \u2192 \u201cElliott trainieren\u201d',
+              EW && EW.cfg ? `Wave detection factor: 4H ${EW.cfg['4h']}, Daily ${EW.cfg['1d']}` : null, EW ? GRUEN : GRAU); }
+          // Trendbruch
+          { const tbz = (name, T) => !T ? `<b>${name}</b>: not tested yet` : T.gewaehlt ? `<b>${name}</b>: ${T.gewaehlt.linie} \u00b7 max drawdown ${T.gewaehlt.ddMit} % instead of ${T.gewaehlt.ddOhne} % \u00b7 better for ${T.gewaehlt.besserBei}/${T.gewaehlt.coins} coins \u00b7 keeps ${Math.round(100 * T.gewaehlt.ertragFaktor)} % of hold return \u00b7 false alarms ${T.gewaehlt.fehlalarme} %`
+              : `<b>${name}</b>: no variant passed`;
+            const D = stats.botTb1d && stats.botTb1d.gewaehlt;
+            h += karte('bot6', 'Trend break (risk line)', D ? D.linie : null, D ? `Daily: drawdown ${D.ddMit} % instead of ${D.ddOhne} %` : null, tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h), D ? GRUEN : GRAU); }
+          h += '<div class="sec">Data</div>';
+          { const B = stats.botStand || {};
+            h += karte('bot1', 'Cases collected', B.faelle || null, `${B.mitErgebnis || 0} with known outcome`, `History loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16}<br>With extended features ${B.historieNeu || 0} / ${B.historieGesamt || 16}`, null); }
+          { const L = stats.liveTest;
+            if (!L || !L.n) h += karte('live0', 'Chart analysis \u00b7 live test', null, 'starts with the next 4h candle', null, GRAU);
+            else { const zeile = (name, a) => a ? `<b>${name}</b>: after bullish ${a.bullUp ?? '\u2013'} % up (${a.bullN}) \u00b7 after bearish ${a.bearDown ?? '\u2013'} % down (${a.bearN}) \u00b7 base ${a.basisUp} % up \u00b7 Brier ${a.brier} (random ${a.brierZufall})` : `<b>${name}</b>: waiting for results`;
+              h += karte('live1', 'Chart analysis \u00b7 live test', L.n, `signals since ${d10(L.seit)}`, [zeile('1 / 3 days', L.kurz), zeile('3 / 7 days', L.mittel), zeile('7 / 14 days', L.lang)].join('<br>'), null); } }
+          return h;
         })()}
-        <div class="sec">Learning bot \u00b7 step 1: collecting</div>
-        ${(() => { const B = stats.botStand || {}; return tile('bot1', 'Cases collected', B.faelle || null,
-          `${B.mitErgebnis || 0} with known outcome \u00b7 history loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16} \u00b7 with extended features ${B.historieNeu || 0} / ${B.historieGesamt || 16}`); })()}
-        ${(() => { const zeile = (n, L) => !L ? `${n}: not run yet` :
+        ${'' && (() => { const zeile = (n, L) => !L ? `${n}: not run yet` :
             `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 80)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 80)}` : ' \u00b7 ok');
           // Grosse Zahl statt Strich: OK oder Zahl der Probleme
           const nProb = [stats.laufLive, stats.laufBot].reduce((a, L) => a + (!L ? 0 : (L.fehler ? 1 : 0) + (L.einzelFehler ? L.einzelFehler.length : 0)), 0);
@@ -3148,7 +3211,7 @@ async function handleStats(request, env, ctx) {
       </div>
     </section>
     <section class="page">
-      <div class="page-title">3 · THORChain market (addresses, not people)</div>
+      <div class="page-title">4 · THORChain market (addresses, not people)</div>
       ${markt ? (() => {
         const f = n => n == null ? '\u2014' : Number(n).toLocaleString('en-US');
         const b = markt.bonder || {}, g = b.nachGroesse || {}, rw = markt.runeWatch || {}, nd = markt.nodes || {};
@@ -3179,7 +3242,8 @@ async function handleStats(request, env, ctx) {
   <div class="dots">
     <button class="dot-nav active" data-page="0" aria-label="Page 1: addresses"></button>
     <button class="dot-nav" data-page="1" aria-label="Page 2: visitors"></button>
-    <button class="dot-nav" data-page="2" aria-label="Page 3: market"></button>
+    <button class="dot-nav" data-page="2" aria-label="Page 3: bot"></button>
+    <button class="dot-nav" data-page="3" aria-label="Page 4: market"></button>
   </div>
 
   <div class="refresh"><span class="dot"></span><span id="stamp">As of ${new Date().toLocaleString('en-GB', { timeZone: 'UTC' })} UTC · updating live</span></div>
