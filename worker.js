@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-0930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1000'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3552,6 +3552,57 @@ async function fetchMayaMidgardDaily(tage) {
 }
 const LLAMA_BASES = ['https://api.llama.fi'];
 
+// CHAINFLIP DIREKT (gewuenscht: "Daten woanders als bei DefiLlama"). DefiLlamas Chainflip-Adapter
+// (dexs/chainflip, fees/chainflip) liest selbst nur Chainflips eigenen Explorer-Dienst aus:
+//   /defi-llama/dexs  -> dailyVolume
+//   /defi-llama/fees  -> dailyProtocolRevenue (Netzwerkgebuehr, Buy & Burn),
+//                        dailySupplySideRevenue (Swap-Gebuehr an LPs), dailyUserFees (Gas/Broker)
+// Hier dieselbe Quelle direkt -- gleiche Zahlen, aber ohne Stunden Verzoegerung. Gebuehren fuer den
+// Vergleich = Netzwerk + LP (ohne Gas/Broker), genau wie bisher "dailyFees - dailyUserFees".
+// Abgeschlossene Tage aendern sich nicht mehr -> in D1 gemerkt, je Abruf nur fehlende Tage nachladen
+// (max. 6 Tage = 12 Anfragen, wegen des Subrequest-Limits). DefiLlama bleibt Lueckenfueller.
+const CF_BASIS = 'https://explorer-service-processor.chainflip.io/defi-llama';
+let cfCache = { tage: null, fehlerAt: 0, fehler: null };
+async function cfHoleTag(tag) {
+  const s = Math.floor(Date.parse(tag + 'T00:00:00Z') / 1000), e = s + 86400;
+  const q = `?startTimestamp=${s}&endTimestamp=${e}`;
+  const opt = () => ({ headers: { 'x-client-id': 'rune-watch', Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+  const [rv, rf] = await Promise.all([fetch(CF_BASIS + '/dexs' + q, opt()), fetch(CF_BASIS + '/fees' + q, opt())]);
+  if (!rv.ok || !rf.ok) throw new Error(`CHAINFLIP_HTTP_${rv.status}_${rf.status}`);
+  const v = await rv.json(), f = await rf.json();
+  const num = x => { const n = Number(x); return Number.isFinite(n) ? n : null; };
+  const out = { vol: num(v && v.dailyVolume), prot: num(f && f.dailyProtocolRevenue), lp: num(f && f.dailySupplySideRevenue), user: num(f && f.dailyUserFees), at: Date.now() };
+  if (out.vol == null) throw new Error('CHAINFLIP_FORMAT');
+  return out;
+}
+async function fetchChainflipDaily(tage) {
+  const env = currentEnv || {}; const db = env.DB;
+  let map = cfCache.tage;
+  if (!map) {
+    map = {};
+    if (db) { try { await botSammlerTabellen(env); const r = await db.prepare("SELECT v FROM bot_status WHERE k = 'chainflip:tage'").first(); if (r) map = JSON.parse(r.v) || {}; } catch (e) { map = {}; } }
+  }
+  const jetzt = Date.now();
+  const heute0 = Date.parse(tagesSchluessel(Math.floor(jetzt / 1000)) + 'T00:00:00Z');
+  const soll = []; for (let i = 1; i <= tage; i++) soll.push(new Date(heute0 - i * 86400000).toISOString().slice(0, 10));
+  // fertig = mindestens 3 h nach Tagesende abgerufen (Chainflip rechnet stuendlich nach)
+  const fertig = (tag, x) => x && x.vol != null && x.at >= Date.parse(tag + 'T00:00:00Z') + 86400000 + 3 * 3600000;
+  const fehlt = soll.filter(t => !fertig(t, map[t])).slice(0, 6);
+  let neu = false;
+  if (fehlt.length && jetzt - cfCache.fehlerAt > 10 * 60000) {
+    for (const t of fehlt) {
+      try { map[t] = await cfHoleTag(t); neu = true; cfCache.fehler = null; }
+      catch (e) { cfCache.fehlerAt = jetzt; cfCache.fehler = e && e.message || String(e); break; }
+    }
+  }
+  const aeltester = soll[soll.length - 1];
+  for (const k of Object.keys(map)) if (k < aeltester) delete map[k];
+  cfCache.tage = map;
+  if (neu && db) { try { await db.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('chainflip:tage', JSON.stringify(map)).run(); } catch (e) { /* naechster Abruf */ } }
+  if (!Object.keys(map).length && cfCache.fehler) throw new Error(cfCache.fehler);
+  return new Map(Object.entries(map));
+}
+
 function tagesSchluessel(sekunden) {
   return new Date(sekunden * 1000).toISOString().slice(0, 10); 
 }
@@ -3758,9 +3809,13 @@ async function baueDexVergleich() {
     ...DEX_PROTOCOLS.map((p) => p.feeFormel === 'fees-minus-userfees' ? fetchLlamaUserFees(p.slug) : Promise.resolve(null)),
     // Maya Midgard -- wieder ganz hinten, aus demselben Grund.
     fetchMayaMidgardDaily(30),
+    // Chainflip direkt -- ganz hinten.
+    fetchChainflipDaily(32),
   ]);
   const mayaRoh = roh[DEX_PROTOCOLS.length + 5 + 3 * DEX_PROTOCOLS.length];
   const mayaTage = mayaRoh && mayaRoh.status === 'fulfilled' ? mayaRoh.value : new Map();
+  const cfRoh = roh[DEX_PROTOCOLS.length + 5 + 3 * DEX_PROTOCOLS.length + 1];
+  const cfTage = cfRoh && cfRoh.status === 'fulfilled' ? cfRoh.value : new Map();
 
   const reihen = {};
   const fehler = {};
@@ -3838,6 +3893,22 @@ async function baueDexVergleich() {
       return l ? { ...l, quelle: 'defillama' } : { day, volume: null };
     }).slice(-40);
     if (reihe.length) { reihen['near-intents'] = reihe; delete fehler['near-intents']; }
+  }
+
+  // CHAINFLIP: eigener Explorer-Dienst zuerst, DefiLlama nur fuer Tage, die dort (noch) fehlen.
+  // Abgleich je Tag mitgeliefert (chainflipAbgleich), damit sichtbar ist, ob beide gleich zaehlen.
+  const cfDirektTage = [];
+  const chainflipAbgleich = [];
+  {
+    const llamaNach = new Map((reihen['chainflip'] || []).map((e) => [e.day, e]));
+    const alleTage = [...new Set([...cfTage.keys(), ...llamaNach.keys()])].filter((d) => d < heuteTag).sort();
+    const reihe = alleTage.map((day) => {
+      const c = cfTage.get(day), l = llamaNach.get(day);
+      if (c && l && Number.isFinite(c.vol) && Number.isFinite(l.volume)) chainflipAbgleich.push({ day, direkt: Math.round(c.vol), defillama: Math.round(l.volume) });
+      if (c && Number.isFinite(c.vol)) { cfDirektTage.push(day); return { day, volume: c.vol, quelle: 'chainflip' }; }
+      return l ? { ...l, quelle: 'defillama' } : { day, volume: null };
+    }).slice(-40);
+    if (reihe.length) { reihen['chainflip'] = reihe; delete fehler['chainflip']; }
   }
 
   // MAYA: Mayas Midgard zuerst, DefiLlama nur fuer Tage, die dort fehlen (Ausfall der Instanz).
@@ -3923,7 +3994,7 @@ async function baueDexVergleich() {
 
   const ALLE = [{ key: 'thorchain', name: 'THORChain', source: thorMidgardTage.length && !thorVanaTage.length ? 'midgard' : 'vanaheimex' },
     ...DEX_PROTOCOLS.map((p) => ({ key: p.key, name: p.name,
-      source: p.key === 'maya' && mayaMidgardTage.length ? 'maya-midgard' : (p.key === 'near-intents' && nearDuneTageVol.length ? 'dune-near' : 'defillama') }))];
+      source: p.key === 'maya' && mayaMidgardTage.length ? 'maya-midgard' : p.key === 'chainflip' && cfDirektTage.length ? 'chainflip' : (p.key === 'near-intents' && nearDuneTageVol.length ? 'dune-near' : 'defillama') }))];
   const protokolle = ALLE.map((p) => {
     const reihe = reihen[p.key] || [];
     if (!reihe.length || !stichtag) {
@@ -4005,6 +4076,18 @@ async function baueDexVergleich() {
           return { day: e.day, volume: netto >= 0 ? netto : null };
         });
         feeBasisJe[p.key] = 'defillama-fees-minus-userFees';
+      }
+      // Chainflip direkt: Netzwerkgebuehr + LP-Gebuehr (= dailyFees - dailyUserFees), DefiLlama fuellt Luecken.
+      if (p.key === 'chainflip' && cfTage.size) {
+        const llamaNach = new Map((feeReihen[p.key] || []).map((e) => [e.day, e.volume]));
+        const alleTage = [...new Set([...cfTage.keys(), ...llamaNach.keys()])].filter((d) => d < heuteTag).sort();
+        feeReihen[p.key] = alleTage.map((day) => {
+          const c = cfTage.get(day);
+          if (c && Number.isFinite(c.prot) && Number.isFinite(c.lp)) return { day, volume: c.prot + c.lp, quelle: 'chainflip' };
+          const l = llamaNach.get(day);
+          return { day, volume: Number.isFinite(l) ? l : null, quelle: 'defillama' };
+        }).slice(-40);
+        feeBasisJe[p.key] = 'chainflip-netzwerk-plus-lp';
       }
     } else if (p.feeFormel === 'maya-midgard') {
       // Mayas Midgard (totalFees * Tageskurs) zuerst. Lueckenfueller ist DefiLlamas dailyFees
@@ -4093,8 +4176,11 @@ async function baueDexVergleich() {
     naechsterTag: (neuesterTag && neuesterTag > stichtag) ? neuesterTag : null,
     wartetAuf: nachzuegler,
     veraltetSeit,
-    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: 'defillama', 'near-intents': nearDune.tage.size ? 'dune-near' : 'defillama',
+    sources: { thorchain: 'vanaheimex', thorchainFallback: 'midgard', chainflip: cfDirektTage.length ? 'chainflip' : 'defillama', chainflipFallback: 'defillama', 'near-intents': nearDune.tage.size ? 'dune-near' : 'defillama',
                maya: 'maya-midgard', mayaFallback: 'defillama' },
+    // Chainflip direkt vs. DefiLlama je Tag (sollte gleich sein -- beide aus Chainflips Explorer-Dienst)
+    chainflipAbgleich: chainflipAbgleich.slice(-10),
+    chainflipFehler: cfRoh && cfRoh.status !== 'fulfilled' ? String(cfRoh.reason && cfRoh.reason.message || cfRoh.reason) : (cfCache.fehler || null),
     // Maya-Tage, fuer die Mayas Midgard nichts hatte und DefiLlama einspringen musste.
     mayaLlamaTage,
     mayaMidgardFehler: mayaFehler,
@@ -4305,6 +4391,9 @@ function haltAlteTageFest(neu, alt) {
       if (e.quelle === 'maya-midgard' && a.quelle !== 'maya-midgard' && e.volume != null) return e;
       // Und fuer NEAR: Dune (NEARs eigener Datensatz) ersetzt frueher festgehaltene DefiLlama-Tage.
       if (e.quelle === 'dune-near' && a.quelle !== 'dune-near' && e.volume != null) return e;
+      // Chainflip direkt: immer den aktuellen Wert nehmen -- abgeschlossene Tage sind in D1 fest
+      // gemerkt (erst 3 h nach Tagesende endgueltig), ein frueher Teilwert darf nicht stehen bleiben.
+      if (e.quelle === 'chainflip' && e.volume != null) return e;
       return a;                                       // sonst: beim ersten Wert bleiben
     });
   };
