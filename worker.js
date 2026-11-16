@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2030'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2045'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7288,7 +7288,7 @@ const kiNewsSystem = heute => `Du bist die Redaktion des News-Tickers von rune.w
 Recherche (Websuche, höchstens 4 Suchen): 1) THORChain-News dieser Woche, 2) neueste Posts von @THORChain und @RujiraNetwork auf X, 3) THORChain Upgrade / ADR / Mimir / Sicherheit, 4) Integrationen, Partnerschaften, Ökosystem (TCY, RUNEPool, Secured Assets).
 Stil: Schlagzeilen wie bei einem guten Krypto-News-Ticker: konkret, aktiv, mit Zahl oder Name, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen), nur wenn sie etwas Neues sagt (wen betrifft es, was ändert sich). Keine Erklärtexte.
 Links: Jede Meldung braucht einen Link zur ORIGINALquelle (GitLab-Release oder -MR, Blogpost, X-Post, devops-Eintrag). Ohne passenden Link nur bei Live-Daten (Mimir-Abstimmung, Node-Versionen) – dann quelle = 'THORNode live'.
-Genauigkeit: Nur Fakten aus Quellen bzw. Websuche, nichts erfinden, keine Kursprognosen. Versionen: Nutze aktiveNodes.jeVersion für den echten Stand (z. B. „98 von 110 Nodes auf v3.21.5“); version.aktuell ist nur die Mindestversion. Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum = Datum des Ereignisses. Neueste zuerst.
+Genauigkeit: Nur Fakten aus Quellen bzw. Websuche, nichts erfinden, keine Kursprognosen. KEINE Meldungen über den aktuellen Versionsstand der Nodes, angehaltene Chains, Churn-Halt oder Mimir-Stimmenstände – diese Live-Meldungen erzeugt rune.watch selbst aus den Netzwerkdaten. Neue Releases (was ist drin) und Ankündigungen dazu sind erlaubt. Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum = Datum des Ereignisses. Neueste zuerst.
 Ergebnis: Rufe am Ende meldungen_speichern auf (8 bis 16 Meldungen). Kein Fließtext, keine Zwischenberichte.`;
 async function kiNewsJobLesen(env) { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news_job'").first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; } }
 async function kiNewsJobSchreiben(env, job) { await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify(job)).run(); }
@@ -7315,6 +7315,7 @@ async function kiNewsLauf(env, erzwingen = false) {
     job = { ...job, phase: 'ki', runde: 0, quellenStatus,
       releases: Array.isArray(quellen.thornodeReleases) ? quellen.thornodeReleases.map(r => ({ version: r.version, datum: r.datum, link: r.link })) : [],
       tags: Array.isArray(quellen.thornodeTags) ? quellen.thornodeTags : [],
+      live: { aktiveNodes: quellen.aktiveNodes || null, version: quellen.version || null, angehalten: Array.isArray(quellen.angehalten) ? quellen.angehalten : [], mimir: quellen.mimirAbstimmungen || null },
       verlauf: [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }] };
     await kiNewsJobSchreiben(env, job); await schritt('KI schreibt (Websuche)');
     return { schritt: 'quellen' };
@@ -7354,6 +7355,27 @@ async function kiNewsLauf(env, erzwingen = false) {
           titelEn: `THORNode v${v} released`, textEn: '', quelle: 'GitLab', link: info.link || null });
       }
       sauber.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
+    } catch (e) {}
+    // LIVE-MELDUNGEN AUS DEN NETZWERKDATEN (gemeldet: "falsche News" -- die KI deutete Versionsstand/Halts falsch).
+    // Diese Fakten schreibt rune.watch selbst, die KI-Meldungen dazu werden entfernt.
+    try {
+      const L = job.live || {}, liveListe = [];
+      const istLiveThema = e => /(nodes?|knoten).{0,40}(auf|on) v?\d+\.\d+\.\d+|aktuelle version|current version|reported as current|angehalten|halted|churn.{0,20}(paus|halt|stopp)|stimmen|votes?\b.*\d+ (von|of) \d+/i.test(e.titelDe + ' ' + e.titelEn);
+      for (let k = sauber.length - 1; k >= 0; k--) if (/THORNode live|THORNode$/i.test(sauber[k].quelle || '') && istLiveThema(sauber[k])) sauber.splice(k, 1);
+      const nodes = L.aktiveNodes, naechste = L.version && L.version.naechste;
+      if (nodes && nodes.anzahl && naechste) {
+        const v = String(naechste).replace(/^v/, ''), auf = nodes.jeVersion ? Object.entries(nodes.jeVersion).filter(([k]) => String(k).replace(/^v/, '') === v).reduce((a, [, n]) => a + n, 0) : 0;
+        if (auf < nodes.anzahl) liveListe.push({ kategorie: 'upgrade', wichtig: true, datum: heute, titelDe: `${auf} von ${nodes.anzahl} aktiven Nodes auf v${v}`, titelEn: `${auf} of ${nodes.anzahl} active nodes on v${v}`,
+          textDe: `${nodes.anzahl - auf} fehlen noch.`, textEn: `${nodes.anzahl - auf} still to go.`, quelle: 'THORNode live', link: null });
+      }
+      let haltChurn = false; try { const m = await fetchFromBases(getThornodeBases(), '/thorchain/mimir'); haltChurn = Number(m && m.HALTCHURNING) > 0; } catch (e) {}
+      if (haltChurn) liveListe.push({ kategorie: 'netzwerk', wichtig: true, datum: heute, titelDe: 'Churn ist angehalten', titelEn: 'Churning is halted', textDe: 'Bond-Rewards werden erst beim nächsten Churn gutgeschrieben.', textEn: 'Bond rewards are credited at the next churn.', quelle: 'THORNode live', link: null });
+      const halts = (L.angehalten || []).filter(Boolean);
+      if (halts.length) liveListe.push({ kategorie: 'netzwerk', wichtig: true, datum: heute, titelDe: halts.includes('GLOBAL') ? 'Handel netzweit angehalten' : `Angehalten: ${halts.join(', ')}`, titelEn: halts.includes('GLOBAL') ? 'Trading halted network-wide' : `Halted: ${halts.join(', ')}`, textDe: '', textEn: '', quelle: 'THORNode live', link: null });
+      const mm = L.mimir && Array.isArray(L.mimir.offen) ? L.mimir.offen.filter(x => x.noetig && x.stimmen / x.noetig >= 0.85).slice(0, 3) : [];
+      for (const x of mm) liveListe.push({ kategorie: 'abstimmung', wichtig: x.noetig - x.stimmen <= 2, datum: heute, titelDe: `Abstimmung ${x.schluessel}: ${x.stimmen} von ${x.noetig} Stimmen`, titelEn: `Vote ${x.schluessel}: ${x.stimmen} of ${x.noetig} votes`,
+        textDe: x.noetig - x.stimmen === 1 ? 'Es fehlt nur noch eine Stimme.' : `Es fehlen noch ${x.noetig - x.stimmen} Stimmen.`, textEn: x.noetig - x.stimmen === 1 ? 'Only one vote missing.' : `${x.noetig - x.stimmen} votes missing.`, quelle: 'THORNode live', link: null });
+      sauber.unshift(...liveListe);
     } catch (e) {}
     const genutzt = (job.genutzt || []);
     const daten = { at: Date.now(), eintraege: sauber.slice(0, 16), werkzeuge: genutzt, quellenStatus: job.quellenStatus, versionen: (job.tags || []).slice(0, 5).map(t => t.tag + ' ' + t.datum), runden: job.runde };
