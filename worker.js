@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-0010'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7031,6 +7031,7 @@ const KI_WERKZEUGE = [
   { name: 'pol', description: 'Protocol Owned Liquidity: eingezahlt, abgezogen, aktueller Wert und Ergebnis in RUNE.', input_schema: { type: 'object', properties: {} } },
   { name: 'bot_signale', description: 'Gelernte Marktlagen des rune.watch-Bots (4H/Tag), Signale der letzten 7 Tage und die Live-Trefferquote.', input_schema: { type: 'object', properties: {} } },
   { name: 'cross_chain_vergleich', description: 'Volumen-Vergleich THORChain, NEAR Intents, Chainflip, Maya (1/7/30 Tage, Anteile).', input_schema: { type: 'object', properties: {} } },
+  { name: 'revenue_vs_marketcap', description: 'Genau die Rechnung des App-Charts "Revenue vs. Marketcap": Revenue = Swap-Gebuehren in USD je Woche/Monat (Midgard /history/earnings), Marketcap (CoinGecko). Liefert: aktuelle Abweichung der Marketcap vom ueblichen Verhaeltnis zu den Einnahmen (in %), "ausgeglichen bei"-Marketcap und -Preis, den ueblichen Faktor, Korrelation, und die HISTORIE: fruehere Phasen mit grosser Ueber-/Unterbewertung, wie lange sie dauerten und ob sich die Luecke danach ueber den Preis oder ueber die Einnahmen geschlossen hat. Fuer alle Fragen zu Revenue/Einnahmen/Gebuehren vs. Preis/Marketcap, "Angleichen", fairer Preis, historisch.', input_schema: { type: 'object', properties: { intervall: { type: 'string', enum: ['week', 'month'], description: 'Standard week' } } } },
 ];
 let kiChurnCache = null;
 const rwKiKurz = (x, n) => { try { const t = JSON.stringify(x); return t && t.length > n ? JSON.parse(JSON.stringify(x, (k, v) => typeof v === 'string' ? v.slice(0, 200) : v)) : x; } catch (e) { return null; } };
@@ -7132,6 +7133,50 @@ async function kiWerkzeugAusfuehren(env, name, input) {
       .map(r => ({ coin: r.coin, ebene: r.ebene, zeit: iso(r.at), situation: KI_SITUATION_DE[r.key] || r.key, richtung: r.dir === 'up' ? 'hoch' : 'runter' })); } catch (e) {}
     return { tabelle4h: tab(a), tabelleTag: tab(b), signaleLetzte7Tage: neu, liveQuote: live && live.ausgewertet ? { ereignisse: live.ausgewertet, richtig: live.richtig, quoteProzent: Math.round(100 * live.quote), offen: live.offen } : 'noch keine ausgewerteten Ereignisse' };
   }
+  if (name === 'revenue_vs_marketcap') {
+    // gleiche Rechnung wie RwRevenueChartFenster in app.js (4 Wochen bzw. 3 Monate Revenue-Schnitt, Faktor = Median)
+    const iv = input && input.intervall === 'month' ? 'month' : 'week', n = iv === 'week' ? 4 : 3;
+    const [j, mcR] = await Promise.all([
+      fetchFromBases(getMidgardBases(), iv === 'week' ? '/history/earnings?interval=week&count=260' : '/history/earnings?interval=month&count=72', { timeoutMs: 15000 }).catch(() => null),
+      (async () => { const h = { accept: 'application/json' }; if (env.COINGECKO_API_KEY) h['x-cg-demo-api-key'] = env.COINGECKO_API_KEY;
+        const c = await caches.default.match(new Request('https://rune-mcap.cache/v1')).catch(() => null); if (c) return c.json();
+        const r = await fetch('https://api.coingecko.com/api/v3/coins/thorchain/market_chart?vs_currency=usd&days=max&interval=daily', { headers: h }).catch(() => null);
+        return r && r.ok ? r.json() : null; })().catch(() => null)]);
+    const mc = mcR && Array.isArray(mcR.market_caps) ? mcR.market_caps.filter(x => x && x[1] > 0) : [];
+    if (!j || !Array.isArray(j.intervals) || !mc.length) return { fehler: 'Midgard oder Marketcap nicht erreichbar' };
+    let k = 0; const mcBei = t => { while (k + 1 < mc.length && mc[k + 1][0] <= t) k++; return mc[k][0] <= t ? mc[k][1] : null; };
+    const r = j.intervals.map(x => { const preis = parseFloat(x.runePriceUSD), ende = Number(x.endTime) * 1000, m = preis > 0 ? mcBei(ende) : null;
+      return m > 0 ? { t: Number(x.startTime) * 1000, mcap: m, preis, rev: Number(x.liquidityFees) / 1e8 * preis } : null; }).filter(Boolean);
+    if (r.length < 20) return { fehler: 'zu wenig Historie' };
+    const fertig = r.slice(0, -1); // laufende Periode unvollstaendig
+    const g = fertig.map((d, i) => { if (i < n - 1) return null; let s = 0, c = 0; for (let q = i - n + 1; q <= i; q++) if (fertig[q].rev > 0) { s += fertig[q].rev; c++; } return c >= Math.ceil(n / 2) ? s / c : null; });
+    const lg = fertig.map((d, i) => g[i] > 0 ? Math.log(d.mcap / g[i]) : null), v = lg.filter(x => x != null).sort((a, b) => a - b), med = v[Math.floor(v.length / 2)];
+    const abw = lg.map(x => x == null ? null : Math.round((Math.exp(x - med) - 1) * 100));
+    let li = fertig.length - 1; while (li > 0 && !(g[li] > 0)) li--;
+    const jetzt = r[r.length - 1], abwJetzt = Math.round((Math.exp(Math.log(jetzt.mcap / g[li]) - med) - 1) * 100);
+    const fairMcap = Math.exp(med) * g[li], fairPreis = jetzt.preis * fairMcap / jetzt.mcap;
+    // Korrelation Marketcap ~ Revenue (log)
+    const P = fertig.map((d, i) => g[i] > 0 ? [Math.log(d.mcap), Math.log(g[i])] : null).filter(Boolean);
+    const mx = P.reduce((a, p) => a + p[0], 0) / P.length, my = P.reduce((a, p) => a + p[1], 0) / P.length;
+    let sxy = 0, sxx = 0, syy = 0; for (const [x, y] of P) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; }
+    // Phasen mit |Abweichung| >= 50 %: Dauer und wie sie endeten (Preis- oder Einnahmen-Bewegung)
+    const d10 = t => new Date(t).toISOString().slice(0, 10), phasen = [];
+    for (let i = 0; i < fertig.length; i++) { if (abw[i] == null || Math.abs(abw[i]) < 50) continue;
+      const art = abw[i] > 0 ? 'ueber' : 'unter'; let e = i; while (e + 1 < fertig.length && abw[e + 1] != null && (art === 'ueber' ? abw[e + 1] > 10 : abw[e + 1] < -10)) e++;
+      let spitze = i; for (let q = i; q <= e; q++) if (Math.abs(abw[q]) > Math.abs(abw[spitze])) spitze = q;
+      const geschlossen = e + 1 < fertig.length;
+      const preisAend = geschlossen ? Math.round((fertig[e + 1].preis / fertig[spitze].preis - 1) * 100) : null, revAend = geschlossen && g[e + 1] > 0 && g[spitze] > 0 ? Math.round((g[e + 1] / g[spitze] - 1) * 100) : null;
+      phasen.push({ art, von: d10(fertig[i].t), bis: geschlossen ? d10(fertig[e + 1].t) : 'laeuft noch', perioden: e - i + 1, spitzeProzent: abw[spitze], spitzeAm: d10(fertig[spitze].t),
+        ausgeglichenDurch: geschlossen ? { preisAenderungProzent: preisAend, revenueAenderungProzent: revAend } : null });
+      i = e; }
+    const anteil = (f) => Math.round(100 * abw.filter(x => x != null && f(x)).length / abw.filter(x => x != null).length);
+    return { intervall: iv, revenueSchnitt: iv === 'week' ? '4 Wochen' : '3 Monate', perioden: fertig.length, von: d10(fertig[0].t), stand: d10(jetzt.t),
+      jetzt: { marketcap: Math.round(jetzt.mcap), preis: +jetzt.preis.toFixed(4), revenueSchnittJePeriode: Math.round(g[li]), abweichungVomUeblichenProzent: abwJetzt },
+      ueblicherFaktorMarketcapZuRevenue: Math.round(Math.exp(med)), ausgeglichenBei: { marketcap: Math.round(fairMcap), preis: +fairPreis.toFixed(4) },
+      korrelationLog: +(sxy / Math.sqrt(sxx * syy)).toFixed(2), anteilPeriodenUeber50: anteil(x => x >= 50), anteilPeriodenUnter50: anteil(x => x <= -50),
+      phasenMitGrosserAbweichung: phasen.slice(-12), letzte12: fertig.slice(-12).map((d, i, A) => ({ start: d10(d.t), revenue: Math.round(d.rev), marketcap: Math.round(d.mcap), abweichung: abw[fertig.length - A.length + i] })),
+      hinweis: 'Gleiche Methode wie der App-Chart "Revenue vs. Marketcap". Historische Muster sind keine Prognose.' };
+  }
   if (name === 'cross_chain_vergleich') {
     const d = await env.DB.prepare('SELECT payload FROM dex_volume_cache WHERE id = 1').first().catch(() => null);
     if (!d || !d.payload) return { fehler: 'nicht verfuegbar' };
@@ -7206,9 +7251,21 @@ async function kiLimit(env, request, art, max) {
 }
 const kiSprache = de => de ? 'Deutsch' : 'English';
 const KI_GRUNDREGELN = de => (de
-  ? 'Regeln: Antworte auf Deutsch, kurz und klar, als reiner Text ohne Markdown (kein **, keine #). Beziehe dich auf jetztUTC als aktuelles Datum, falls vorhanden. Nutze NUR die gelieferten Daten; erfinde keine Zahlen, Kurse oder Ereignisse. Fehlt etwas, sag das offen. Gib keine Kauf- oder Verkaufsempfehlung und keine Finanzberatung; erkläre Zusammenhänge und Wahrscheinlichkeiten nüchtern (keine Garantie). Fachbegriffe kurz erklären.'
-  : 'Rules: Answer in English, short and clear, plain text without markdown (no **, no #). Treat jetztUTC as the current date if present. Use ONLY the data provided; never invent numbers, prices or events. If something is missing, say so. No buy/sell recommendation, no financial advice; explain relationships and probabilities soberly (no guarantee). Briefly explain jargon.');
-const KI_GLOSSAR = 'Glossar rune.watch/THORChain: Bond = gesperrte RUNE eines Bond-Providers bei einer Node; Churn = Wechsel der aktiven Nodes (etwa alle 3 Tage), dabei werden Bond-Rewards gutgeschrieben; Slash = Abzug bei Fehlverhalten der Node; APY = Jahresrendite hochgerechnet; Bond Yield = Teil der Rewards auszahlen statt im Bond lassen (Memo BONDYIELD); POL = Protocol Owned Liquidity, RUNE die das Protokoll selbst in Pools einzahlt; Impermanent Loss = Wertverlust durch Kursverschiebung zwischen den beiden Pool-Seiten; TCY = Token, dessen Staker taeglich RUNE erhalten; Bot-Signal = Marktlage, die im Backtest ueber 13 Coins verlaesslich war (Trefferquote vs. Basisrate der Marktphase); Live-Quote = wie oft die Signale seit Start wirklich stimmten (je Kerze ein Ereignis).';
+  ? 'Regeln: Antworte in der Sprache, in der die Frage gestellt ist (Standard Deutsch), kurz und klar, als reiner Text ohne Markdown (kein **, keine #). Beziehe dich auf jetztUTC als aktuelles Datum, falls vorhanden. Nutze NUR die gelieferten Daten; erfinde keine Zahlen, Kurse oder Ereignisse. Fehlt etwas, sag das offen. Gib keine Kauf- oder Verkaufsempfehlung und keine Finanzberatung; erkläre Zusammenhänge und Wahrscheinlichkeiten nüchtern (keine Garantie). Fachbegriffe kurz erklären.'
+  : 'Rules: Answer in the language the question is written in (e.g. a German question gets a German answer; default English), short and clear, plain text without markdown (no **, no #). Treat jetztUTC as the current date if present. Use ONLY the data provided; never invent numbers, prices or events. If something is missing, say so. No buy/sell recommendation, no financial advice; explain relationships and probabilities soberly (no guarantee). Briefly explain jargon.');
+const KI_GLOSSAR = 'Glossar rune.watch/THORChain: Bond = gesperrte RUNE eines Bond-Providers bei einer Node; Churn = Wechsel der aktiven Nodes (etwa alle 3 Tage), dabei werden Bond-Rewards gutgeschrieben; Slash = Abzug bei Fehlverhalten der Node; APY = Jahresrendite hochgerechnet; Bond Yield = Teil der Rewards auszahlen statt im Bond lassen (Memo BONDYIELD); POL = Protocol Owned Liquidity, RUNE die das Protokoll selbst in Pools einzahlt; Impermanent Loss = Wertverlust durch Kursverschiebung zwischen den beiden Pool-Seiten; TCY = Token, dessen Staker taeglich RUNE erhalten; Bot-Signal = Marktlage, die im Backtest ueber 13 Coins verlaesslich war (Trefferquote vs. Basisrate der Marktphase); Live-Quote = wie oft die Signale seit Start wirklich stimmten (je Kerze ein Ereignis); Revenue vs. Marketcap = App-Chart (Swap-Gebuehren in USD gegen Marketcap, mit "ausgeglichen bei") -- dafuer das Werkzeug revenue_vs_marketcap nutzen, nicht DefiLlama schaetzen.';
+
+// APP-HANDBUCH (gewuenscht 16.11.2026: "er muss meine ganze App kennen"). Beschreibt jede Seite von rune.watch,
+// was dort steht, woher die Zahlen kommen und welches Werkzeug die KI dafuer nutzt. Bei neuen Funktionen ergaenzen.
+const KI_APP_HANDBUCH = 'APP-HANDBUCH rune.watch (THORChain-Dashboard; du bist "Frag rune.watch" in dieser App). Wenn jemand nach etwas "in der App" fragt, nutze das passende Werkzeug und sag, wo es in der App steht. Seiten (am Handy wischen oder unten antippen; Kontext ansicht.offeneSeite = chart|details|swap|earn|volume|nodes):' +
+  ' (1) CHART: RUNE/USD-Kerzen (1H/4H/1D/1W), Zeichenwerkzeuge (Linie, Trendlinie, Fibonacci, Messen), Indikatoren (RSI, Volumen usw.), Log-Skala, Vergleich mit anderen Coins und RUNE/BTC, eigene Kaeufe im Chart. Bot-Signale = Dreiecke (durchgezogen = bestaetigt, gestrichelt = unsicher); Antippen zeigt die Backtest-Bilanz und die Gegenpruefung mit zweiter Bedingung (Werkzeug bot_signale). Muster-Ziele, Trendbruch-Linien, "Chart in Worten" (KI). Werkzeug: rune_kurs_und_volumen, bot_signale.' +
+  ' (2) BOND REWARDS (details): Portfolio-Wert, Wallets (thor1, THORName), gebondete RUNE je Node, laufender Reward dieses Churns (waechst jeden Block, ausgezahlt beim Churn), Countdown zum naechsten Churn, Reward-Historie je Churn, APY je Churn und Durchschnitt (aus echten Auszahlungen, nicht geschaetzt), Rewards nach Monat, CSV-Export und Steuer-Jahresbericht, Wachstumsrechner, Steuerfrei-Status Deutschland (FIFO, 1 Jahr), Bond-Yield-Kachel (Anteil der Rewards, der ausgezahlt wird; Memo BONDYIELD) mit Planer. Daten kommen im Kontext (letzteRewards, apyJeChurn, nodes, naechsterChurn). Werkzeug: netzwerk_und_churn, churn_verlauf, node_info.' +
+  ' (3) SWAP: Tauschfenster ueber THORChain (inkl. Hinweis auf native XMR-Swaps), zeigt angehaltene Chains.' +
+  ' (4) EARN (nur sichtbar, wenn die Wallet TCY oder bRUNE haelt): TCY-Karte (gestakte TCY, taeglich RUNE fuer Staker, noch nicht abgeholte RUNE) und bRUNE-Karte (Rujira).' +
+  ' (5) VOLUME: 24h-Swap-Volumen und Volumen-Historie (Midgard), POL-Karte (Protocol Owned Liquidity je Pool mit APY; Werkzeug pol, pools), RUNE-Angebot, Karte "Revenue vs. Marketcap" (Swap-Gebuehren in USD je Woche/Monat gegen die Marketcap, gruene Linie = "ausgeglichen bei", Abweichung in %; Werkzeug revenue_vs_marketcap), Cross-Chain-Vergleich THORChain / NEAR Intents / Chainflip / Maya (Werkzeug cross_chain_vergleich).' +
+  ' (6) NODES: alle Nodes mit Status, Bond, Slash-Punkten, Version, Churn-out-Kandidaten (Werkzeug node_info, thorchain_updates).' +
+  ' MEHR-Menue: THORChain News (KI), News & Netzwerk-Status (devops.thorchain.org, Halts, Abstimmungen; Werkzeug thorchain_updates), Tutorials, direkte Links, Datenschutz, Nutzungsbedingungen, Telegram, X, GitHub, rune.watch unterstuetzen. Push-Benachrichtigungen: Churn, Rewards, Kaufsignal (KI), Tagesbericht (KI). KI-Fenster: Frag rune.watch und Tagesbericht.' +
+  ' Erfinde keine Funktionen, die hier nicht stehen; wenn du nicht sicher bist, ob es etwas in der App gibt, sag das.';
 async function handleKi(request, env, url) {
   if (url.pathname === '/ki/status') return json({ an: !!env.ANTHROPIC_API_KEY, modell: env.KI_MODELL || KI_MODELL_STD }, env);
   if (url.pathname === '/ki/bericht') {
@@ -7287,7 +7344,7 @@ async function handleKi(request, env, url) {
 Wissen: Du sollst JEDE Frage zu THORChain beantworten können (News, Upgrades, ADRs, Mimir-Abstimmungen, TCY, RUNEPool, Rujira, Secured Assets, Treasury, Ökosystem). Nutze dafür: die Live-Werkzeuge für Zahlen; seite_lesen für bekannte Seiten (z. B. https://thorchain.org, https://blog.thorchain.org, https://dev.thorchain.org, https://devops.thorchain.org, https://boone.tools); web_search für News und alles andere. Bevorzuge offizielle Quellen (thorchain.org, Blog, Dev-Doku, devops) und boone.tools. Wenn du Web-Inhalte nutzt, nenne am Ende kurz die Quelle (z. B. "Quelle: blog.thorchain.org, 12.11.2026"). Ältere Artikel als aktuell darzustellen ist ein Fehler: prüfe das Datum.
 Begriffe: "Update"/"Upgrade"/"neue Version" meint ein Netzwerk-Upgrade (Werkzeug thorchain_updates), NICHT den Churn. Ist eine Frage mehrdeutig, beantworte die naheliegendste Lesart und nenne die andere in einem Halbsatz.
 Arbeitsweise: Für alles Aktuelle (Updates, nächster/letzter Churn, Node-Status, Slash-Punkte, Kurs, Volumen, Pools, POL, Bot-Signale) rufe ZUERST das passende Werkzeug auf und antworte mit diesen Live-Werten; schätze nie aus dem Gedächtnis. Der KONTEXT enthält die persönlichen Zahlen aus der App (Bond, eigene Rewards, APY je Churn). Widersprechen sich Kontext und Werkzeug, gilt das Werkzeug und du sagst es. Zeitangaben immer mit Datum und "UTC" oder relativ zu JETZT. Rechne nur mit gelieferten Zahlen und nenne bei Schätzungen die Annahme.
-Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards werden bei jedem Churn gutgeschrieben; ihre Höhe hängt von der Churn-Dauer, der Gesamt-Systemeinnahme, Slash-Punkten der Node und der Betreiber-Gebühr ab. Mehr Slash-Punkte im Vergleich zu anderen Nodes = weniger Reward. Eine Node, die nicht aktiv ist (Standby, Ready, Disabled), verdient keine Bond-Rewards. Ein längerer Churn ergibt einen größeren Reward, ein kürzerer einen kleineren. Antworte knapp: höchstens etwa 90 Wörter (plus Quelle), die Antwort auf die Frage im ersten Satz, keine Wiederholung der Frage, keine Aufforderung es später nochmal zu versuchen. ${KI_GLOSSAR}`;
+Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards werden bei jedem Churn gutgeschrieben; ihre Höhe hängt von der Churn-Dauer, der Gesamt-Systemeinnahme, Slash-Punkten der Node und der Betreiber-Gebühr ab. Mehr Slash-Punkte im Vergleich zu anderen Nodes = weniger Reward. Eine Node, die nicht aktiv ist (Standby, Ready, Disabled), verdient keine Bond-Rewards. Ein längerer Churn ergibt einen größeren Reward, ein kürzerer einen kleineren. Antworte knapp: höchstens etwa 90 Wörter (plus Quelle), die Antwort auf die Frage im ersten Satz, keine Wiederholung der Frage, keine Aufforderung es später nochmal zu versuchen. ${KI_GLOSSAR} ${KI_APP_HANDBUCH}`;
     const erg = await kiAgent(env, { system, nachrichten, maxTokens: 1200, modell: env.KI_MODELL_FRAGE || 'claude-sonnet-5-5' });
     return json({ antwort: erg.text, werkzeuge: erg.genutzt }, env);
   }
