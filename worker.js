@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1545'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1550'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7111,8 +7111,12 @@ async function handleKi(request, env, url) {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
     // Sofort neu erstellen (nur Betreiber): /ki/news?neu=1&key=STATISTIK_SCHLUESSEL
     if (url.searchParams.get('neu') === '1' && env.STATS_ACCESS_KEY && url.searchParams.get('key') === env.STATS_ACCESS_KEY) {
+      // NICHT IM BROWSER WARTEN (gemeldet: "Seite laedt nicht"): Das Erstellen dauert bis zu ein paar Minuten.
+      // Hier nur vormerken -- der naechste Hintergrundlauf (jede Minute) erstellt die Meldungen.
       await sicherePushTabellen(env);
-      try { await kiNewsLauf(env, true); } catch (e) { return json({ error: String(e && e.message || e) }, env, 500); }
+      await pushStateSet(env, 'ki_news_at', 0); await pushStateSet(env, 'ki_news_fehler', '');
+      await env.DB.prepare('DELETE FROM bot_status WHERE k = ?').bind('lauf:ki').run().catch(() => {});
+      return json({ ok: true, info: 'Vorgemerkt. Die Meldungen werden im naechsten Hintergrundlauf erstellt (1-3 Minuten). Danach die News in der App oeffnen oder diese Seite ohne neu=1 aufrufen.' }, env);
     }
     const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
     await sicherePushTabellen(env);
