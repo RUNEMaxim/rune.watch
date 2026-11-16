@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1650'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7146,7 +7146,7 @@ async function handleKi(request, env, url) {
     const zuletzt = Number(await pushState(env, 'ki_news_at').catch(() => 0)) || null;
     const lauf = await rwLaufInfo(env, 'ki');
     const laufKurz = lauf ? { zeit: new Date(lauf.at).toISOString().slice(0, 16) + ' UTC', ms: lauf.ms, fehler: lauf.fehler, einzelFehler: lauf.einzelFehler } : 'noch kein KI-Lauf';
-    return json(r ? { ...JSON.parse(r.v), letzterFehler: fehler || null, kiLauf: laufKurz } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
+    return json(r ? { ...JSON.parse(r.v), letzterFehler: fehler || null, letzterVersuch: zuletzt, kiLauf: laufKurz } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
