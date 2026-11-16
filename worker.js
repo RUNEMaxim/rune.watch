@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3217,7 +3217,7 @@ async function handleStats(request, env, ctx) {
             h += karte('bot6', 'Trend break (risk line)', D ? D.linie : null, D ? `Daily: drawdown ${D.ddMit} % instead of ${D.ddOhne} %` : null, tbz('Daily', stats.botTb1d) + '<br>' + tbz('4H', stats.botTb4h), D ? GRUEN : GRAU); }
           h += '<div class="sec">Data</div>';
           { const B = stats.botStand || {};
-            h += karte('bot1', 'Cases collected', B.faelle || null, `${B.mitErgebnis || 0} with known outcome`, `History loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16}<br>With extended features ${B.historieNeu || 0} / ${B.historieGesamt || 16}`, null); }
+            h += karte('bot1', 'Cases collected', B.faelle || null, `${B.mitErgebnis || 0} with known outcome`, `History loaded ${B.historieFertig || 0} / ${B.historieGesamt || 16}<br>Long history \u2013 4H (~3.6 y): ${B.lang4h || 0} / 13 \u00b7 Daily (up to ~8 y): ${B.lang1d || 0} / 13${B.ccKey === false ? ' · via Binance (no CryptoCompare key)' : ''}<br>With extended features ${B.historieNeu || 0} / ${B.historieGesamt || 16}`, null); }
           { const L = stats.liveTest;
             if (!L || !L.n) h += karte('live0', 'Chart analysis \u00b7 live test', null, 'starts with the next 4h candle', null, GRAU);
             else { const zeile = (name, a) => a ? `<b>${name}</b>: after bullish ${a.bullUp ?? '\u2013'} % up (${a.bullN}) \u00b7 after bearish ${a.bearDown ?? '\u2013'} % down (${a.bearN}) \u00b7 base ${a.basisUp} % up \u00b7 Brier ${a.brier} (random ${a.brierZufall})` : `<b>${name}</b>: waiting for results`;
@@ -6008,7 +6008,10 @@ async function rwPlanLaeufe(env) {
       // Tabelle mit alter Zaehlweise (jeder Coin ein Fall) sofort neu lernen
       const S = await botSignale(env, iv).catch(() => null);
       const aS = await alter('signale' + iv);
-      if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte-hz3' && aS > 600e3)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
+      // Nach dem Nachladen laengerer Historie (deutlich mehr Faelle als beim letzten Lernen) neu lernen -- hoechstens alle 3 h
+      let mehrFaelle = false;
+      if (S && S.n && aS > 3 * 36e5) { const z = await env.DB.prepare('SELECT COUNT(*) AS n FROM bot_faelle WHERE ebene = ?').bind(iv).first().catch(() => null); mehrFaelle = !!z && z.n > S.n * 1.3; }
+      if (aS > 7 * 864e5 || mehrFaelle || (S && S.methode !== 'zeitpunkte-hz3' && aS > 600e3)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
     // SIGNAL-CHECK: hoechstens einer je Lauf, taeglich bzw. nach jedem Neulernen der Tabelle
@@ -9025,10 +9028,13 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
 // 3 Tagen bei 4H bzw. 7 Tagen bei Tag). Einmalig wird die Historie nachgeladen (je Lauf ein Coin/Zeitebene), danach
 // kommen laufend neue Kerzen dazu und offene Ergebnisse werden nachgetragen. Nur oeffentliche Marktdaten.
 const RW_BOT_COINS = ['RUNE', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'AVAX', 'BCH', 'LTC', 'ATOM', 'ZEC', 'NEAR']; // TCY/RUJI: nicht bei Binance, zu kurze Historie
-const RW_BOT_EBENEN = { '4h': { h: 18, hist: 3000 }, '1d': { h: 7, hist: 1500 } };
+// 4H-HISTORIE VERLAENGERT (gemeldet 16.11.2026: "kein einziges 4H-Signal bestaetigt"): 3000 Kerzen waren nur ~16 Monate,
+// fast nur Baerenmarkt -- zu wenig, um einen kleinen Vorsprung zu belegen. 8000 Kerzen = ~3,6 Jahre (Daily: ~4 Jahre).
+// Daily ebenso verlaengert: 3000 Tage (~8 Jahre, soweit es den Coin so lange gibt; Binance ab 2017).
+const RW_BOT_EBENEN = { '4h': { h: 18, hist: 8000 }, '1d': { h: 7, hist: 3000 } };
 async function rwBotKerzen(sym, iv, anzahl) {
   let ende = Date.now(), alle = [], runden = 0;
-  while (alle.length < anzahl && runden++ < 8) {
+  while (alle.length < anzahl && runden++ < 40) {
     const { rows: j, quelle } = await rwKlinesHolen(sym, iv, Math.min(1000, anzahl - alle.length + 5), alle.length ? ende : null); if (!Array.isArray(j) || !j.length) break;
     alle = j.map(x => ({ date: Number(x[0]), schluss: Number(x[6]), open: +x[1], high: +x[2], low: +x[3], close: +x[4], volume: +x[5] })).concat(alle);
     ende = Number(j[0][0]) - 1; if (quelle === 'kraken' || j.length < 50) break;
@@ -9120,9 +9126,12 @@ async function botSammler(env) {
   for (const iv in RW_BOT_EBENEN) for (const coin of RW_BOT_COINS) {
     const st = status.get('hist:' + coin + ':' + iv);
     if (st === 'fertig-kurz' && !(env.CRYPTOCOMPARE_API_KEY)) continue;
+    // mit der aktuellen Laenge schon einmal geladen -> nicht endlos wiederholen (Coins mit kurzer Historie)
+    if (st === 'fertig:' + RW_BOT_EBENEN[iv].hist) continue;
     if (st === 'fertig') {
-      // aelterer Stand ohne Quellen-Merker: war die Historie kurz (Kraken) und gibt es jetzt einen Schluessel -> nachladen
-      if (!env.CRYPTOCOMPARE_API_KEY) continue;
+      // Historie kuerzer als die Haelfte der Soll-Laenge -> nachladen. Ohne CryptoCompare-Schluessel geht das ueber
+      // Binance (data-api.binance.vision, blaettert in 1000er-Schritten zurueck); landet es nur bei Kraken, wird
+      // "fertig-kurz" gesetzt und nicht wiederholt.
       const z = await env.DB.prepare('SELECT COUNT(*) AS n FROM bot_faelle WHERE coin = ? AND ebene = ?').bind(coin, iv).first().catch(() => null);
       if (!z || z.n >= RW_BOT_EBENEN[iv].hist * 0.5) continue;
     }
@@ -9131,7 +9140,7 @@ async function botSammler(env) {
     const rows = rwBotMerkmale(k, RW_BOT_EBENEN[iv].h, 0);
     await rwBotSchreiben(env, coin, iv, rows);
     const kurz = rwLetzteQuelle === 'kraken';
-    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, kurz ? 'fertig-kurz' : 'fertig').run();
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':' + iv, kurz ? 'fertig-kurz' : 'fertig:' + RW_BOT_EBENEN[iv].hist).run();
     return { historie: coin + ' ' + iv, faelle: rows.length, quelle: rwLetzteQuelle };
   }
   // 2) Laufend: neue Kerzen anhaengen, offene Ergebnisse nachtragen
@@ -9902,7 +9911,9 @@ async function botStand(env) {
     const z = await env.DB.prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN ret IS NOT NULL THEN 1 ELSE 0 END) AS mit FROM bot_faelle').first();
     const st = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v LIKE 'fertig%'").first()) || {};
     const v2 = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%' AND v = 'fertig-v2'").first().catch(() => null)) || {};
-    return { faelle: z ? z.n : 0, mitErgebnis: z ? z.mit : 0, historieFertig: st.n || 0, historieNeu: v2.n || 0, historieGesamt: RW_BOT_COINS.length * Object.keys(RW_BOT_EBENEN).length };
+    const l4 = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%:4h' AND v = ?").bind('fertig:' + RW_BOT_EBENEN['4h'].hist).first().catch(() => null)) || {};
+    const l1 = (await env.DB.prepare("SELECT COUNT(*) AS n FROM bot_status WHERE k LIKE 'hist:%:1d' AND v = ?").bind('fertig:' + RW_BOT_EBENEN['1d'].hist).first().catch(() => null)) || {};
+    return { faelle: z ? z.n : 0, mitErgebnis: z ? z.mit : 0, historieFertig: st.n || 0, historieNeu: v2.n || 0, lang4h: l4.n || 0, lang1d: l1.n || 0, ccKey: !!env.CRYPTOCOMPARE_API_KEY, historieGesamt: RW_BOT_COINS.length * Object.keys(RW_BOT_EBENEN).length };
   } catch (e) { return { faelle: 0, mitErgebnis: 0, historieFertig: 0, historieGesamt: 16 }; }
 }
 
