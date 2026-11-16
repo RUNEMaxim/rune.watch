@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1610'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1640'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7062,15 +7062,18 @@ async function kiWerkzeugAusfuehren(env, name, input) {
   return { fehler: 'unbekanntes Werkzeug' };
 }
 let kiWebsucheAus = false;
-async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, maxRunden = 5 }) {
+async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, maxRunden = 5, abschluss = null, webSuchen = 3 }) {
+  // abschluss: optionales Werkzeug { name, description, input_schema } -- ruft das Modell es auf, ist dessen
+  // Eingabe das Ergebnis (strukturiert, ohne Text-Parsen). In der letzten Runde wird es erzwungen.
   if (!env.ANTHROPIC_API_KEY) throw new Error('NO_KEY');
   const verlauf = nachrichten.slice(); const genutzt = [];
   for (let runde = 0; runde < maxRunden; runde++) {
     const letzte = runde === maxRunden - 1;
+    const basisWz = kiWebsucheAus ? KI_WERKZEUGE : [...KI_WERKZEUGE, { type: 'web_search_20250305', name: 'web_search', max_uses: webSuchen }];
+    const werkzeuge = abschluss ? (letzte ? { tools: [abschluss], tool_choice: { type: 'tool', name: abschluss.name } } : { tools: [...basisWz, abschluss] }) : (letzte ? {} : { tools: basisWz });
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: modell || env.KI_MODELL_FRAGE || env.KI_MODELL || KI_MODELL_STD, max_tokens: maxTokens, system, messages: verlauf,
-        ...(letzte ? {} : { tools: kiWebsucheAus ? KI_WERKZEUGE : [...KI_WERKZEUGE, { type: 'web_search_20250305', name: 'web_search', max_uses: 3 }] }) }),
+      body: JSON.stringify({ model: modell || env.KI_MODELL_FRAGE || env.KI_MODELL || KI_MODELL_STD, max_tokens: maxTokens, system, messages: verlauf, ...werkzeuge }),
       signal: AbortSignal.timeout(60000) });
     const j = await r.json().catch(() => null);
     // Websuche in der Organisation nicht freigeschaltet o. ae.: einmal ohne sie wiederholen
@@ -7081,6 +7084,11 @@ async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, max
     // Lange Websuche: Server pausiert den Zug -- Inhalt zuruecksenden und weitermachen
     if (j.stop_reason === 'pause_turn') { verlauf.push({ role: 'assistant', content: inhalt }); continue; }
     const aufrufe = inhalt.filter(c => c.type === 'tool_use');
+    if (abschluss) { const fertig = aufrufe.find(a => a.name === abschluss.name); if (fertig) return { daten: fertig.input, genutzt, stop: j.stop_reason }; }
+    if (abschluss && !aufrufe.length) { // nur Text geliefert: ans Speichern erinnern
+      verlauf.push({ role: 'assistant', content: inhalt.length ? inhalt : [{ type: 'text', text: '…' }] });
+      verlauf.push({ role: 'user', content: 'Bitte jetzt das Werkzeug ' + abschluss.name + ' mit den Meldungen aufrufen.' }); continue;
+    }
     if (!aufrufe.length || j.stop_reason !== 'tool_use') {
       const text = inhalt.filter(c => c.type === 'text').map(c => c.text).join('').trim();
       if (!text) throw new Error('KI_LEER (stop: ' + (j && j.stop_reason) + ')');
@@ -7212,6 +7220,16 @@ async function kiNewsQuellen(env) {
     offeneAbstimmungen(env, null, false).then(a => { q.mimirAbstimmungen = a ? { aktiveNodes: a.aktiv, noetig: a.noetig, offen: (a.liste || []).slice(0, 8).map(x => ({ schluessel: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })) } : null; }).catch(() => {}),
     fetchFromBases(getThornodeBases(), '/thorchain/version').then(v => { q.version = { aktuell: v && v.current, naechste: v && v.next }; }).catch(() => {}),
     pushState(env, 'halts').then(h => { q.angehalten = h ? JSON.parse(h) : []; }).catch(() => {}),
+    // MEHR QUELLEN (gemeldet: "nicht alle aktuellsten News"): neueste offene Merge Requests (was gerade kommt),
+    // THORNode-Tags (auch ohne Release-Notiz) und frei waehlbare Zusatzseiten per Worker-Variable KI_NEWS_QUELLEN
+    holen(gl + '/merge_requests?state=opened&order_by=updated_at&sort=desc&per_page=15').then(a => { q.offeneAenderungen = (a || []).map(x => ({ titel: String(x.title || '').slice(0, 160), aktualisiert: tag(x.updated_at), labels: (x.labels || []).slice(0, 4), link: x.web_url })); }).catch(() => {}),
+    // THORCHAIN.ORG (gemeldet: "was mit thorchain.org?"): Startseite fest als Quelle -- Ankuendigungen, Kennzahlen, Links
+    holen('https://thorchain.org/', 'text').then(t => { const links = [...t.matchAll(/href="(https?:\/\/[^"#]+|\/[^"#]*)"[^>]*>([^<]{3,80})</g)].map(m => ({ text: m[2].trim(), url: m[1].startsWith('/') ? 'https://thorchain.org' + m[1] : m[1] })).filter(x => /news|blog|update|announce|upgrade|roadmap|adr|report/i.test(x.text + x.url)).slice(0, 15);
+      q.thorchainOrg = { text: t.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim().slice(0, 4000), links }; }).catch(e => { q.thorchainOrg = 'Fehler ' + e.message; }),
+    holen(gl + '/repository/tags?per_page=5').then(a => { q.thornodeTags = (a || []).map(x => ({ tag: x.name, datum: tag(x.commit && x.commit.created_at), nachricht: String(x.message || '').slice(0, 200) })); }).catch(() => {}),
+    Promise.all(String(env.KI_NEWS_QUELLEN || '').split(',').map(x => x.trim()).filter(x => /^https:\/\//.test(x)).slice(0, 5)
+      .map(u => holen(u, 'text').then(t => ({ url: u, text: t.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000) })).catch(e => ({ url: u, fehler: e.message }))))
+      .then(l => { if (l.length) q.zusatzseiten = l; }).catch(() => {}),
   ]);
   return q;
 }
@@ -7224,17 +7242,21 @@ async function kiNewsLauf(env, erzwingen = false) {
   const altRoh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
   const alt = altRoh ? JSON.parse(altRoh.v) : null;
   const heute = new Date().toISOString().slice(0, 10);
-  const system = `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und höchstens zwei kurzen Websuchen nach aktuellen THORChain-Nachrichten erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
+  const system = `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und eigenen Websuchen erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
+Pflicht-Recherche (Websuche, je eine Suche, Ergebnisse der letzten 14 Tage): 1) "THORChain news" der aktuellen Woche, 2) offizielle Ankündigungen von @THORChain und Rujira auf X, 3) THORChain Upgrade / Hardfork / ADR / Mimir-Abstimmung, 4) THORChain Exploit / Halt / Sicherheit, 5) THORChain Partnerschaften, Integrationen (Wallets, Börsen) und Ökosystem (TCY, RUNEPool, Secured Assets). Lies bei Bedarf mit seite_lesen nach (z. B. blog.thorchain.org, thorchain.org, boone.tools). Wichtige Ereignisse dürfen nicht fehlen; lieber eine kleine Meldung mehr als ein verpasstes Thema.
 Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
-Antworte AUSSCHLIESSLICH mit einem JSON-Array (ohne Text davor oder danach, ohne Markdown, ohne Zitat-Markierungen), höchstens 10 Einträge, neueste zuerst. In den Texten keine doppelten Anführungszeichen verwenden (stattdessen „…“ oder '…'). Form:
-[{"kategorie":"upgrade|netzwerk|abstimmung|oekosystem|sicherheit|markt","wichtig":true|false,"datum":"YYYY-MM-DD","titelDe":"...","textDe":"2 Sätze","titelEn":"...","textEn":"2 sentences","quelle":"z. B. GitLab, THORChain-Blog, devops, X","link":"https://... oder null"}]`;
+Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldungen, neueste zuerst, je Sprache Titel + 2 Sätze). Kein Fließtext als Antwort.`;
   const nachrichten = [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }];
-  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 8000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 4 });
-  // ROBUST EINLESEN (gemeldet: "NEWS_JSON" -- Liste abgeschnitten oder mit Zusatztext): erst als Ganzes,
-  // sonst jedes vollstaendige {...}-Objekt einzeln (unvollstaendige am Ende werden verworfen)
-  let liste = null;
+  // STRUKTURIERT STATT TEXT (gemeldet: "NEWS_JSON"): Die Meldungen kommen als Werkzeug-Eingabe zurueck --
+  // die API liefert sie fertig als Objekt, kein JSON aus Fliesstext mehr zu parsen.
+  const abschluss = { name: 'meldungen_speichern', description: 'Speichert die fertigen News-Meldungen fuer den rune.watch-News-Kanal.',
+    input_schema: { type: 'object', required: ['meldungen'], properties: { meldungen: { type: 'array', maxItems: 14, items: { type: 'object', required: ['kategorie', 'datum', 'titelDe', 'textDe', 'titelEn', 'textEn'], properties: {
+      kategorie: { type: 'string', enum: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'] }, wichtig: { type: 'boolean' }, datum: { type: 'string', description: 'YYYY-MM-DD' },
+      titelDe: { type: 'string' }, textDe: { type: 'string' }, titelEn: { type: 'string' }, textEn: { type: 'string' }, quelle: { type: 'string' }, link: { type: 'string', description: 'https-URL oder leer' } } } } } } };
+  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 8000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 6, abschluss, webSuchen: 6 });
+  let liste = erg.daten && Array.isArray(erg.daten.meldungen) ? erg.daten.meldungen : null;
   const t = String(erg.text || '');
-  try { liste = JSON.parse(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1)); } catch (e) { liste = null; }
+  if (!liste && t) { try { liste = JSON.parse(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1)); } catch (e) { liste = null; } }
   if (!Array.isArray(liste)) {
     liste = []; let tiefe = 0, start = -1, inStr = false, esc = false;
     for (let i = 0; i < t.length; i++) {
@@ -7244,9 +7266,9 @@ Antworte AUSSCHLIESSLICH mit einem JSON-Array (ohne Text davor oder danach, ohne
       if (ch === '{') { if (tiefe === 0) start = i; tiefe++; }
       else if (ch === '}') { tiefe--; if (tiefe === 0 && start >= 0) { try { liste.push(JSON.parse(t.slice(start, i + 1))); } catch (e) {} start = -1; } }
     }
-    if (!liste.length) throw new Error('NEWS_JSON: ' + t.slice(0, 120));
+    if (!liste.length) throw new Error('NEWS_LEER (stop: ' + (erg.stop || '?') + ') ' + t.slice(0, 120));
   }
-  const sauber = (Array.isArray(liste) ? liste : []).filter(x => x && x.titelDe && x.textDe).slice(0, 12).map(x => ({
+  const sauber = (Array.isArray(liste) ? liste : []).filter(x => x && x.titelDe && x.textDe).slice(0, 14).map(x => ({
     kategorie: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'].includes(x.kategorie) ? x.kategorie : 'netzwerk', wichtig: !!x.wichtig,
     datum: /^\d{4}-\d{2}-\d{2}$/.test(String(x.datum)) ? x.datum : heute,
     titelDe: String(x.titelDe).slice(0, 140), textDe: String(x.textDe).slice(0, 600), titelEn: String(x.titelEn || x.titelDe).slice(0, 140), textEn: String(x.textEn || x.textDe).slice(0, 600),
