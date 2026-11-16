@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1000'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1000b'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3566,7 +3566,7 @@ let cfCache = { tage: null, fehlerAt: 0, fehler: null };
 async function cfHoleTag(tag) {
   const s = Math.floor(Date.parse(tag + 'T00:00:00Z') / 1000), e = s + 86400;
   const q = `?startTimestamp=${s}&endTimestamp=${e}`;
-  const opt = () => ({ headers: { 'x-client-id': 'rune-watch', Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+  const opt = () => ({ headers: { 'x-client-id': 'rune-watch', Accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
   const [rv, rf] = await Promise.all([fetch(CF_BASIS + '/dexs' + q, opt()), fetch(CF_BASIS + '/fees' + q, opt())]);
   if (!rv.ok || !rf.ok) throw new Error(`CHAINFLIP_HTTP_${rv.status}_${rf.status}`);
   const v = await rv.json(), f = await rf.json();
@@ -3580,7 +3580,7 @@ async function fetchChainflipDaily(tage) {
   let map = cfCache.tage;
   if (!map) {
     map = {};
-    if (db) { try { await botSammlerTabellen(env); const r = await db.prepare("SELECT v FROM bot_status WHERE k = 'chainflip:tage'").first(); if (r) map = JSON.parse(r.v) || {}; } catch (e) { map = {}; } }
+    if (db) { try { await db.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run(); const r = await db.prepare("SELECT v FROM bot_status WHERE k = 'chainflip:tage'").first(); if (r) map = JSON.parse(r.v) || {}; } catch (e) { map = {}; } }
   }
   const jetzt = Date.now();
   const heute0 = Date.parse(tagesSchluessel(Math.floor(jetzt / 1000)) + 'T00:00:00Z');
@@ -3588,20 +3588,29 @@ async function fetchChainflipDaily(tage) {
   // fertig = mindestens 3 h nach Tagesende abgerufen (Chainflip rechnet stuendlich nach)
   const fertig = (tag, x) => x && x.vol != null && x.at >= Date.parse(tag + 'T00:00:00Z') + 86400000 + 3 * 3600000;
   const fehlt = soll.filter(t => !fertig(t, map[t])).slice(0, 6);
-  let neu = false;
-  if (fehlt.length && jetzt - cfCache.fehlerAt > 10 * 60000) {
-    for (const t of fehlt) {
-      try { map[t] = await cfHoleTag(t); neu = true; cfCache.fehler = null; }
-      catch (e) { cfCache.fehlerAt = jetzt; cfCache.fehler = e && e.message || String(e); break; }
-    }
-  }
   const aeltester = soll[soll.length - 1];
   for (const k of Object.keys(map)) if (k < aeltester) delete map[k];
   cfCache.tage = map;
-  if (neu && db) { try { await db.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('chainflip:tage', JSON.stringify(map)).run(); } catch (e) { /* naechster Abruf */ } }
-  if (!Object.keys(map).length && cfCache.fehler) throw new Error(cfCache.fehler);
+  // NIE AUF CHAINFLIP WARTEN (gemeldet: "Die Seite laedt nicht"): Nachladen laeuft im Hintergrund
+  // (handleDexVolume haengt es per waitUntil an), die Antwort nimmt sofort, was schon da ist.
+  if (fehlt.length && !cfLaeuft && jetzt - cfCache.fehlerAt > 10 * 60000) {
+    cfLaeuft = (async () => {
+      const erg = await Promise.allSettled(fehlt.map(t => cfHoleTag(t).then(x => [t, x])));
+      let neu = false;
+      for (const r of erg) {
+        if (r.status === 'fulfilled') { map[r.value[0]] = r.value[1]; neu = true; }
+        else { cfCache.fehlerAt = Date.now(); cfCache.fehler = r.reason && r.reason.message || String(r.reason); }
+      }
+      if (neu) {
+        if (erg.every(r => r.status === 'fulfilled')) cfCache.fehler = null;
+        dexVolumeCache = null; // naechster Abruf rechnet mit den neuen Tagen
+        if (db) { try { await db.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('chainflip:tage', JSON.stringify(map)).run(); } catch (e) { /* naechster Abruf */ } }
+      }
+    })().catch(e => { cfCache.fehlerAt = Date.now(); cfCache.fehler = e && e.message || String(e); }).finally(() => { cfLaeuft = null; });
+  }
   return new Map(Object.entries(map));
 }
+let cfLaeuft = null;
 
 function tagesSchluessel(sekunden) {
   return new Date(sekunden * 1000).toISOString().slice(0, 10); 
@@ -4438,6 +4447,7 @@ async function handleDexVolume(request, env, ctx) {
     // auf den naechsten Cron-Lauf zu warten (syncNearDune drosselt sich selbst).
     if (env.DUNE_API_KEY && !nearDune.tage.size && ctx && ctx.waitUntil) ctx.waitUntil(syncNearDune(env).catch(() => {}));
     const daten = await baueDexVergleichCached();
+    if (cfLaeuft && ctx && ctx.waitUntil) ctx.waitUntil(cfLaeuft);
     // Zuletzt ausgelieferten Stand lesen, um vergangene Tage daraus zu uebernehmen.
     try {
       const vorher = await env.DB.prepare('SELECT payload FROM dex_volume_cache WHERE id = 1').first();
