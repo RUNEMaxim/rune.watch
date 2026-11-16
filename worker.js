@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1710'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7143,10 +7143,13 @@ async function handleKi(request, env, url) {
     const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
     await sicherePushTabellen(env);
     const fehler = await pushState(env, 'ki_news_fehler').catch(() => null);
-    const zuletzt = Number(await pushState(env, 'ki_news_at').catch(() => 0)) || null;
+    const zRoh = await pushState(env, 'ki_news_at').catch(() => null);
+    const zuletzt = zRoh == null ? null : Number(zRoh) || 0;
     const lauf = await rwLaufInfo(env, 'ki');
     const laufKurz = lauf ? { zeit: new Date(lauf.at).toISOString().slice(0, 16) + ' UTC', ms: lauf.ms, fehler: lauf.fehler, einzelFehler: lauf.einzelFehler } : 'noch kein KI-Lauf';
-    return json(r ? { ...JSON.parse(r.v), letzterFehler: fehler || null, letzterVersuch: zuletzt, kiLauf: laufKurz } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
+    let schrittInfo = null; try { schrittInfo = JSON.parse(await pushState(env, 'ki_news_schritt') || 'null'); } catch (e) {}
+    // Diagnose ZUERST (am Handy sieht man sonst nur die lange Meldungsliste)
+    return json(r ? { diagnose: { letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...JSON.parse(r.v), letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
@@ -7238,7 +7241,12 @@ async function kiNewsLauf(env, erzwingen = false) {
   if (!erzwingen && Date.now() - zuletzt < 6 * 36e5) return null;
   await pushStateSet(env, 'ki_news_at', Date.now());
   if (!env.ANTHROPIC_API_KEY) return null;
+  // SCHRITT-MARKEN (gemeldet: Stand blieb stehen, ohne Fehler): wird der Lauf von Cloudflare abgebrochen,
+  // sieht man in /ki/news, bis wohin er kam
+  const schritt = s => pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s, t: new Date().toISOString().slice(11, 19) + ' UTC' })).catch(() => {});
+  await schritt('Quellen sammeln');
   const quellen = await kiNewsQuellen(env);
+  await schritt('KI schreibt (Websuche)');
   const altRoh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
   const alt = altRoh ? JSON.parse(altRoh.v) : null;
   const heute = new Date().toISOString().slice(0, 10);
@@ -7292,6 +7300,7 @@ Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldu
   const quellenStatus = Object.fromEntries(Object.entries(quellen).map(([k, v]) => [k, typeof v === 'string' && /^Fehler/.test(v) ? v : Array.isArray(v) ? v.length + ' Eintraege' : v ? 'ok' : 'leer']));
   const daten = { at: Date.now(), eintraege: sauber.slice(0, 16), werkzeuge: erg.genutzt, quellenStatus, versionen: Array.isArray(quellen.thornodeTags) ? quellen.thornodeTags.slice(0, 5).map(t => t.tag + ' ' + t.datum) : quellen.thornodeTags || null };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(daten)).run();
+  await schritt('fertig');
   return { n: sauber.length };
 }
 // Laeuft im Plan-Takt: neue Kaufsignale melden, einmal taeglich den Bericht erstellen.
