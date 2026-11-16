@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1530'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1545'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7115,7 +7115,10 @@ async function handleKi(request, env, url) {
       try { await kiNewsLauf(env, true); } catch (e) { return json({ error: String(e && e.message || e) }, env, 500); }
     }
     const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
-    return json(r ? JSON.parse(r.v) : { leer: true }, env);
+    await sicherePushTabellen(env);
+    const fehler = await pushState(env, 'ki_news_fehler').catch(() => null);
+    const zuletzt = Number(await pushState(env, 'ki_news_at').catch(() => 0)) || null;
+    return json(r ? { ...JSON.parse(r.v), letzterFehler: fehler || null } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
@@ -7225,7 +7228,10 @@ async function kiAgentLauf(env) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
   try { await kiKaufsignale(env); } catch (e) { RW_DIAG.push('ki kauf: ' + (e && e.message || e)); }
   try { await kiTagesbericht(env); } catch (e) { RW_DIAG.push('ki bericht: ' + (e && e.message || e)); }
-  try { await kiNewsLauf(env); } catch (e) { RW_DIAG.push('ki news: ' + (e && e.message || e)); }
+  try { await kiNewsLauf(env); await pushStateSet(env, 'ki_news_fehler', ''); }
+  catch (e) { const m = String(e && e.message || e).slice(0, 300); RW_DIAG.push('ki news: ' + m);
+    // Fehlschlag: in 30 Minuten erneut versuchen statt erst in 6 Stunden, Grund fuer die App merken
+    await pushStateSet(env, 'ki_news_at', Date.now() - 5.5 * 36e5).catch(() => {}); await pushStateSet(env, 'ki_news_fehler', m).catch(() => {}); }
 }
 async function kiKaufsignale(env) {
   const bisRoh = await pushState(env, 'ki_kauf_bis');
