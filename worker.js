@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2200'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2210'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2794,6 +2794,7 @@ async function handleStats(request, env, ctx) {
     botMuster: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
       const o = { at: t.at, tab: {} }; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.tab[k] = t[k] ? Object.values(t[k]).filter(z => z && z.ok && z.erw != null).length : 0; return o; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
+    botExp: await botExperimentBilanz(env),
     botCheck4h: await botCheck(env, '4h'),
     botCheck1d: await botCheck(env, '1d'),
     runebondRef: await (async () => {
@@ -3177,6 +3178,14 @@ async function handleStats(request, env, ctx) {
             const wert = (C4 && C4.walk) || (C1 && C1.walk) ? `4H ${kurzF(C4)} \u00b7 D ${kurzF(C1)}` : null;
             const farbe = [C4, C1].some(C => C && C.fazit === 'knapp-haelt') ? GELB : (C4 && C4.walk) || (C1 && C1.walk) ? GRUEN : GRAU;
             h += karte('bot9', 'Signal check \u00b7 all chart signals', wert, 'Do unconfirmed signals work? Tested on data the bot never saw.', teil('4H', C4) + '<br><br>' + teil('Daily', C1), farbe); }
+          // Live-Experiment Staerke im Aufwaertstrend
+          { const X = stats.botExp || {};
+            const z = (name, e) => !e || !e.signale ? `<b>${name}</b>: no signal yet` : `<b>${name}</b> (since ${d10(e.seit)}, ${e.horizont}): ` + (e.ereignisse ? `higher in ${e.quote} % of ${e.ereignisse} events vs ${e.normal} % normal in uptrend \u00b7 evidence ${e.z ?? '\u2013'} (convincing from ~2.5)` : 'no result yet') + ` \u00b7 ${e.offen} open`;
+            const d = X['1d'], f = X['4h'], ev = (d && d.ereignisse || 0) + (f && f.ereignisse || 0);
+            const wert = ev ? [f && f.ereignisse ? `4H ${f.quote} vs ${f.normal} %` : null, d && d.ereignisse ? `D ${d.quote} vs ${d.normal} %` : null].filter(Boolean).join(' \u00b7 ') : ((d && d.signale || 0) + (f && f.signale || 0)) ? 'running' : null;
+            const genug = [f, d].some(e => e && e.ereignisse >= 60);
+            h += karte('bot10', 'Experiment \u00b7 strength in uptrend', wert, genug ? 'enough events for a first judgement' : 'live only, not shown as a signal \u00b7 needs a few months',
+              z('4H', f) + '<br>' + z('Daily', d) + '<br>Rule fixed on 2026-11-16: uptrend AND (RSI > 70 or volume > 2.5x or volatility jump or new 30-bar high or short rise > 3 ATR), direction up. Only the start of a series counts; coins on the same candle count as one event.', genug ? GELB : GRAU); }
           // Muster-Ziele
           { const M = stats.botMuster; const s = M ? Object.values(M.tab).reduce((a, b) => a + b, 0) : null;
             h += karte('bot8', 'Pattern targets', M ? s : null, M ? `trained ${d10(M.at)} \u00b7 only quotes \u2265 5 points better than chance` : 'not trained yet \u2013 backtest page \u2192 \u201cMuster trainieren\u201d',
@@ -9114,6 +9123,7 @@ async function botSammler(env) {
       await rwBotSchreiben(env, coin, iv, rows.slice(-3)); // nur die neuesten Kerzen neu einfuegen
       // LIVE-QUOTE DER BOT-SIGNALE: jede neue Kerze gegen die aktuell gelernte Tabelle pruefen und mitschreiben
       try { await botSignalLiveMitschreiben(env, coin, iv, rows.slice(-3).filter(r => r.ret == null)); } catch (e) { RW_DIAG.push(`botsig ${coin} ${iv}: ${e && e.message || e}`); }
+      try { await botExperimentMitschreiben(env, coin, iv, rows.slice(-3).filter(r => r.ret == null)); } catch (e) { RW_DIAG.push(`botexp ${coin} ${iv}: ${e && e.message || e}`); }
       const M = await botModell(env, iv);
       if (M && M.modell) {
         await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_prognosen (coin TEXT, ebene TEXT, at INTEGER, p REAL, PRIMARY KEY (coin, ebene, at))').run();
@@ -9337,6 +9347,50 @@ async function botSignaleLernen(env, iv) {
   const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz3', horizont: iv === '1d' ? '7d' : '3d', zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, abgelehnt, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
   return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
+}
+// ===== LIVE-EXPERIMENT "STAERKE IM AUFWAERTSTREND" (gewuenscht nach dem Signal-Check vom 16.11.2026) =====
+// Der Check zeigte: auf ungesehenen Daten hielt fast nur Trendfolge (Staerke im Aufwaertstrend). Diese Beobachtung
+// stammt aber aus denselben Testdaten -- sie wird deshalb NICHT als Signal gezeigt, sondern ab jetzt nur mitgeschrieben.
+// Regel VORAB fest (nicht mehr anpassen, sonst ist der Test wertlos):
+//   Phase "auf" UND mindestens eins von: RSI > 70, Volumen > 2,5x, Schwankungssprung > 1,8x, neues 30-Kerzen-Hoch,
+//   kurzer Anstieg > 3 ATR. Richtung: hoeher. Zeitraum: 4H 3 Tage (18 Kerzen), Daily 7 Tage. Nur Beginn einer Serie.
+//   Vergleich: alle Kerzen im Aufwaertstrend im selben Zeitraum (wie oft war es dort ohne Ausloeser hoeher?).
+const RW_EXP_STAERKE = r => r.phase === 'auf' && ['rsiHoch', 'volSpitze', 'atrSprung', 'neuHoch30', 'steigKurz'].some(k => RW_SITUATIONEN[k](r));
+const RW_EXP_HK = { '4h': 18, '1d': 7 };
+async function botExperimentMitschreiben(env, coin, iv, neue) {
+  if (!neue.length) return;
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_exp (coin TEXT, ebene TEXT, at INTEGER, close REAL, folge INTEGER DEFAULT 0, PRIMARY KEY (coin, ebene, at))').run();
+  const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  for (const r of neue) {
+    if (!RW_EXP_STAERKE(r)) continue;
+    const vorher = await env.DB.prepare('SELECT at FROM bot_exp WHERE coin = ? AND ebene = ? AND at < ? AND at >= ? LIMIT 1').bind(coin, iv, r.at, r.at - 3 * ivMs).first().catch(() => null);
+    await env.DB.prepare('INSERT OR IGNORE INTO bot_exp (coin, ebene, at, close, folge) VALUES (?,?,?,?,?)').bind(coin, iv, r.at, r.close, vorher ? 1 : 0).run();
+  }
+}
+async function botExperimentBilanz(env) {
+  try {
+    const ex = ((await env.DB.prepare('SELECT coin, ebene, at FROM bot_exp WHERE folge = 0').all()).results) || [];
+    const out = {};
+    for (const iv of ['4h', '1d']) {
+      const E = ex.filter(r => r.ebene === iv), hk = RW_EXP_HK[iv];
+      if (!E.length) { out[iv] = { signale: 0 }; continue; }
+      const seit = Math.min(...E.map(r => r.at));
+      const R = ((await env.DB.prepare('SELECT coin, at, close, phase FROM bot_faelle WHERE ebene = ? AND at >= ? ORDER BY at').bind(iv, seit).all()).results) || [];
+      const pro = {}; for (const r of R) (pro[r.coin] = pro[r.coin] || []).push(r);
+      const ret = {}; let bN = 0, bUp = 0;
+      for (const c in pro) { const L = pro[c]; for (let i = 0; i < L.length; i++) { const v = i + hk < L.length && L[i].close > 0 ? L[i + hk].close / L[i].close - 1 : null;
+        ret[c + '|' + L[i].at] = v; if (v != null && L[i].phase === 'auf') { bN++; if (v > 0) bUp++; } } }
+      const ev = new Map(); let offen = 0, sN = 0, sOk = 0;
+      for (const r of E) { const v = ret[r.coin + '|' + r.at]; if (v == null) { offen++; continue; } sN++; if (v > 0) sOk++;
+        const e = ev.get(r.at) || { n: 0, ok: 0 }; e.n++; if (v > 0) e.ok++; ev.set(r.at, e); }
+      const L = [...ev.values()], q = L.length ? L.reduce((a, e) => a + e.ok / e.n, 0) / L.length : null, b = bN ? bUp / bN : null;
+      const nEff = L.length / Math.max(1, hk / 3);
+      const z = q != null && b != null && b > 0 && b < 1 && nEff > 0 ? (q - b) / Math.sqrt(b * (1 - b) / nEff) : null;
+      out[iv] = { seit, signale: E.length, offen, ausgewertet: sN, richtig: sOk, ereignisse: L.length, quote: q == null ? null : Math.round(100 * q), normal: b == null ? null : Math.round(100 * b),
+        z: z == null ? null : +z.toFixed(2), horizont: iv === '1d' ? '7d' : '3d' };
+    }
+    return out;
+  } catch (e) { return { fehler: String(e && e.message || e) }; }
 }
 async function botSignalLiveMitschreiben(env, coin, iv, neue) {
   if (!neue.length) return;
