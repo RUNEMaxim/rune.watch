@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1000b'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1130'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3146,8 +3146,8 @@ async function handleStats(request, env, ctx) {
           // Live-Trefferquote der Bot-Signale
           { const LV = stats.botSigLive || {};
             const wert = LV.ausgewertet ? Math.round(100 * LV.quote) + ' %' : LV.offen ? LV.offen + ' open' : null;
-            const kurz = LV.n ? `${LV.richtig} of ${LV.ausgewertet} correct` + (LV.erwartet != null ? ` \u00b7 backtest said ${LV.erwartet} %` : '') + ` \u00b7 ${LV.offen} open` : 'waiting for the first signal';
-            const lang = LV.n ? `Since ${d10(LV.seit)}` + (LV.bewegung != null ? `<br>Avg move in signal direction: ${LV.bewegung > 0 ? '+' : ''}${LV.bewegung} %` : '') + (LV.zielN ? `<br>Target before stop (1 ATR): ${LV.zielTreffer} of ${LV.zielN} (${LV.zielVorStopp} %)` : '') +
+            const kurz = LV.n ? `${LV.richtig} of ${LV.ausgewertet} events correct` + (LV.erwartet != null ? ` \u00b7 backtest said ${LV.erwartet} %` : '') + ` \u00b7 ${LV.offen} open` : 'waiting for the first signal';
+            const lang = LV.n ? `Since ${d10(LV.seit)}` + (LV.signale != null ? `<br>Event = all coins signalling on the same candle (coins move together). Individual signals: ${LV.signaleRichtig} of ${LV.signaleFertig} correct, ${LV.signale} total.` : '') + (LV.bewegung != null ? `<br>Avg move in signal direction: ${LV.bewegung > 0 ? '+' : ''}${LV.bewegung} %` : '') + (LV.zielN ? `<br>Target before stop (1 ATR): ${LV.zielTreffer} of ${LV.zielN} (${LV.zielVorStopp} %)` : '') +
               (LV.letzte && LV.letzte.length ? '<br>Latest: ' + LV.letzte.map(x => `${x.coin} ${x.ebene} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.ergebnis == null ? '\u2026' : x.ergebnis ? '\u2713' : '\u2717'}`).join(', ') : '') : 'Signals appear when a learned situation occurs (a few per week).';
             const farbe = !LV.ausgewertet ? GRAU : LV.erwartet != null && 100 * LV.quote < LV.erwartet - 10 ? GELB : GRUEN;
             h += karte('bot5', 'Bot signals \u00b7 live hit rate', wert, kurz, lang, farbe); }
@@ -5918,7 +5918,10 @@ async function rwPlanLaeufe(env) {
       const M = await botModell(env, iv), a = await alter('lernen' + iv);
       // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
       // (Gesamt-Modell je Kerze stillgelegt: bestand den Probelauf nicht -- ersetzt durch die Signal-Tabelle)
-      if (await alter('signale' + iv) > 7 * 864e5) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
+      // Tabelle mit alter Zaehlweise (jeder Coin ein Fall) sofort neu lernen
+      const S = await botSignale(env, iv).catch(() => null);
+      const aS = await alter('signale' + iv);
+      if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte' && aS > 6 * 36e5)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
     // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
@@ -8580,20 +8583,32 @@ async function botSignaleLernen(env, iv) {
     for (const key in RW_SITUATIONEN) {
       const g = rows.filter(r => r.phase === ph && RW_SITUATIONEN[key](r));
       if (g.length < 100) continue;
+      // GLEICHZEITIGE FAELLE = EIN FALL (gemeldet: live 0 von 23 -- alles "rsiTiefFall" bei vielen Coins in
+      // derselben Kerze). Die Coins bewegen sich gemeinsam; 13 gleichzeitige Faelle sind EIN Beleg. Deshalb
+      // wird je Kerze (Zeitpunkt) gemittelt: Trefferquote = Durchschnitt ueber Zeitpunkte, Signifikanz aus
+      // der Zahl der Zeitpunkte (zusaetzlich um die Ueberlappung der Haltedauer bereinigt).
       const up = g.filter(r => r.ret > 0).length / g.length;
       const dir = up >= bq ? 'up' : 'down';
-      const treffer = dir === 'up' ? up : 1 - up, b = dir === 'up' ? bq : 1 - bq, vorsprung = treffer - b;
-      const nEff = g.length / Math.max(1, H / 3); // aufeinanderfolgende Kerzen ueberlappen -> weniger echte Faelle
+      const ev = new Map(); for (const r of g) { const e = ev.get(r.at) || { n: 0, ok: 0 }; e.n++; if ((r.ret > 0) === (dir === 'up')) e.ok++; ev.set(r.at, e); }
+      const evL = [...ev.entries()];
+      if (evL.length < 40) continue;
+      const evQ = sel => { const h = evL.filter(([at]) => sel(at)); return h.length ? h.reduce((a, [, e]) => a + e.ok / e.n, 0) / h.length : null; };
+      const treffer = evQ(() => true), b = dir === 'up' ? bq : 1 - bq, vorsprung = treffer - b;
+      const nEff = evL.length / Math.max(1, H / 3); // Zeitpunkte, bereinigt um ueberlappende Haltedauer
       const z = vorsprung / Math.sqrt(b * (1 - b) / nEff);
-      // Coins und Zeithaelften
+      // Coins und Zeithaelften (Haelften ebenfalls je Zeitpunkt)
       const proCoin = {}; for (const r of g) { const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, ok: 0 }); c.n++; if ((r.ret > 0) === (dir === 'up')) c.ok++; }
       const coinsMit = Object.values(proCoin).filter(c => c.n >= 15), coinsOk = coinsMit.filter(c => c.ok / c.n - b >= 0.02).length;
-      const haelfte = sel => { const h = g.filter(sel); return h.length >= 30 ? h.filter(r => (r.ret > 0) === (dir === 'up')).length / h.length - b : null; };
-      const h1 = haelfte(r => r.at < mitte), h2 = haelfte(r => r.at >= mitte);
-      const eintrag = { phase: ph, key, dir, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
-        h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2) };
+      const haelfte = sel => { const n = evL.filter(([at]) => sel(at)).length; return n >= 20 ? evQ(sel) - b : null; };
+      const h1 = haelfte(at => at < mitte), h2 = haelfte(at => at >= mitte);
+      // Gegen den Trend (Kauf im Abwaertstrend, Verkauf im Aufwaertstrend) strenger: dort schlaegt der
+      // Markt die Gegenbewegung oft -- mind. 8 Punkte Vorsprung und z >= 3.
+      const gegenTrend = (ph === 'ab' && dir === 'up') || (ph === 'auf' && dir === 'down');
+      const minV = gegenTrend ? 0.08 : 0.05, minZ = gegenTrend ? 3 : 2;
+      const eintrag = { phase: ph, key, dir, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, zeitpunkte: evL.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
+        h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2), gegenTrend };
       geprueft.push(eintrag);
-      if (vorsprung >= 0.05 && z >= 2 && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
+      if (vorsprung >= minV && z >= minZ && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
         // Zusatz-Kennzahlen nur fuer aufgenommene Situationen (spart Rechenzeit), jeweils mit Vergleich zur Phase
         const k1 = kennzahlen(g, dir), vgl = vergleich(ph, dir);
         Object.assign(eintrag, { bewegung: k1.bewegung, bewegungBasis: vgl.bewegung, zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
@@ -8607,7 +8622,7 @@ async function botSignaleLernen(env, iv) {
   const sKey = e => e.phase + ':' + e.key + ':' + e.dir;
   const altSet = new Set(alt && alt.signale ? alt.signale.map(sKey) : []), neuSet = new Set(uebernommen.map(sKey));
   const aenderung = { neu: [...neuSet].filter(k => !altSet.has(k)), weg: [...altSet].filter(k => !neuSet.has(k)) };
-  const info = { ebene: iv, at: Date.now(), horizont: iv === '1d' ? '7d' : '3d', n: rows.length, signale: uebernommen, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
+  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte', horizont: iv === '1d' ? '7d' : '3d', n: rows.length, signale: uebernommen, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
   return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
 }
@@ -8646,7 +8661,15 @@ async function botSignalLiveBilanz(env) {
     const erwartet = fertig.length ? fertig.reduce((a, r) => a + r.treffer, 0) / fertig.length : null;
     const proEbene = {}; for (const r of fertig) { const e = (proEbene[r.ebene] = proEbene[r.ebene] || { n: 0, ok: 0 }); e.n++; if ((r.ret > 0) === (r.dir === 'up')) e.ok++; }
     const seit = rows.length ? Math.min(...rows.map(r => r.at)) : null;
-    return { n: rows.length, offen: rows.length - fertig.length, ausgewertet: fertig.length, richtig: ok, quote: fertig.length ? ok / fertig.length : null,
+    // JE KERZE EIN FALL (gemeldet: 0 von 23 waren dieselbe Marktbewegung bei vielen Coins). Signale
+    // mehrerer Coins zur selben Kerze = ein Ereignis; richtig, wenn mind. die Haelfte der Coins richtig lag.
+    const evMap = new Map();
+    for (const r of rows) { const k = r.ebene + '|' + r.at; const e = evMap.get(k) || { n: 0, fertig: 0, ok: 0 }; e.n++; if (r.ret != null) { e.fertig++; if ((r.ret > 0) === (r.dir === 'up')) e.ok++; } evMap.set(k, e); }
+    const evAlle = [...evMap.values()], evFertig = evAlle.filter(e => e.fertig === e.n && e.n > 0);
+    const evRichtig = evFertig.filter(e => e.ok / e.n >= 0.5).length;
+    return { n: evAlle.length, offen: evAlle.length - evFertig.length, ausgewertet: evFertig.length, richtig: evRichtig,
+      quote: evFertig.length ? evFertig.reduce((a, e) => a + e.ok / e.n, 0) / evFertig.length : null,
+      signale: rows.length, signaleFertig: fertig.length, signaleRichtig: ok,
       erwartet: erwartet == null ? null : Math.round(erwartet), seit, proEbene,
       bewegung: nB ? +(100 * sm / nB).toFixed(2) : null, zielVorStopp: zn ? Math.round(100 * zt / zn) : null, zielN: zn, zielTreffer: zt,
       letzte: rows.sort((a, b) => b.at - a.at).slice(0, 5).map(r => ({ coin: r.coin, ebene: r.ebene, at: r.at, key: r.key, dir: r.dir, ergebnis: r.ret == null ? null : (r.ret > 0) === (r.dir === 'up') })) };
