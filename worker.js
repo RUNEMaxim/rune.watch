@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1730'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1740'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7140,6 +7140,16 @@ async function handleKi(request, env, url) {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
     const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:bericht'").first().catch(() => null);
     return json(r ? JSON.parse(r.v) : { leer: true }, env);
+  }
+  if (url.pathname === '/ki/news-neu' && request.method === 'POST') {
+    // "Jetzt aktualisieren" aus der App (nur Betreiber-Adressen): neue Ausgabe vormerken
+    const b = await request.json().catch(() => ({}));
+    const aus = getStatsExcludedAddresses(env);
+    if (!(Array.isArray(b.adressen) ? b.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase()))) return json({ error: 'NUR_TEST' }, env, 403);
+    await sicherePushTabellen(env);
+    await pushStateSet(env, 'ki_news_at', 0); await pushStateSet(env, 'ki_news_fehler', ''); await pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s: 'vorgemerkt', t: new Date().toISOString().slice(11, 19) + ' UTC' }));
+    await env.DB.prepare('DELETE FROM bot_status WHERE k = ?').bind('lauf:ki').run().catch(() => {});
+    return json({ ok: true }, env);
   }
   if (url.pathname === '/ki/news') {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
