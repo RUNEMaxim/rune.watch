@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1720'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1730'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7088,7 +7088,15 @@ async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, max
     // Lange Websuche: Server pausiert den Zug -- Inhalt zuruecksenden und weitermachen
     if (j.stop_reason === 'pause_turn') { verlauf.push({ role: 'assistant', content: inhalt }); continue; }
     const aufrufe = inhalt.filter(c => c.type === 'tool_use');
-    if (abschluss) { const fertig = aufrufe.find(a => a.name === abschluss.name); if (fertig) return { daten: fertig.input, genutzt, stop: j.stop_reason }; }
+    if (abschluss) {
+      const fertig = aufrufe.find(a => a.name === abschluss.name);
+      // Abgeschnitten (max_tokens): unvollstaendige Eingabe verwerfen und kuerzer neu anfordern
+      if (fertig && !(j.stop_reason === 'max_tokens' && !(fertig.input && Object.keys(fertig.input).length))) return { daten: fertig.input, genutzt, stop: j.stop_reason };
+      if (j.stop_reason === 'max_tokens' && runde < maxRunden - 1) {
+        verlauf.push({ role: 'assistant', content: inhalt.filter(c => c.type === 'text' && c.text).length ? inhalt.filter(c => c.type === 'text' && c.text) : [{ type: 'text', text: '…' }] });
+        verlauf.push({ role: 'user', content: 'Die Antwort war zu lang und wurde abgeschnitten. Keine weitere Recherche und kein Fließtext: Rufe jetzt sofort ' + abschluss.name + ' auf, je Meldung Titel + 2 kurze Sätze.' }); continue;
+      }
+    }
     if (abschluss && !aufrufe.length) { // nur Text geliefert: ans Speichern erinnern
       verlauf.push({ role: 'assistant', content: inhalt.length ? inhalt : [{ type: 'text', text: '…' }] });
       verlauf.push({ role: 'user', content: 'Bitte jetzt das Werkzeug ' + abschluss.name + ' mit den Meldungen aufrufen.' }); continue;
@@ -7257,7 +7265,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   const system = `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und eigenen Websuchen erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
 Pflicht-Recherche (Websuche, je eine Suche, Ergebnisse der letzten 14 Tage): 1) "THORChain news" der aktuellen Woche, 2) offizielle Ankündigungen von @THORChain und Rujira auf X, 3) THORChain Upgrade / Hardfork / ADR / Mimir-Abstimmung, 4) THORChain Exploit / Halt / Sicherheit, 5) THORChain Partnerschaften, Integrationen (Wallets, Börsen) und Ökosystem (TCY, RUNEPool, Secured Assets). Lies bei Bedarf mit seite_lesen nach (z. B. blog.thorchain.org, thorchain.org, boone.tools). Wichtige Ereignisse dürfen nicht fehlen; lieber eine kleine Meldung mehr als ein verpasstes Thema.
 Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Jede neue THORNode-Version (thornodeReleases, thornodeTags, version) der letzten 14 Tage bekommt eine eigene Meldung mit der Versionsnummer im Titel und den wichtigsten Änderungen aus den Release-Notizen. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
-Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldungen, neueste zuerst, je Sprache Titel + 2 Sätze). Kein Fließtext als Antwort.`;
+Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldungen, neueste zuerst, je Sprache Titel + 2 Sätze). Kein Fließtext als Antwort, keine Zwischenberichte während der Recherche, keine Zitate oder Quellenlisten im Text.`;
   const nachrichten = [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }];
   // STRUKTURIERT STATT TEXT (gemeldet: "NEWS_JSON"): Die Meldungen kommen als Werkzeug-Eingabe zurueck --
   // die API liefert sie fertig als Objekt, kein JSON aus Fliesstext mehr zu parsen.
@@ -7265,7 +7273,7 @@ Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldu
     input_schema: { type: 'object', required: ['meldungen'], properties: { meldungen: { type: 'array', maxItems: 14, items: { type: 'object', required: ['kategorie', 'datum', 'titelDe', 'textDe', 'titelEn', 'textEn'], properties: {
       kategorie: { type: 'string', enum: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'] }, wichtig: { type: 'boolean' }, datum: { type: 'string', description: 'YYYY-MM-DD' },
       titelDe: { type: 'string' }, textDe: { type: 'string' }, titelEn: { type: 'string' }, textEn: { type: 'string' }, quelle: { type: 'string' }, link: { type: 'string', description: 'https-URL oder leer' } } } } } } };
-  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 8000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 6, abschluss, webSuchen: 6 });
+  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 16000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 6, abschluss, webSuchen: 6 });
   let liste = erg.daten && Array.isArray(erg.daten.meldungen) ? erg.daten.meldungen : null;
   const t = String(erg.text || '');
   if (!liste && t) { try { liste = JSON.parse(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1)); } catch (e) { liste = null; } }
