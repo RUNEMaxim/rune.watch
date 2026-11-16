@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1640'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1650'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7212,7 +7212,7 @@ async function kiNewsQuellen(env) {
   const gl = 'https://gitlab.com/api/v4/projects/thorchain%2Fthornode';
   const holen = async (url, typ = 'json') => { const r = await fetch(url, { headers: { 'User-Agent': 'rune.watch-news' }, signal: AbortSignal.timeout(12000) }); if (!r.ok) throw new Error('HTTP ' + r.status); return typ === 'json' ? r.json() : r.text(); };
   await Promise.all([
-    holen(gl + '/releases?per_page=4').then(a => { q.thornodeReleases = (a || []).map(x => ({ version: x.tag_name, name: x.name, datum: tag(x.released_at), link: x._links && x._links.self || null, notizen: String(x.description || '').slice(0, 1800) })); }).catch(e => { q.thornodeReleases = 'Fehler ' + e.message; }),
+    holen(gl + '/releases?per_page=6&order_by=released_at&sort=desc').then(a => { q.thornodeReleases = (a || []).map(x => ({ version: x.tag_name, name: x.name, datum: tag(x.released_at), link: x._links && x._links.self || null, notizen: String(x.description || '').slice(0, 1800) })); }).catch(e => { q.thornodeReleases = 'Fehler ' + e.message; }),
     holen(gl + '/merge_requests?state=merged&order_by=updated_at&sort=desc&per_page=25&updated_after=' + new Date(Date.now() - 10 * 864e5).toISOString()).then(a => { q.gemergteAenderungen = (a || []).map(x => ({ titel: String(x.title || '').slice(0, 160), datum: tag(x.merged_at), labels: (x.labels || []).slice(0, 4), link: x.web_url })); }).catch(e => { q.gemergteAenderungen = 'Fehler ' + e.message; }),
     holen('https://blog.thorchain.org/rss/', 'text').then(t => { q.blog = [...t.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 8).map(m => { const g = k => ((m[1].match(new RegExp('<' + k + '>([\\s\\S]*?)</' + k + '>')) || [])[1] || '').replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, ' ').trim();
       return { titel: g('title').slice(0, 200), link: g('link'), datum: tag(Date.parse(g('pubDate'))), auszug: g('description').slice(0, 500) }; }); }).catch(e => { q.blog = 'Fehler ' + e.message; }),
@@ -7226,7 +7226,7 @@ async function kiNewsQuellen(env) {
     // THORCHAIN.ORG (gemeldet: "was mit thorchain.org?"): Startseite fest als Quelle -- Ankuendigungen, Kennzahlen, Links
     holen('https://thorchain.org/', 'text').then(t => { const links = [...t.matchAll(/href="(https?:\/\/[^"#]+|\/[^"#]*)"[^>]*>([^<]{3,80})</g)].map(m => ({ text: m[2].trim(), url: m[1].startsWith('/') ? 'https://thorchain.org' + m[1] : m[1] })).filter(x => /news|blog|update|announce|upgrade|roadmap|adr|report/i.test(x.text + x.url)).slice(0, 15);
       q.thorchainOrg = { text: t.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim().slice(0, 4000), links }; }).catch(e => { q.thorchainOrg = 'Fehler ' + e.message; }),
-    holen(gl + '/repository/tags?per_page=5').then(a => { q.thornodeTags = (a || []).map(x => ({ tag: x.name, datum: tag(x.commit && x.commit.created_at), nachricht: String(x.message || '').slice(0, 200) })); }).catch(() => {}),
+    holen(gl + '/repository/tags?order_by=updated&sort=desc&per_page=10').then(a => { q.thornodeTags = (a || []).map(x => ({ tag: x.name, datum: tag((x.commit && (x.commit.committed_date || x.commit.created_at)) || x.created_at), nachricht: String(x.message || '').slice(0, 200) })); }).catch(e => { q.thornodeTags = 'Fehler ' + e.message; }),
     Promise.all(String(env.KI_NEWS_QUELLEN || '').split(',').map(x => x.trim()).filter(x => /^https:\/\//.test(x)).slice(0, 5)
       .map(u => holen(u, 'text').then(t => ({ url: u, text: t.replace(/<(script|style|noscript|svg)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 3000) })).catch(e => ({ url: u, fehler: e.message }))))
       .then(l => { if (l.length) q.zusatzseiten = l; }).catch(() => {}),
@@ -7244,7 +7244,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   const heute = new Date().toISOString().slice(0, 10);
   const system = `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und eigenen Websuchen erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
 Pflicht-Recherche (Websuche, je eine Suche, Ergebnisse der letzten 14 Tage): 1) "THORChain news" der aktuellen Woche, 2) offizielle Ankündigungen von @THORChain und Rujira auf X, 3) THORChain Upgrade / Hardfork / ADR / Mimir-Abstimmung, 4) THORChain Exploit / Halt / Sicherheit, 5) THORChain Partnerschaften, Integrationen (Wallets, Börsen) und Ökosystem (TCY, RUNEPool, Secured Assets). Lies bei Bedarf mit seite_lesen nach (z. B. blog.thorchain.org, thorchain.org, boone.tools). Wichtige Ereignisse dürfen nicht fehlen; lieber eine kleine Meldung mehr als ein verpasstes Thema.
-Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
+Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Jede neue THORNode-Version (thornodeReleases, thornodeTags, version) der letzten 14 Tage bekommt eine eigene Meldung mit der Versionsnummer im Titel und den wichtigsten Änderungen aus den Release-Notizen. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
 Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldungen, neueste zuerst, je Sprache Titel + 2 Sätze). Kein Fließtext als Antwort.`;
   const nachrichten = [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }];
   // STRUKTURIERT STATT TEXT (gemeldet: "NEWS_JSON"): Die Meldungen kommen als Werkzeug-Eingabe zurueck --
@@ -7274,7 +7274,23 @@ Ergebnis: Rufe am Ende das Werkzeug meldungen_speichern auf (höchstens 14 Meldu
     titelDe: String(x.titelDe).slice(0, 140), textDe: String(x.textDe).slice(0, 600), titelEn: String(x.titelEn || x.titelDe).slice(0, 140), textEn: String(x.textEn || x.textDe).slice(0, 600),
     quelle: String(x.quelle || '').slice(0, 60), link: /^https:\/\//.test(String(x.link || '')) ? String(x.link).slice(0, 300) : null }));
   if (!sauber.length) throw new Error('NEWS_LEER');
-  const daten = { at: Date.now(), eintraege: sauber, werkzeuge: erg.genutzt };
+  // VERSIONEN NIE VERPASSEN (gemeldet: "3.21.4 ist raus, fehlt"): Jede THORNode-Version der letzten 14 Tage
+  // (Release oder Tag) bekommt sicher eine Meldung -- fehlt sie in der KI-Liste, wird sie ergaenzt.
+  try {
+    const grenze = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10);
+    const vers = new Map();
+    for (const r of Array.isArray(quellen.thornodeReleases) ? quellen.thornodeReleases : []) if (r.version && r.datum >= grenze) vers.set(String(r.version).replace(/^v/, ''), { datum: r.datum, link: r.link, notiz: r.notizen });
+    for (const t of Array.isArray(quellen.thornodeTags) ? quellen.thornodeTags : []) { const v = String(t.tag || '').replace(/^v/, ''); if (/^\d+\.\d+\.\d+$/.test(v) && t.datum >= grenze && !vers.has(v)) vers.set(v, { datum: t.datum, link: 'https://gitlab.com/thorchain/thornode/-/tags/' + t.tag, notiz: t.nachricht }); }
+    for (const [v, info] of vers) {
+      if (sauber.some(e => (e.titelDe + ' ' + e.textDe + ' ' + e.titelEn).includes(v))) continue;
+      sauber.unshift({ kategorie: 'upgrade', wichtig: true, datum: info.datum, titelDe: `THORNode v${v} veröffentlicht`, textDe: `Auf GitLab ist die neue THORNode-Version v${v} erschienen. Node-Betreiber müssen aktualisieren; was sich ändert, steht in den Release-Notizen.`,
+        titelEn: `THORNode v${v} released`, textEn: `The new THORNode version v${v} is out on GitLab. Node operators need to update; the release notes list the changes.`, quelle: 'GitLab', link: info.link || null });
+    }
+    sauber.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
+  } catch (e) {}
+  // Welche Quellen geantwortet haben (zur Fehlersuche im Abruf /ki/news)
+  const quellenStatus = Object.fromEntries(Object.entries(quellen).map(([k, v]) => [k, typeof v === 'string' && /^Fehler/.test(v) ? v : Array.isArray(v) ? v.length + ' Eintraege' : v ? 'ok' : 'leer']));
+  const daten = { at: Date.now(), eintraege: sauber.slice(0, 16), werkzeuge: erg.genutzt, quellenStatus, versionen: Array.isArray(quellen.thornodeTags) ? quellen.thornodeTags.slice(0, 5).map(t => t.tag + ' ' + t.datum) : quellen.thornodeTags || null };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(daten)).run();
   return { n: sauber.length };
 }
