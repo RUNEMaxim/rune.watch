@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2230'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3185,6 +3185,10 @@ async function handleStats(request, env, ctx) {
             const teil = (name, G) => !G || !G.tabelle ? `<b>${name}</b>: ${G && G.status ? G.status : 'not run yet'}` :
               `<b>${name}</b> (checked ${d10(G.at)}, unseen data from ${d10(G.testAb)}): ${G.getestet} combinations tested, ~${G.zufallErwartet} would pass by pure chance \u2192 <b>${G.bestanden.length} passed</b>` +
               (G.bestanden.length ? '<br>' + G.bestanden.map(x => `\u00a0\u00a0\u2713 ${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.horizont} + ${FN(x.filter)}: ${x.quote} % vs ${x.normal} % \u00b7 unseen ${vz(x.testVor)} pts (evidence ${x.testZ})`).join('<br>') : '') +
+              (G.buendel ? (() => { const B = G.buendel, BS = { bestanden: '\u2713 PASSED', 'test-durchgefallen': '\u2717 failed on unseen data', 'lernen-durchgefallen': '\u2013 failed while learning' }[B.status];
+                const z = (n, x) => `${n}: ${x.quote ?? '\u2013'} % up (${x.n} events) vs ${x.normal} % normal ${vz(x.vor)} pts (evidence ${x.z}) \u00b7 vs ${x.normalBtc} % when BTC fine ${vz(x.vorBtc)} pts \u00b7 without BTC filter ${x.ohneFilter ?? '\u2013'} %`;
+                return `<br><u>Bundle test \u2013 all dashed buy signals in downtrend + BTC not falling (${B.horizont}, ${B.keys.length} situations):</u> <b>${BS}</b><br>\u00a0\u00a0${z('learning', B.lernen)}<br>\u00a0\u00a0${z('unseen', B.test)}` +
+                  (B.status === 'bestanden' ? `<br>\u00a0\u00a0${B.mehrAlsBtc ? 'The signal adds an edge on top of the BTC trend.' : 'Careful: most of the edge comes from the BTC trend itself.'}` : ''); })() : '') +
               (G.knapp && G.knapp.length ? '<br><u>Passed learning, failed on unseen data:</u><br>' + G.knapp.map(x => `\u00a0\u00a0${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} + ${FN(x.filter)}: ${vz(x.lernVor)} \u2192 ${vz(x.testVor)} pts (${x.testN})`).join('<br>') : '');
             const G4 = stats.botGegen4h, G1 = stats.botGegen1d, nb = (G4 && G4.bestanden ? G4.bestanden.length : 0) + (G1 && G1.bestanden ? G1.bestanden.length : 0);
             const erw = (G4 && G4.zufallErwartet || 0) + (G1 && G1.zufallErwartet || 0), lief = (G4 && G4.tabelle) || (G1 && G1.tabelle);
@@ -5674,7 +5678,7 @@ export default {
       }
       if (url.pathname === '/bot-signale') {
         const [g4, g1] = await Promise.all([botGegen(env, '4h'), botGegen(env, '1d')]);
-        const gk = G => G && G.tabelle ? { at: G.at, bestanden: G.bestanden, getestet: G.getestet, zufallErwartet: G.zufallErwartet, tabelle: G.tabelle } : null;
+        const gk = G => G && G.tabelle ? { at: G.at, bestanden: G.bestanden, getestet: G.getestet, zufallErwartet: G.zufallErwartet, tabelle: G.tabelle, buendel: G.buendel || null } : null;
         const [a, b, live, tb4, tb1, ewRoh, muRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
           env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null),
           env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first().catch(() => null)]);
@@ -6013,7 +6017,7 @@ async function rwPlanLaeufe(env) {
       const C = await botCheck(env, iv);
       if ((!C || C.tabelleVom !== S.at || Date.now() - C.at > 864e5) && await alter('check' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'check' + iv, () => botSignalCheck(env, iv)); break; }
       const G = await botGegen(env, iv);
-      if ((!G || G.tabelleVom !== S.at || Date.now() - G.at > 864e5) && await alter('gegen' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'gegen' + iv, () => botGegenpruefung(env, iv)); break; }
+      if ((!G || G.tabelleVom !== S.at || !('buendel' in G) || Date.now() - G.at > 864e5) && await alter('gegen' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'gegen' + iv, () => botGegenpruefung(env, iv)); break; }
     }
     // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
     //  -- Backtest-Seite "Elliott trainieren" -- und speichert das Ergebnis ueber /elliott-tabelle.)
@@ -9683,12 +9687,43 @@ async function botGegenpruefung(env, iv) {
     }
     tabelle[e.phase + ':' + e.key + ':' + dir] = { ohne: { treffer: e.treffer, basis: e.basis }, zeilen };
   }
+  // GEBUENDELTER TEST (gewuenscht 16.11.2026): EINE Hypothese statt vieler Kombinationen -- "Kaufsignale im
+  // Abwaertstrend, wenn BTC nicht faellt", ueber ALLE gestrichelten Kaufsignale im Abwaertstrend zusammen.
+  // Fester Zeitraum (4H 3 Tage, Daily 7 Tage), je Coin nur der Beginn einer Serie, je Kerze ein Fall.
+  // Zwei Vergleiche: (a) normal im Abwaertstrend -- das, was der Chart verspricht; (b) normal im Abwaertstrend, wenn
+  // BTC nicht faellt -- zeigt, ob das Signal etwas BRINGT oder ob es nur die BTC-Lage ist.
+  let buendel = null;
+  { const keys = [...new Set(AB.filter(e => e.phase === 'ab' && e.dir === 'up').map(e => e.key))];
+    if (keys.length) {
+      const hk = iv === '1d' ? 7 : 18, btcOk = r => { const B = btc.get(r.at); return !!B && B.phase != null && B.phase !== 'ab'; };
+      const sig = [];
+      for (const c in reihe) { const R = reihe[c]; let letzte = -99;
+        for (let i = 0; i < R.length; i++) { const r = R[i]; if (r.phase !== 'ab' || !keys.some(k => RW_SITUATIONEN[k](r))) continue;
+          if (i - letzte <= 3) { letzte = i; continue; } letzte = i; sig.push(r); } }
+      const teil = (rows, t) => rows.filter(r => { const v = ret(r, hk); if (v == null) return false; return t === 'train' ? r._R[r._i + hk].at < cut : t === 'test' ? r.at >= cut : true; });
+      const quoteEv = rows => auswerten(rows, 'up', hk, false);
+      const quoteRoh = rows => { let n = 0, up = 0; for (const r of rows) { const v = ret(r, hk); if (v == null) continue; n++; if (v > 0) up++; } return n ? up / n : null; };
+      const abAlle = flach.filter(r => r.phase === 'ab'), abBtc = abAlle.filter(btcOk);
+      const mess = t => { const mit = quoteEv(teil(sig.filter(btcOk), t)), ohne = quoteEv(teil(sig, t));
+        const b = quoteRoh(teil(abAlle, t)), bB = quoteRoh(teil(abBtc, t));
+        return { n: mit.n, quote: pct(mit.q), ohneFilterN: ohne.n, ohneFilter: pct(ohne.q), normal: pct(b), normalBtc: pct(bB),
+          vor: mit.q == null || b == null ? null : pct(mit.q - b), vorBtc: mit.q == null || bB == null ? null : pct(mit.q - bB),
+          z: +(zWert(mit.q, b, mit.n, hk) || 0).toFixed(2), zBtc: +(zWert(mit.q, bB, mit.n, hk) || 0).toFixed(2) }; };
+      const L = mess('train'), T = mess('test'), A = mess('alle');
+      const pc = {}; for (const r of teil(sig.filter(btcOk), 'train')) { const c = (pc[r.coin] = pc[r.coin] || { n: 0, ok: 0 }); c.n++; if (ret(r, hk) > 0) c.ok++; }
+      const cm = Object.values(pc).filter(c => c.n >= 10), cOk = cm.filter(c => L.normal != null && 100 * c.ok / c.n - L.normal >= 2).length;
+      const lernOk = L.vor >= 8 && L.z >= 3.3 && cOk >= Math.max(3, Math.ceil(cm.length * 0.5)), testOk = T.n >= 15 && T.vor >= 3 && T.z >= 2;
+      buendel = { keys, hk, horizont: iv === '1d' ? '7d' : '3d', lernen: { ...L, coins: cOk, coinsMitDaten: cm.length }, test: T, alle: A,
+        status: lernOk && testOk ? 'bestanden' : lernOk ? 'test-durchgefallen' : 'lernen-durchgefallen',
+        // bringt das Signal etwas ueber die BTC-Lage hinaus? (auf neuen Daten)
+        mehrAlsBtc: T.vorBtc != null && T.vorBtc >= 3 && T.zBtc >= 2 };
+    } }
   const bestanden = ergebnis.filter(x => x.status === 'bestanden');
   const out = { ebene: iv, at: Date.now(), tabelleVom: S.at, testAb: cut, getestet, zufallErwartet: +(getestet * 0.023).toFixed(1),
     bestanden: bestanden.map(x => ({ phase: x.phase, key: x.key, dir: x.dir, hk: x.hk, horizont: x.horizont, filter: x.f, quote: x.quote, normal: x.normal, testVor: x.testVor, testZ: x.testZ })),
     knapp: ergebnis.filter(x => x.status === 'test-durchgefallen').sort((a, b) => (b.testVor ?? -99) - (a.testVor ?? -99)).slice(0, 12)
       .map(x => ({ phase: x.phase, key: x.key, dir: x.dir, horizont: x.horizont, filter: x.f, lernVor: x.lernVor, testVor: x.testVor, testN: x.testN })),
-    tabelle };
+    tabelle, buendel };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('gegen:' + iv, JSON.stringify(out)).run();
   return out;
 }
