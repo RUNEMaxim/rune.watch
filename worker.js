@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1400'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -6929,6 +6929,8 @@ async function kiText(env, { system, nachrichten, maxTokens = 600 }) {
 // statt aus einer Momentaufnahme zu raten. Nur lesende Abrufe, hoechstens 5 Runden.
 const KI_WERKZEUGE = [
   { name: 'netzwerk_und_churn', description: 'Aktueller THORChain-Netzwerkstatus: Blockhoehe, naechster Churn (Hoehe, geschaetzte Zeit), Zahl aktiver Nodes, Bonding-APY, Gesamt-Bond, wichtige Mimir-Werte (CHURNINTERVAL, BONDYIELDENABLED usw.).', input_schema: { type: 'object', properties: {} } },
+  { name: 'seite_lesen', description: 'Liest eine Webseite aus vertrauenswuerdigen THORChain-Quellen als Text: thorchain.org (inkl. blog., dev., docs., devops.), boone.tools, thorchain.net, runescan.io, vanaheimex.com, rujira.network, defillama.com, x.com-Links gehen nicht. Gut fuer Doku, Blogposts, Berichte, POL-/Treasury-Seiten.', input_schema: { type: 'object', properties: { url: { type: 'string', description: 'volle https-URL' } }, required: ['url'] } },
+  { name: 'thorchain_updates', description: 'Netzwerk-Upgrades und Betriebsstatus: aktuelle und naechste THORNode-Version, Versionsverteilung der aktiven Nodes, Upgrade-Stufe und offene Aufgaben laut devops.thorchain.org, letzte Live-Updates. Fuer Fragen nach "Update", "Upgrade", "neue Version", "Hardfork".', input_schema: { type: 'object', properties: {} } },
   { name: 'churn_verlauf', description: 'Die letzten Churns mit Datum (UTC) und Blockhoehe sowie Abstand in Tagen.', input_schema: { type: 'object', properties: { anzahl: { type: 'integer', description: '1-20, Standard 8' } } } },
   { name: 'node_info', description: 'Live-Daten einer Node: Status, Bond, Slash-Punkte, aktueller Reward, Jail, Austritt angefragt, Betreiber-Gebuehr, Version, Bond-Provider-Anteile. Node-Adressen stehen im Kontext unter nodeAdressen.', input_schema: { type: 'object', properties: { adresse: { type: 'string', description: 'volle thor1... Node-Adresse' } }, required: ['adresse'] } },
   { name: 'rune_kurs_und_volumen', description: 'RUNE-Kurs jetzt und RUNE-Kurs, Swap-Volumen (USD) und Swap-Anzahl der letzten Tage.', input_schema: { type: 'object', properties: { tage: { type: 'integer', description: '1-14, Standard 7' } } } },
@@ -6937,6 +6939,8 @@ const KI_WERKZEUGE = [
   { name: 'bot_signale', description: 'Gelernte Marktlagen des rune.watch-Bots (4H/Tag), Signale der letzten 7 Tage und die Live-Trefferquote.', input_schema: { type: 'object', properties: {} } },
   { name: 'cross_chain_vergleich', description: 'Volumen-Vergleich THORChain, NEAR Intents, Chainflip, Maya (1/7/30 Tage, Anteile).', input_schema: { type: 'object', properties: {} } },
 ];
+let kiChurnCache = null;
+const rwKiKurz = (x, n) => { try { const t = JSON.stringify(x); return t && t.length > n ? JSON.parse(JSON.stringify(x, (k, v) => typeof v === 'string' ? v.slice(0, 200) : v)) : x; } catch (e) { return null; } };
 const kiRune = x => { const n = Number(x); return Number.isFinite(n) ? Math.round(n / 1e8 * 100) / 100 : null; };
 async function kiWerkzeugAusfuehren(env, name, input) {
   input = input || {};
@@ -6947,19 +6951,54 @@ async function kiWerkzeugAusfuehren(env, name, input) {
       fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null),
       fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null)]);
     const hoehe = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : null;
-    const naechste = net ? Number(net.nextChurnHeight) : null;
+    let naechste = net && Number(net.nextChurnHeight) > 0 ? Number(net.nextChurnHeight) : null, letzteChurnHoehe = null;
+    // Rueckfall ohne Midgard: letzter Churn = Hoehe des aktiven Vaults, naechster = + CHURNINTERVAL
+    try { const v = await fetchFromBases(getThornodeBases(), '/thorchain/vaults/asgard'); letzteChurnHoehe = Array.isArray(v) ? Math.max(0, ...v.filter(x => x && x.status === 'ActiveVault').map(x => Number(x.block_height) || 0)) || null : null; } catch (e) {}
+    if (!naechste && letzteChurnHoehe && Number((mimir || {}).CHURNINTERVAL) > 0) naechste = letzteChurnHoehe + Number(mimir.CHURNINTERVAL);
     const M = mimir || {}, wahl = ['CHURNINTERVAL', 'BONDYIELDENABLED', 'MINIMUMBONDINRUNE', 'MAXBONDPROVIDERS', 'DESIREDVALIDATORSET', 'HALTCHURNING', 'NODEPAUSECHAINGLOBAL'];
     const bloeckeBis = hoehe && naechste ? naechste - hoehe : null;
-    return { blockhoehe: hoehe, naechsterChurnHoehe: naechste || null, bloeckeBisChurn: bloeckeBis,
+    return { blockhoehe: hoehe, letzterChurnHoehe: letzteChurnHoehe, naechsterChurnHoehe: naechste || null, bloeckeBisChurn: bloeckeBis,
+      churnAngehalten: Number((mimir || {}).HALTCHURNING) > 0 || (bloeckeBis != null && bloeckeBis < 0),
+      hinweis: (bloeckeBis != null && bloeckeBis < 0) ? 'Die geplante Churn-Hoehe ist ueberschritten: Der Churn ist faellig, haengt aber (z. B. HALTCHURNING oder laufende Vault-Migration).' : null,
       naechsterChurnGeschaetzt: bloeckeBis != null ? iso(Date.now() + bloeckeBis * 6000) + ' (Annahme ~6 s je Block)' : null,
       aktiveNodes: net ? Number(net.activeNodeCount) || null : null, bondingAPYProzent: net && net.bondingAPY != null ? Math.round(Number(net.bondingAPY) * 1000) / 10 : null,
       liquiditaetsAPYProzent: net && net.liquidityAPY != null ? Math.round(Number(net.liquidityAPY) * 1000) / 10 : null,
       aktiverBondRUNE: net && Array.isArray(net.activeBonds) ? Math.round(net.activeBonds.reduce((a, b) => a + Number(b) / 1e8, 0)) : null,
       mimir: Object.fromEntries(wahl.filter(k => M[k] != null).map(k => [k, k === 'MINIMUMBONDINRUNE' ? kiRune(M[k]) : M[k]])) };
   }
+  if (name === 'seite_lesen') {
+    let u; try { u = new URL(String(input.url || '')); } catch (e) { return { fehler: 'ungueltige URL' }; }
+    const erlaubt = ['thorchain.org', 'boone.tools', 'thorchain.net', 'runescan.io', 'vanaheimex.com', 'rujira.network', 'defillama.com', 'thorchain.com',
+      ...String(env.KI_SEITEN_EXTRA || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean)];
+    const host = u.hostname.toLowerCase();
+    if (u.protocol !== 'https:' || !erlaubt.some(d => host === d || host.endsWith('.' + d))) return { fehler: 'Seite nicht in der Liste vertrauenswuerdiger Quellen: ' + host };
+    const r = await fetch(u.toString(), { headers: { 'User-Agent': 'rune.watch-assistant', Accept: 'text/html,application/json,text/plain' }, signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return { fehler: 'HTTP ' + r.status };
+    const typ = r.headers.get('content-type') || ''; let t = await r.text();
+    if (/json/.test(typ)) return { url: u.toString(), json: t.slice(0, 7000) };
+    const titel = (t.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+    t = t.replace(/<(script|style|noscript|svg|nav|footer)[\s\S]*?<\/\1>/gi, ' ').replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, '\n').replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+    return { url: u.toString(), titel: titel.trim().slice(0, 200), text: t.slice(0, 7000), gekuerzt: t.length > 7000 };
+  }
+  if (name === 'thorchain_updates') {
+    const [ops, ver, nodes] = await Promise.all([
+      handleOps(null, env).then(r => r.json()).catch(() => null),
+      fetchFromBases(getThornodeBases(), '/thorchain/version').catch(() => null),
+      fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null)]);
+    const vert = {}; for (const n of (Array.isArray(nodes) ? nodes : [])) if (n && n.status === 'Active') vert[n.version] = (vert[n.version] || 0) + 1;
+    return { versionAktuell: ver && ver.current || null, versionNaechste: ver && ver.next || null, naechsteSeitHoehe: ver && ver.next_since_height || null,
+      aktiveNodesJeVersion: vert, upgrade: ops ? rwKiKurz(ops.upgrade, 1500) : null, offeneAufgaben: ops ? rwKiKurz(ops.aufgaben, 1500) : null,
+      liveUpdates: ops && Array.isArray(ops.feed) ? ops.feed.slice(0, 6).map(x => ({ titel: String(x.title || x.titel || '').slice(0, 140), datum: x.date_published || x.date || x.datum || null, text: String(x.content_text || x.summary || '').slice(0, 300) })) : [],
+      quelle: 'devops.thorchain.org + THORNode' };
+  }
   if (name === 'churn_verlauf') {
     const n = Math.max(1, Math.min(20, Number(input.anzahl) || 8));
-    const c = await fetchFromBases(getMidgardBases(), '/churns');
+    let c = kiChurnCache && Date.now() - kiChurnCache.at < 10 * 60e3 ? kiChurnCache.daten : null;
+    for (let v = 0; !c && v < 3; v++) { try { c = await fetchFromBases(getMidgardBases(), '/churns'); } catch (e) { if (v < 2) await new Promise(r => setTimeout(r, 800 * (v + 1))); } }
+    if (!c) return { fehler: 'Churn-Verlauf gerade nicht abrufbar (Midgard ausgelastet)' };
+    kiChurnCache = { at: Date.now(), daten: c };
     const liste = (Array.isArray(c) ? c : []).slice(0, n + 1).map(x => ({ ms: Number(String(x.date).slice(0, 13)), hoehe: Number(x.height) }));
     return liste.slice(0, n).map((x, i) => ({ datum: iso(x.ms), hoehe: x.hoehe, abstandTage: liste[i + 1] ? Math.round((x.ms - liste[i + 1].ms) / 864e5 * 100) / 100 : null }));
   }
@@ -7008,6 +7047,7 @@ async function kiWerkzeugAusfuehren(env, name, input) {
   }
   return { fehler: 'unbekanntes Werkzeug' };
 }
+let kiWebsucheAus = false;
 async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, maxRunden = 5 }) {
   if (!env.ANTHROPIC_API_KEY) throw new Error('NO_KEY');
   const verlauf = nachrichten.slice(); const genutzt = [];
@@ -7015,11 +7055,17 @@ async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, max
     const letzte = runde === maxRunden - 1;
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: modell || env.KI_MODELL_FRAGE || env.KI_MODELL || KI_MODELL_STD, max_tokens: maxTokens, system, messages: verlauf, ...(letzte ? {} : { tools: KI_WERKZEUGE }) }),
-      signal: AbortSignal.timeout(45000) });
+      body: JSON.stringify({ model: modell || env.KI_MODELL_FRAGE || env.KI_MODELL || KI_MODELL_STD, max_tokens: maxTokens, system, messages: verlauf,
+        ...(letzte ? {} : { tools: kiWebsucheAus ? KI_WERKZEUGE : [...KI_WERKZEUGE, { type: 'web_search_20250305', name: 'web_search', max_uses: 3 }] }) }),
+      signal: AbortSignal.timeout(60000) });
     const j = await r.json().catch(() => null);
+    // Websuche in der Organisation nicht freigeschaltet o. ae.: einmal ohne sie wiederholen
+    if (!r.ok && r.status === 400 && !kiWebsucheAus && /web_search|server tool|tool/i.test(String(j && j.error && j.error.message))) { kiWebsucheAus = true; runde--; continue; }
     if (!r.ok) throw new Error('KI_HTTP_' + r.status + (j && j.error && j.error.message ? ': ' + String(j.error.message).slice(0, 160) : ''));
     const inhalt = (j && j.content) || [];
+    for (const c of inhalt) if (c.type === 'server_tool_use') genutzt.push(c.name);
+    // Lange Websuche: Server pausiert den Zug -- Inhalt zuruecksenden und weitermachen
+    if (j.stop_reason === 'pause_turn') { verlauf.push({ role: 'assistant', content: inhalt }); continue; }
     const aufrufe = inhalt.filter(c => c.type === 'tool_use');
     if (!aufrufe.length || j.stop_reason !== 'tool_use') {
       const text = inhalt.filter(c => c.type === 'text').map(c => c.text).join('').trim();
@@ -7093,8 +7139,10 @@ async function handleKi(request, env, url) {
     const nodeAdr = (Array.isArray(body.nodeAdressen) ? body.nodeAdressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => /^thor1[0-9a-z]{38}$/.test(a)).slice(0, 10);
     nachrichten.push({ role: 'user', content: `JETZT (UTC): ${new Date().toISOString().slice(0, 16).replace('T', ' ')}\nNODE-ADRESSEN DES NUTZERS (fuer node_info): ${JSON.stringify(nodeAdr)}\nKONTEXT (was rune.watch gerade fuer diesen Nutzer anzeigt, JSON; Adressen gekuerzt):\n${kurz(body.kontext, 9000)}\n\nFRAGE: ${frage}` });
     const system = `Du bist "Frag rune.watch", der Assistent im THORChain-Dashboard rune.watch. Du erklärst dem Nutzer seine eigenen Zahlen, das Netzwerk und die Begriffe der App. ${KI_GRUNDREGELN(de)}
-Arbeitsweise: Für alles Aktuelle (nächster/letzter Churn, Node-Status, Slash-Punkte, Kurs, Volumen, Pools, POL, Bot-Signale) rufe ZUERST das passende Werkzeug auf und antworte mit diesen Live-Werten; schätze nie aus dem Gedächtnis. Der KONTEXT enthält die persönlichen Zahlen aus der App (Bond, eigene Rewards, APY je Churn). Widersprechen sich Kontext und Werkzeug, gilt das Werkzeug und du sagst es. Zeitangaben immer mit Datum und "UTC" oder relativ zu JETZT. Rechne nur mit gelieferten Zahlen und nenne bei Schätzungen die Annahme.
-Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards werden bei jedem Churn gutgeschrieben; ihre Höhe hängt von der Churn-Dauer, der Gesamt-Systemeinnahme, Slash-Punkten der Node und der Betreiber-Gebühr ab. Mehr Slash-Punkte im Vergleich zu anderen Nodes = weniger Reward. Eine Node, die nicht aktiv ist (Standby, Ready, Disabled), verdient keine Bond-Rewards. Ein längerer Churn ergibt einen größeren Reward, ein kürzerer einen kleineren. Höchstens etwa 130 Wörter. ${KI_GLOSSAR}`;
+Wissen: Du sollst JEDE Frage zu THORChain beantworten können (News, Upgrades, ADRs, Mimir-Abstimmungen, TCY, RUNEPool, Rujira, Secured Assets, Treasury, Ökosystem). Nutze dafür: die Live-Werkzeuge für Zahlen; seite_lesen für bekannte Seiten (z. B. https://thorchain.org, https://blog.thorchain.org, https://dev.thorchain.org, https://devops.thorchain.org, https://boone.tools); web_search für News und alles andere. Bevorzuge offizielle Quellen (thorchain.org, Blog, Dev-Doku, devops) und boone.tools. Wenn du Web-Inhalte nutzt, nenne am Ende kurz die Quelle (z. B. "Quelle: blog.thorchain.org, 12.11.2026"). Ältere Artikel als aktuell darzustellen ist ein Fehler: prüfe das Datum.
+Begriffe: "Update"/"Upgrade"/"neue Version" meint ein Netzwerk-Upgrade (Werkzeug thorchain_updates), NICHT den Churn. Ist eine Frage mehrdeutig, beantworte die naheliegendste Lesart und nenne die andere in einem Halbsatz.
+Arbeitsweise: Für alles Aktuelle (Updates, nächster/letzter Churn, Node-Status, Slash-Punkte, Kurs, Volumen, Pools, POL, Bot-Signale) rufe ZUERST das passende Werkzeug auf und antworte mit diesen Live-Werten; schätze nie aus dem Gedächtnis. Der KONTEXT enthält die persönlichen Zahlen aus der App (Bond, eigene Rewards, APY je Churn). Widersprechen sich Kontext und Werkzeug, gilt das Werkzeug und du sagst es. Zeitangaben immer mit Datum und "UTC" oder relativ zu JETZT. Rechne nur mit gelieferten Zahlen und nenne bei Schätzungen die Annahme.
+Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards werden bei jedem Churn gutgeschrieben; ihre Höhe hängt von der Churn-Dauer, der Gesamt-Systemeinnahme, Slash-Punkten der Node und der Betreiber-Gebühr ab. Mehr Slash-Punkte im Vergleich zu anderen Nodes = weniger Reward. Eine Node, die nicht aktiv ist (Standby, Ready, Disabled), verdient keine Bond-Rewards. Ein längerer Churn ergibt einen größeren Reward, ein kürzerer einen kleineren. Antworte knapp: höchstens etwa 90 Wörter (plus Quelle), die Antwort auf die Frage im ersten Satz, keine Wiederholung der Frage, keine Aufforderung es später nochmal zu versuchen. ${KI_GLOSSAR}`;
     const erg = await kiAgent(env, { system, nachrichten, maxTokens: 1200, modell: env.KI_MODELL_FRAGE || 'claude-sonnet-5-5' });
     return json({ antwort: erg.text, werkzeuge: erg.genutzt }, env);
   }
@@ -7157,7 +7205,7 @@ async function kiKaufsignale(env) {
       }
       texte[de ? 'de' : 'en'] = t || vorlage(de);
     }
-    await pushAnThema(env, 'kauf', de => ({ titel: de ? `Kaufsignal ${r0.ebene.toUpperCase()}` : `Buy signal ${r0.ebene.toUpperCase()}`, text: de ? texte.de : texte.en, tag: 'rw-kauf-' + r0.ebene + '-' + r0.at, url: '/' }));
+    await pushAnThema(env, 'kauf', (de, p, row) => (!kiFuerAlle(env) && !row.besitzer) ? null : ({ titel: de ? `Kaufsignal ${r0.ebene.toUpperCase()}` : `Buy signal ${r0.ebene.toUpperCase()}`, text: de ? texte.de : texte.en, tag: 'rw-kauf-' + r0.ebene + '-' + r0.at, url: '/' }));
   }
   await pushStateSet(env, 'ki_kauf_bis', maxAt);
 }
@@ -7217,7 +7265,7 @@ async function kiTagesbericht(env) {
   }
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:bericht', JSON.stringify(bericht)).run();
   const kopf = t => String(t || '').split('\n')[0].replace(/^[•\s]+/, '').slice(0, 120);
-  await pushAnThema(env, 'bericht', de => ({ titel: de ? 'rune.watch · Tagesbericht' : 'rune.watch · Daily report', text: kopf(de ? bericht.de : bericht.en), tag: 'rw-bericht-' + tag, url: '/#bericht' }));
+  await pushAnThema(env, 'bericht', (de, p, row) => (!kiFuerAlle(env) && !row.besitzer) ? null : ({ titel: de ? 'rune.watch · Tagesbericht' : 'rune.watch · Daily report', text: kopf(de ? bericht.de : bericht.en), tag: 'rw-bericht-' + tag, url: '/#bericht' }));
 }
 
 // WEB PUSH (Etappe 1): Meldungen auch bei geschlossener App.
