@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2045'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7290,6 +7290,11 @@ Stil: Schlagzeilen wie bei einem guten Krypto-News-Ticker: konkret, aktiv, mit Z
 Links: Jede Meldung braucht einen Link zur ORIGINALquelle (GitLab-Release oder -MR, Blogpost, X-Post, devops-Eintrag). Ohne passenden Link nur bei Live-Daten (Mimir-Abstimmung, Node-Versionen) – dann quelle = 'THORNode live'.
 Genauigkeit: Nur Fakten aus Quellen bzw. Websuche, nichts erfinden, keine Kursprognosen. KEINE Meldungen über den aktuellen Versionsstand der Nodes, angehaltene Chains, Churn-Halt oder Mimir-Stimmenstände – diese Live-Meldungen erzeugt rune.watch selbst aus den Netzwerkdaten. Neue Releases (was ist drin) und Ankündigungen dazu sind erlaubt. Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum = Datum des Ereignisses. Neueste zuerst.
 Ergebnis: Rufe am Ende meldungen_speichern auf (8 bis 16 Meldungen). Kein Fließtext, keine Zwischenberichte.`;
+// PRUEFRUNDE: zweiter Durchgang, der den Entwurf wie ein Redakteur gegencheckt
+const kiNewsPruefSystem = heute => `Du bist der Faktenprüfer des News-Tickers von rune.watch (THORChain). Heute ist ${heute}. Du bekommst einen ENTWURF mit Meldungen.
+Prüfe JEDE Meldung: Stimmt die Aussage? Ist sie aktuell (nicht älter als 7 Tage, außer laufende Upgrades/Abstimmungen)? Führt der Link wirklich zu dieser Nachricht? Nutze dafür die Werkzeuge: seite_lesen für den Link bzw. die Quelle, thorchain_updates / netzwerk_und_churn / pools / pol für Live-Fakten, web_search nur wenn nötig.
+Dann: falsche oder unbestätigte Meldungen STREICHEN; ungenaue Schlagzeilen korrigieren (max. 70 Zeichen, konkret); falsche Links durch den richtigen ersetzen oder die Meldung streichen; Dubletten zusammenführen. Nichts Neues erfinden. Keine Meldungen über aktuellen Versionsstand der Nodes, Halts, Churn-Halt oder Mimir-Stimmenstände (die erzeugt rune.watch selbst).
+Ergebnis: Rufe meldungen_speichern mit der geprüften Liste auf (lieber 6 sichere als 12 zweifelhafte). Kein Fließtext.`;
 async function kiNewsJobLesen(env) { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news_job'").first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; } }
 async function kiNewsJobSchreiben(env, job) { await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify(job)).run(); }
 async function kiNewsLauf(env, erzwingen = false) {
@@ -7320,23 +7325,42 @@ async function kiNewsLauf(env, erzwingen = false) {
     await kiNewsJobSchreiben(env, job); await schritt('KI schreibt (Websuche)');
     return { schritt: 'quellen' };
   }
-  // Phase KI: genau EINE Anfrage je Lauf
+  // Phase KI (Entwurf) bzw. PRUEFEN: genau EINE Anfrage je Lauf. WIE DER CHAT-AGENT (gewuenscht: "News genauso genau
+  // wie der KI-Agent"): voller Werkzeugkasten (Live-Daten, Seiten lesen, Websuche), danach eine Pruefrunde, die
+  // jede Schlagzeile gegen Quelle und Live-Stand prueft und Unbestaetigtes streicht.
+  const pruefen = job.phase === 'pruefen';
   job.runde = (job.runde || 0) + 1;
-  if (job.runde > 8) { await beenden(); throw new Error('NEWS_ZU_VIELE_RUNDEN'); }
+  const maxR = pruefen ? 6 : 8;
+  if (job.runde > maxR + 1) {
+    if (pruefen && Array.isArray(job.entwurf) && job.entwurf.length) { job.verlauf = null; job.runde = 99; } // Pruefung haengt: Entwurf nehmen
+    else { await beenden(); throw new Error('NEWS_ZU_VIELE_RUNDEN'); }
+  }
   await kiNewsJobSchreiben(env, job);
-  await schritt('KI schreibt (Schritt ' + job.runde + ')');
-  const letzte = job.runde >= 5;
-  const wz = letzte ? { tools: [KI_NEWS_ABSCHLUSS], tool_choice: { type: 'tool', name: KI_NEWS_ABSCHLUSS.name } }
-    : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: 4 }]), KI_WERKZEUGE.find(w => w.name === 'seite_lesen'), KI_NEWS_ABSCHLUSS] };
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({ model: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', max_tokens: 16000, system: kiNewsSystem(heute), messages: job.verlauf, ...wz }),
-    signal: AbortSignal.timeout(170000) });
-  const j = await r.json().catch(() => null);
-  if (!r.ok && r.status === 400 && !job.ohneSuche && /web_search|server tool/i.test(String(j && j.error && j.error.message))) { job.ohneSuche = true; job.runde--; await kiNewsJobSchreiben(env, job); return { schritt: 'ohne Websuche' }; }
-  if (!r.ok) { if (r.status >= 500 || r.status === 429) return { schritt: 'erneut versuchen ' + r.status }; await beenden(); throw new Error('KI_HTTP_' + r.status + (j && j.error && j.error.message ? ': ' + String(j.error.message).slice(0, 160) : '')); }
-  const inhalt = (j && j.content) || [];
-  const fertig = inhalt.find(c => c.type === 'tool_use' && c.name === KI_NEWS_ABSCHLUSS.name);
+  await schritt((pruefen ? 'KI prüft (Schritt ' : 'KI schreibt (Schritt ') + Math.min(job.runde, maxR) + ')');
+  let inhalt = [], j = null;
+  if (job.runde !== 99) {
+    const letzte = job.runde >= maxR;
+    const wz = letzte ? { tools: [KI_NEWS_ABSCHLUSS], tool_choice: { type: 'tool', name: KI_NEWS_ABSCHLUSS.name } }
+      : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 4 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', max_tokens: 16000, system: pruefen ? kiNewsPruefSystem(heute) : kiNewsSystem(heute), messages: job.verlauf, ...wz }),
+      signal: AbortSignal.timeout(170000) });
+    j = await r.json().catch(() => null);
+    if (!r.ok && r.status === 400 && !job.ohneSuche && /web_search|server tool/i.test(String(j && j.error && j.error.message))) { job.ohneSuche = true; job.runde--; await kiNewsJobSchreiben(env, job); return { schritt: 'ohne Websuche' }; }
+    if (!r.ok) { if (r.status >= 500 || r.status === 429) return { schritt: 'erneut versuchen ' + r.status }; await beenden(); throw new Error('KI_HTTP_' + r.status + (j && j.error && j.error.message ? ': ' + String(j.error.message).slice(0, 160) : '')); }
+    inhalt = (j && j.content) || [];
+  }
+  let fertig = inhalt.find(c => c.type === 'tool_use' && c.name === KI_NEWS_ABSCHLUSS.name);
+  if (job.runde === 99) fertig = { input: { meldungen: job.entwurf } };
+  // Entwurf fertig -> Pruefrunde starten
+  if (!pruefen && fertig && fertig.input && Array.isArray(fertig.input.meldungen) && fertig.input.meldungen.length) {
+    job.entwurf = fertig.input.meldungen.slice(0, 16);
+    job.phase = 'pruefen'; job.runde = 0;
+    job.verlauf = [{ role: 'user', content: 'ENTWURF (zu pruefen):\n' + JSON.stringify(job.entwurf) + '\n\nROHQUELLEN-KURZFASSUNG:\n' + JSON.stringify({ releases: job.releases, tags: (job.tags || []).slice(0, 6), live: job.live }).slice(0, 6000) }];
+    await kiNewsJobSchreiben(env, job); await schritt('KI prüft (Start)');
+    return { schritt: 'entwurf fertig, pruefung startet', n: job.entwurf.length };
+  }
   if (fertig && fertig.input && Array.isArray(fertig.input.meldungen) && fertig.input.meldungen.length) {
     const sauber = fertig.input.meldungen.filter(x => x && x.titelDe).slice(0, 16).map(x => ({
       kategorie: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'].includes(x.kategorie) ? x.kategorie : 'netzwerk', wichtig: !!x.wichtig,
