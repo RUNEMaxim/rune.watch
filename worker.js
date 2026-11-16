@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-2100'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-2130'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5951,7 +5951,7 @@ async function rwPlanLaeufe(env) {
       // Tabelle mit alter Zaehlweise (jeder Coin ein Fall) sofort neu lernen
       const S = await botSignale(env, iv).catch(() => null);
       const aS = await alter('signale' + iv);
-      if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte-hz2' && aS > 600e3)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
+      if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte-hz3' && aS > 600e3)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
     // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
@@ -9296,8 +9296,10 @@ async function botSignaleLernen(env, iv) {
   // NICHT BESTANDEN, aber mit Vorsprung im Backtest (gewuenscht: als graue Dreiecke zeigen) -- je Marktlage der staerkste Zeitraum
   const abgMap = new Map();
   for (const e of geprueft) { if (!e.grund || e.treffer <= e.basis) continue; const k = e.phase + ':' + e.key + ':' + e.dir; if (neuSet.has(k)) continue; if (!abgMap.has(k) || abgMap.get(k).z < e.z) abgMap.set(k, e); }
-  const abgelehnt = [...abgMap.values()].sort((a, b) => b.z - a.z).slice(0, 25).map(e => ({ phase: e.phase, key: e.key, dir: e.dir, horizont: e.horizont, hk: e.hk, treffer: e.treffer, basis: e.basis, z: e.z, grund: e.grund, gegenTrend: e.gegenTrend }));
-  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz2', horizont: iv === '1d' ? '7d' : '3d', zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, abgelehnt, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
+  const abgelehnt = [...abgMap.values()].sort((a, b) => b.z - a.z).slice(0, 30).map(e => ({ phase: e.phase, key: e.key, dir: e.dir, horizont: e.horizont, hk: e.hk, treffer: e.treffer, basis: e.basis, z: e.z, grund: e.grund, gegenTrend: e.gegenTrend,
+    // fuer die Bilanz beim Antippen im Chart
+    n: e.n, zeitpunkte: e.zeitpunkte, coins: e.coins, coinsMitDaten: e.coinsMitDaten, h1: e.h1, h2: e.h2 }));
+  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz3', horizont: iv === '1d' ? '7d' : '3d', zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, abgelehnt, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
   return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
 }
