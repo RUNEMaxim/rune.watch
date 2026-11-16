@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1530'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7107,6 +7107,16 @@ async function handleKi(request, env, url) {
     const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:bericht'").first().catch(() => null);
     return json(r ? JSON.parse(r.v) : { leer: true }, env);
   }
+  if (url.pathname === '/ki/news') {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
+    // Sofort neu erstellen (nur Betreiber): /ki/news?neu=1&key=STATISTIK_SCHLUESSEL
+    if (url.searchParams.get('neu') === '1' && env.STATS_ACCESS_KEY && url.searchParams.get('key') === env.STATS_ACCESS_KEY) {
+      await sicherePushTabellen(env);
+      try { await kiNewsLauf(env, true); } catch (e) { return json({ error: String(e && e.message || e) }, env, 500); }
+    }
+    const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
+    return json(r ? JSON.parse(r.v) : { leer: true }, env);
+  }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
     if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
@@ -7162,12 +7172,60 @@ Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards wer
   }
   return json({ error: 'NOT_FOUND' }, env, 404);
 }
+// KI-NEWS-KANAL (gewuenscht: "More umbauen -- ein News Channel mit allen aktuellen Themen, weil devops nicht
+// aktuell gehalten wird und GitLab nicht jeder versteht"). Alle 6 Stunden: Rohquellen sammeln (THORNode-Releases
+// und gemergte Aenderungen auf GitLab, THORChain-Blog, devops-Feed, offene Mimir-Abstimmungen, Version, Halts),
+// das Modell sortiert, fasst in Alltagssprache zusammen und darf zusaetzlich kurz im Web suchen. Ergebnis in D1.
+async function kiNewsQuellen(env) {
+  const q = {}; const tag = ms => { try { return new Date(ms).toISOString().slice(0, 10); } catch (e) { return null; } };
+  const gl = 'https://gitlab.com/api/v4/projects/thorchain%2Fthornode';
+  const holen = async (url, typ = 'json') => { const r = await fetch(url, { headers: { 'User-Agent': 'rune.watch-news' }, signal: AbortSignal.timeout(12000) }); if (!r.ok) throw new Error('HTTP ' + r.status); return typ === 'json' ? r.json() : r.text(); };
+  await Promise.all([
+    holen(gl + '/releases?per_page=4').then(a => { q.thornodeReleases = (a || []).map(x => ({ version: x.tag_name, name: x.name, datum: tag(x.released_at), link: x._links && x._links.self || null, notizen: String(x.description || '').slice(0, 1800) })); }).catch(e => { q.thornodeReleases = 'Fehler ' + e.message; }),
+    holen(gl + '/merge_requests?state=merged&order_by=updated_at&sort=desc&per_page=25&updated_after=' + new Date(Date.now() - 10 * 864e5).toISOString()).then(a => { q.gemergteAenderungen = (a || []).map(x => ({ titel: String(x.title || '').slice(0, 160), datum: tag(x.merged_at), labels: (x.labels || []).slice(0, 4), link: x.web_url })); }).catch(e => { q.gemergteAenderungen = 'Fehler ' + e.message; }),
+    holen('https://blog.thorchain.org/rss/', 'text').then(t => { q.blog = [...t.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 8).map(m => { const g = k => ((m[1].match(new RegExp('<' + k + '>([\\s\\S]*?)</' + k + '>')) || [])[1] || '').replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, ' ').trim();
+      return { titel: g('title').slice(0, 200), link: g('link'), datum: tag(Date.parse(g('pubDate'))), auszug: g('description').slice(0, 500) }; }); }).catch(e => { q.blog = 'Fehler ' + e.message; }),
+    handleOps(null, env).then(r => r.json()).then(o => { q.devops = { upgrade: o.upgrade || null, aufgaben: o.aufgaben || null, feed: (o.feed || []).slice(0, 6).map(x => ({ titel: String(x.title || '').slice(0, 160), datum: tag(Date.parse(x.date_published || x.date || '')), text: String(x.content_text || x.summary || '').slice(0, 300) })) }; }).catch(() => {}),
+    offeneAbstimmungen(env, null, false).then(a => { q.mimirAbstimmungen = a ? { aktiveNodes: a.aktiv, noetig: a.noetig, offen: (a.liste || []).slice(0, 8).map(x => ({ schluessel: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })) } : null; }).catch(() => {}),
+    fetchFromBases(getThornodeBases(), '/thorchain/version').then(v => { q.version = { aktuell: v && v.current, naechste: v && v.next }; }).catch(() => {}),
+    pushState(env, 'halts').then(h => { q.angehalten = h ? JSON.parse(h) : []; }).catch(() => {}),
+  ]);
+  return q;
+}
+async function kiNewsLauf(env, erzwingen = false) {
+  const zuletzt = Number(await pushState(env, 'ki_news_at')) || 0;
+  if (!erzwingen && Date.now() - zuletzt < 6 * 36e5) return null;
+  await pushStateSet(env, 'ki_news_at', Date.now());
+  if (!env.ANTHROPIC_API_KEY) return null;
+  const quellen = await kiNewsQuellen(env);
+  const altRoh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
+  const alt = altRoh ? JSON.parse(altRoh.v) : null;
+  const heute = new Date().toISOString().slice(0, 10);
+  const system = `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und höchstens zwei kurzen Websuchen nach aktuellen THORChain-Nachrichten erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
+Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
+Antworte AUSSCHLIESSLICH mit einem JSON-Array (ohne Text davor oder danach, ohne Markdown), höchstens 12 Einträge, neueste zuerst, Form:
+[{"kategorie":"upgrade|netzwerk|abstimmung|oekosystem|sicherheit|markt","wichtig":true|false,"datum":"YYYY-MM-DD","titelDe":"...","textDe":"2-3 Sätze","titelEn":"...","textEn":"2-3 sentences","quelle":"z. B. GitLab, THORChain-Blog, devops, X","link":"https://... oder null"}]`;
+  const nachrichten = [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }];
+  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 4000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 4 });
+  let liste = null;
+  try { const t = erg.text; liste = JSON.parse(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1)); } catch (e) { throw new Error('NEWS_JSON: ' + String(erg.text).slice(0, 120)); }
+  const sauber = (Array.isArray(liste) ? liste : []).filter(x => x && x.titelDe && x.textDe).slice(0, 12).map(x => ({
+    kategorie: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'].includes(x.kategorie) ? x.kategorie : 'netzwerk', wichtig: !!x.wichtig,
+    datum: /^\d{4}-\d{2}-\d{2}$/.test(String(x.datum)) ? x.datum : heute,
+    titelDe: String(x.titelDe).slice(0, 140), textDe: String(x.textDe).slice(0, 600), titelEn: String(x.titelEn || x.titelDe).slice(0, 140), textEn: String(x.textEn || x.textDe).slice(0, 600),
+    quelle: String(x.quelle || '').slice(0, 60), link: /^https:\/\//.test(String(x.link || '')) ? String(x.link).slice(0, 300) : null }));
+  if (!sauber.length) throw new Error('NEWS_LEER');
+  const daten = { at: Date.now(), eintraege: sauber, werkzeuge: erg.genutzt };
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(daten)).run();
+  return { n: sauber.length };
+}
 // Laeuft im Plan-Takt: neue Kaufsignale melden, einmal taeglich den Bericht erstellen.
 async function kiAgentLauf(env) {
   await sicherePushTabellen(env);
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
   try { await kiKaufsignale(env); } catch (e) { RW_DIAG.push('ki kauf: ' + (e && e.message || e)); }
   try { await kiTagesbericht(env); } catch (e) { RW_DIAG.push('ki bericht: ' + (e && e.message || e)); }
+  try { await kiNewsLauf(env); } catch (e) { RW_DIAG.push('ki news: ' + (e && e.message || e)); }
 }
 async function kiKaufsignale(env) {
   const bisRoh = await pushState(env, 'ki_kauf_bis');
