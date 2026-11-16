@@ -6918,7 +6918,10 @@ async function kiText(env, { system, nachrichten, maxTokens = 600 }) {
   });
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error('KI_HTTP_' + r.status + (j && j.error && j.error.message ? ': ' + String(j.error.message).slice(0, 160) : ''));
-  return ((j && j.content) || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
+  const text = ((j && j.content) || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
+  // LEERE ANTWORT SICHTBAR MACHEN (gemeldet: Chat zeigte nur "–"): Grund mitschicken statt still leer
+  if (!text) throw new Error('KI_LEER (stop: ' + (j && j.stop_reason) + ', Bloecke: ' + (((j && j.content) || []).map(c => c.type).join(',') || 'keine') + ', Modell: ' + (j && j.model) + ')');
+  return text;
 }
 // Tageslimit je Anschluss (IP nur als Tages-Hash gespeichert)
 async function kiLimit(env, request, art, max) {
