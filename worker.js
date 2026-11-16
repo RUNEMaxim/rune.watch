@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1300'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1320'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -6938,8 +6938,8 @@ async function kiLimit(env, request, art, max) {
 }
 const kiSprache = de => de ? 'Deutsch' : 'English';
 const KI_GRUNDREGELN = de => (de
-  ? 'Regeln: Antworte auf Deutsch, kurz und klar, ohne Markdown-Überschriften. Nutze NUR die gelieferten Daten; erfinde keine Zahlen, Kurse oder Ereignisse. Fehlt etwas, sag das offen. Gib keine Kauf- oder Verkaufsempfehlung und keine Finanzberatung; erkläre Zusammenhänge und Wahrscheinlichkeiten nüchtern (keine Garantie). Fachbegriffe kurz erklären.'
-  : 'Rules: Answer in English, short and clear, no markdown headings. Use ONLY the data provided; never invent numbers, prices or events. If something is missing, say so. No buy/sell recommendation, no financial advice; explain relationships and probabilities soberly (no guarantee). Briefly explain jargon.');
+  ? 'Regeln: Antworte auf Deutsch, kurz und klar, als reiner Text ohne Markdown (kein **, keine #). Beziehe dich auf jetztUTC als aktuelles Datum, falls vorhanden. Nutze NUR die gelieferten Daten; erfinde keine Zahlen, Kurse oder Ereignisse. Fehlt etwas, sag das offen. Gib keine Kauf- oder Verkaufsempfehlung und keine Finanzberatung; erkläre Zusammenhänge und Wahrscheinlichkeiten nüchtern (keine Garantie). Fachbegriffe kurz erklären.'
+  : 'Rules: Answer in English, short and clear, plain text without markdown (no **, no #). Treat jetztUTC as the current date if present. Use ONLY the data provided; never invent numbers, prices or events. If something is missing, say so. No buy/sell recommendation, no financial advice; explain relationships and probabilities soberly (no guarantee). Briefly explain jargon.');
 const KI_GLOSSAR = 'Glossar rune.watch/THORChain: Bond = gesperrte RUNE eines Bond-Providers bei einer Node; Churn = Wechsel der aktiven Nodes (etwa alle 3 Tage), dabei werden Bond-Rewards gutgeschrieben; Slash = Abzug bei Fehlverhalten der Node; APY = Jahresrendite hochgerechnet; Bond Yield = Teil der Rewards auszahlen statt im Bond lassen (Memo BONDYIELD); POL = Protocol Owned Liquidity, RUNE die das Protokoll selbst in Pools einzahlt; Impermanent Loss = Wertverlust durch Kursverschiebung zwischen den beiden Pool-Seiten; TCY = Token, dessen Staker taeglich RUNE erhalten; Bot-Signal = Marktlage, die im Backtest ueber 13 Coins verlaesslich war (Trefferquote vs. Basisrate der Marktphase); Live-Quote = wie oft die Signale seit Start wirklich stimmten (je Kerze ein Ereignis).';
 async function handleKi(request, env, url) {
   if (url.pathname === '/ki/status') return json({ an: !!env.ANTHROPIC_API_KEY, modell: env.KI_MODELL || KI_MODELL_STD }, env);
@@ -6966,13 +6966,13 @@ async function handleKi(request, env, url) {
     if (nachrichten.length && nachrichten[nachrichten.length - 1].role === 'user') nachrichten.pop();
     nachrichten.push({ role: 'user', content: `KONTEXT (was rune.watch gerade für diesen Nutzer anzeigt, JSON):\n${kurz(body.kontext, 9000)}\n\nFRAGE: ${frage}` });
     const system = `Du bist "Frag rune.watch", der Assistent im THORChain-Dashboard rune.watch. Du erklärst dem Nutzer seine eigenen Zahlen und die Begriffe der App. ${KI_GRUNDREGELN(de)} Höchstens etwa 120 Wörter. ${KI_GLOSSAR}`;
-    const antwort = await kiText(env, { system, nachrichten, maxTokens: 500 });
+    const antwort = await kiText(env, { system, nachrichten, maxTokens: 1200 });
     return json({ antwort }, env);
   }
   if (url.pathname === '/ki/chart') {
     if (!(await kiLimit(env, request, 'chart', 30))) return json({ error: 'LIMIT' }, env, 429);
     const system = `Du beschreibst eine automatische Chartanalyse von rune.watch für Laien. ${KI_GRUNDREGELN(de)} Schreibe 4 bis 6 kurze Sätze in dieser Reihenfolge: Trend und Marktphase; wo die Elliott-Zählung steht und was das bedeutet; Muster/Divergenzen falls vorhanden; wichtige Marken (Unterstützung, Widerstand, Ziel, Ungültigkeit); Bot-Signal falls vorhanden. Wahrscheinlichkeiten nur nennen, wenn sie in den Daten stehen, mit Vergleichswert (z. B. "62 % statt 50 % normal"). Schluss: ein Satz, woran man erkennt, dass das Szenario nicht aufgeht.`;
-    const text = await kiText(env, { system, nachrichten: [{ role: 'user', content: `ANALYSE (JSON):\n${kurz(body.analyse, 9000)}` }], maxTokens: 600 });
+    const text = await kiText(env, { system, nachrichten: [{ role: 'user', content: `ANALYSE (JSON):\n${kurz(body.analyse, 9000)}` }], maxTokens: 1200 });
     return json({ text }, env);
   }
   return json({ error: 'NOT_FOUND' }, env, 404);
