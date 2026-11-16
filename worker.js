@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1550'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1610'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2778,6 +2778,7 @@ async function handleStats(request, env, ctx) {
     botStand: await botStand(env),
     laufLive: await rwLaufInfo(env, 'live'),
     laufBot: await rwLaufInfo(env, 'bot'),
+    laufKi: await rwLaufInfo(env, 'ki'),
     botModell4h: await botModell(env, '4h'),
     botModell1d: await botModell(env, '1d'),
     botLernlauf4h: await rwLaufInfo(env, 'lernen4h'),
@@ -3141,8 +3142,8 @@ async function handleStats(request, env, ctx) {
           // Laufstatus
           { const zeile = (n, L) => !L ? `${n}: not run yet` :
               `${n}: last run ${new Date(L.at).toISOString().slice(11, 16)} UTC \u00b7 ${L.ms} ms` + (L.fehler ? ` \u00b7 ERROR ${String(L.fehler).slice(0, 120)}` : '') + (L.einzelFehler && L.einzelFehler.length ? ` \u00b7 ${L.einzelFehler.length} issues: ${String(L.einzelFehler[0]).slice(0, 120)}` : ' \u00b7 ok');
-            const nProb = [stats.laufLive, stats.laufBot].reduce((a, L) => a + (!L ? 0 : (L.fehler ? 1 : 0) + (L.einzelFehler ? L.einzelFehler.length : 0)), 0);
-            h += karte('bot2', 'Run status', nProb ? nProb + (nProb === 1 ? ' issue' : ' issues') : 'OK', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot), nProb ? ROT : GRUEN); }
+            const nProb = [stats.laufLive, stats.laufBot, stats.laufKi].reduce((a, L) => a + (!L ? 0 : (L.fehler ? 1 : 0) + (L.einzelFehler ? L.einzelFehler.length : 0)), 0);
+            h += karte('bot2', 'Run status', nProb ? nProb + (nProb === 1 ? ' issue' : ' issues') : 'OK', null, zeile('Live', stats.laufLive) + '<br>' + zeile('Bot', stats.laufBot) + '<br>' + zeile('KI', stats.laufKi), nProb ? ROT : GRUEN); }
           // Live-Trefferquote der Bot-Signale
           { const LV = stats.botSigLive || {};
             const wert = LV.ausgewertet ? Math.round(100 * LV.quote) + ' %' : LV.offen ? LV.offen + ' open' : null;
@@ -5887,6 +5888,9 @@ export default {
       // LIVE-MITSCHREIBER + LERNENDER BOT in eigenen Aufrufen (gemeldet: "keine Ergebnisse"): vorher liefen sie
       // vorn im grossen Durchgang und teilten sich dessen Budget. Jetzt: Minute 30 = Live-Signale,
       // Minuten 33/38/43/48 = Bot (Historie also 4 Paare pro Stunde, danach laufend).
+      // KI zuerst und unabhaengig vom Bot (gemeldet: News blieben leer -- der KI-Teil lief erst nach dem
+      // rechenintensiven Bot-Sammler und kam nie dran, wenn der Lauf vorher abbrach)
+      ctx.waitUntil(kiPlan(env));
       ctx.waitUntil(rwPlanLaeufe(env));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
@@ -5903,6 +5907,7 @@ export default {
       })());
       return;
     }
+    ctx.waitUntil(kiPlan(env));
     ctx.waitUntil(runRefreshCycle(env));
     // FIX (gemeldet: "Run status" blieb stehen): falls kein Minuten-Takt eingerichtet ist, laufen die Bot-Teile
     // hier mit -- sie pruefen selbst, ob sie faellig sind.
@@ -5910,6 +5915,17 @@ export default {
   },
 };
 // Faelligkeit statt fester Minuten: funktioniert mit jedem Cron-Takt (minuetlich oder stuendlich).
+let kiPlanSeit = 0;
+async function kiPlan(env) {
+  // eigene Sperre mit Ablauf (haengt ein Lauf, ist sie nach 10 Minuten wieder frei)
+  if (kiPlanSeit && Date.now() - kiPlanSeit < 10 * 60e3) return;
+  kiPlanSeit = Date.now();
+  try {
+    const L = await rwLaufInfo(env, 'ki');
+    if (!L || Date.now() - L.at > 5 * 60e3) await rwDiagLauf(env, 'ki', () => kiAgentLauf(env));
+  } catch (e) { console.warn('[ki] plan', e && e.message); }
+  finally { kiPlanSeit = 0; }
+}
 let rwPlanLaeuftGerade = false;
 async function rwPlanLaeufe(env) {
   if (rwPlanLaeuftGerade) return; rwPlanLaeuftGerade = true;
@@ -5917,8 +5933,6 @@ async function rwPlanLaeufe(env) {
     const alter = async n => { const L = await rwLaufInfo(env, n); return L ? Date.now() - L.at : Infinity; };
     if (await alter('live') > 55 * 60e3) await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
     if (await alter('bot') > 14 * 60e3) await rwDiagLauf(env, 'bot', () => botSammler(env));
-    // KI-Agent: neue Kaufsignale melden (direkt nach dem Sammeln), Tagesbericht einmal am Tag
-    if (await alter('ki') > 5 * 60e3) await rwDiagLauf(env, 'ki', () => kiAgentLauf(env));
     for (const iv of ['4h', '1d']) {
       const M = await botModell(env, iv), a = await alter('lernen' + iv);
       // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
@@ -7122,7 +7136,9 @@ async function handleKi(request, env, url) {
     await sicherePushTabellen(env);
     const fehler = await pushState(env, 'ki_news_fehler').catch(() => null);
     const zuletzt = Number(await pushState(env, 'ki_news_at').catch(() => 0)) || null;
-    return json(r ? { ...JSON.parse(r.v), letzterFehler: fehler || null } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY }, env);
+    const lauf = await rwLaufInfo(env, 'ki');
+    const laufKurz = lauf ? { zeit: new Date(lauf.at).toISOString().slice(0, 16) + ' UTC', ms: lauf.ms, fehler: lauf.fehler, einzelFehler: lauf.einzelFehler } : 'noch kein KI-Lauf';
+    return json(r ? { ...JSON.parse(r.v), letzterFehler: fehler || null, kiLauf: laufKurz } : { leer: true, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
@@ -7210,12 +7226,26 @@ async function kiNewsLauf(env, erzwingen = false) {
   const heute = new Date().toISOString().slice(0, 10);
   const system = `Du bist die Redaktion des News-Kanals von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und höchstens zwei kurzen Websuchen nach aktuellen THORChain-Nachrichten erstellst du die wichtigsten aktuellen Meldungen der letzten 14 Tage.
 Regeln: Nur Fakten aus den Quellen bzw. der Websuche, nichts erfinden, keine Kursprognosen, keine Anlageberatung. Technisches (GitLab-Änderungen, Mimir-Schlüssel, Releases) in Alltagssprache erklären: was ändert sich, wen betrifft es (Bonder, LPs, Swapper, Node-Betreiber). Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum jeder Meldung = Datum des Ereignisses. Nichts Älteres als 14 Tage, außer laufenden Abstimmungen/Upgrades.
-Antworte AUSSCHLIESSLICH mit einem JSON-Array (ohne Text davor oder danach, ohne Markdown), höchstens 12 Einträge, neueste zuerst, Form:
-[{"kategorie":"upgrade|netzwerk|abstimmung|oekosystem|sicherheit|markt","wichtig":true|false,"datum":"YYYY-MM-DD","titelDe":"...","textDe":"2-3 Sätze","titelEn":"...","textEn":"2-3 sentences","quelle":"z. B. GitLab, THORChain-Blog, devops, X","link":"https://... oder null"}]`;
+Antworte AUSSCHLIESSLICH mit einem JSON-Array (ohne Text davor oder danach, ohne Markdown, ohne Zitat-Markierungen), höchstens 10 Einträge, neueste zuerst. In den Texten keine doppelten Anführungszeichen verwenden (stattdessen „…“ oder '…'). Form:
+[{"kategorie":"upgrade|netzwerk|abstimmung|oekosystem|sicherheit|markt","wichtig":true|false,"datum":"YYYY-MM-DD","titelDe":"...","textDe":"2 Sätze","titelEn":"...","textEn":"2 sentences","quelle":"z. B. GitLab, THORChain-Blog, devops, X","link":"https://... oder null"}]`;
   const nachrichten = [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }];
-  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 4000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 4 });
+  const erg = await kiAgent(env, { system, nachrichten, maxTokens: 8000, modell: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', maxRunden: 4 });
+  // ROBUST EINLESEN (gemeldet: "NEWS_JSON" -- Liste abgeschnitten oder mit Zusatztext): erst als Ganzes,
+  // sonst jedes vollstaendige {...}-Objekt einzeln (unvollstaendige am Ende werden verworfen)
   let liste = null;
-  try { const t = erg.text; liste = JSON.parse(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1)); } catch (e) { throw new Error('NEWS_JSON: ' + String(erg.text).slice(0, 120)); }
+  const t = String(erg.text || '');
+  try { liste = JSON.parse(t.slice(t.indexOf('['), t.lastIndexOf(']') + 1)); } catch (e) { liste = null; }
+  if (!Array.isArray(liste)) {
+    liste = []; let tiefe = 0, start = -1, inStr = false, esc = false;
+    for (let i = 0; i < t.length; i++) {
+      const ch = t[i];
+      if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') { inStr = true; continue; }
+      if (ch === '{') { if (tiefe === 0) start = i; tiefe++; }
+      else if (ch === '}') { tiefe--; if (tiefe === 0 && start >= 0) { try { liste.push(JSON.parse(t.slice(start, i + 1))); } catch (e) {} start = -1; } }
+    }
+    if (!liste.length) throw new Error('NEWS_JSON: ' + t.slice(0, 120));
+  }
   const sauber = (Array.isArray(liste) ? liste : []).filter(x => x && x.titelDe && x.textDe).slice(0, 12).map(x => ({
     kategorie: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'].includes(x.kategorie) ? x.kategorie : 'netzwerk', wichtig: !!x.wichtig,
     datum: /^\d{4}-\d{2}-\d{2}$/.test(String(x.datum)) ? x.datum : heute,
