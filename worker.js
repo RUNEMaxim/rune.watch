@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1320'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1400'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -6902,6 +6902,7 @@ async function handleDonationHistory(request, env, diag = null) {
 // Endpunkte: GET /ki/status, GET /ki/bericht, POST /ki/frage, POST /ki/chart
 // =====================================================================================
 const KI_MODELL_STD = 'claude-haiku-5-5';
+const kiFuerAlle = env => String(env.KI_FUER_ALLE || '') === '1';
 const KI_SITUATION_DE = { rsiTief: 'RSI unter 30', rsiHoch: 'RSI über 70', bbUnten: 'Kurs unter dem unteren Bollinger-Band', bbOben: 'Kurs über dem oberen Bollinger-Band',
   fallKurz: 'starker Kurzfrist-Fall', steigKurz: 'starker Kurzfrist-Anstieg', volSpitze: 'Volumen-Spitze', bbUntenVol: 'unteres Band mit hohem Volumen', bbObenVol: 'oberes Band mit hohem Volumen',
   rsiTiefFall: 'RSI unter 30 nach starkem Fall', ruhig: 'ruhige Phase', hammer: 'langer unterer Docht (Hammer)', sternschnuppe: 'langer oberer Docht', squeeze: 'sehr enge Bänder (Squeeze)',
@@ -6922,6 +6923,118 @@ async function kiText(env, { system, nachrichten, maxTokens = 600 }) {
   // LEERE ANTWORT SICHTBAR MACHEN (gemeldet: Chat zeigte nur "–"): Grund mitschicken statt still leer
   if (!text) throw new Error('KI_LEER (stop: ' + (j && j.stop_reason) + ', Bloecke: ' + (((j && j.content) || []).map(c => c.type).join(',') || 'keine') + ', Modell: ' + (j && j.model) + ')');
   return text;
+}
+// ECHTER AGENT (gemeldet: "viele inhaltliche Fehler, teilweise nicht aktuell"): Das Modell bekommt
+// Werkzeuge und holt sich aktuelle Daten selbst (Netzwerk, Churns, Nodes, Pools, POL, Kurs, Bot),
+// statt aus einer Momentaufnahme zu raten. Nur lesende Abrufe, hoechstens 5 Runden.
+const KI_WERKZEUGE = [
+  { name: 'netzwerk_und_churn', description: 'Aktueller THORChain-Netzwerkstatus: Blockhoehe, naechster Churn (Hoehe, geschaetzte Zeit), Zahl aktiver Nodes, Bonding-APY, Gesamt-Bond, wichtige Mimir-Werte (CHURNINTERVAL, BONDYIELDENABLED usw.).', input_schema: { type: 'object', properties: {} } },
+  { name: 'churn_verlauf', description: 'Die letzten Churns mit Datum (UTC) und Blockhoehe sowie Abstand in Tagen.', input_schema: { type: 'object', properties: { anzahl: { type: 'integer', description: '1-20, Standard 8' } } } },
+  { name: 'node_info', description: 'Live-Daten einer Node: Status, Bond, Slash-Punkte, aktueller Reward, Jail, Austritt angefragt, Betreiber-Gebuehr, Version, Bond-Provider-Anteile. Node-Adressen stehen im Kontext unter nodeAdressen.', input_schema: { type: 'object', properties: { adresse: { type: 'string', description: 'volle thor1... Node-Adresse' } }, required: ['adresse'] } },
+  { name: 'rune_kurs_und_volumen', description: 'RUNE-Kurs jetzt und RUNE-Kurs, Swap-Volumen (USD) und Swap-Anzahl der letzten Tage.', input_schema: { type: 'object', properties: { tage: { type: 'integer', description: '1-14, Standard 7' } } } },
+  { name: 'pools', description: 'Die groessten Liquiditaetspools: Asset, Tiefe in RUNE, Volumen 24h, APY, Status. Optional ein bestimmtes Asset (z. B. BTC.BTC).', input_schema: { type: 'object', properties: { asset: { type: 'string' } } } },
+  { name: 'pol', description: 'Protocol Owned Liquidity: eingezahlt, abgezogen, aktueller Wert und Ergebnis in RUNE.', input_schema: { type: 'object', properties: {} } },
+  { name: 'bot_signale', description: 'Gelernte Marktlagen des rune.watch-Bots (4H/Tag), Signale der letzten 7 Tage und die Live-Trefferquote.', input_schema: { type: 'object', properties: {} } },
+  { name: 'cross_chain_vergleich', description: 'Volumen-Vergleich THORChain, NEAR Intents, Chainflip, Maya (1/7/30 Tage, Anteile).', input_schema: { type: 'object', properties: {} } },
+];
+const kiRune = x => { const n = Number(x); return Number.isFinite(n) ? Math.round(n / 1e8 * 100) / 100 : null; };
+async function kiWerkzeugAusfuehren(env, name, input) {
+  input = input || {};
+  const iso = ms => new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  if (name === 'netzwerk_und_churn') {
+    const [net, lb, mimir] = await Promise.all([
+      fetchFromBases(getMidgardBases(), '/network').catch(() => null),
+      fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null),
+      fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null)]);
+    const hoehe = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : null;
+    const naechste = net ? Number(net.nextChurnHeight) : null;
+    const M = mimir || {}, wahl = ['CHURNINTERVAL', 'BONDYIELDENABLED', 'MINIMUMBONDINRUNE', 'MAXBONDPROVIDERS', 'DESIREDVALIDATORSET', 'HALTCHURNING', 'NODEPAUSECHAINGLOBAL'];
+    const bloeckeBis = hoehe && naechste ? naechste - hoehe : null;
+    return { blockhoehe: hoehe, naechsterChurnHoehe: naechste || null, bloeckeBisChurn: bloeckeBis,
+      naechsterChurnGeschaetzt: bloeckeBis != null ? iso(Date.now() + bloeckeBis * 6000) + ' (Annahme ~6 s je Block)' : null,
+      aktiveNodes: net ? Number(net.activeNodeCount) || null : null, bondingAPYProzent: net && net.bondingAPY != null ? Math.round(Number(net.bondingAPY) * 1000) / 10 : null,
+      liquiditaetsAPYProzent: net && net.liquidityAPY != null ? Math.round(Number(net.liquidityAPY) * 1000) / 10 : null,
+      aktiverBondRUNE: net && Array.isArray(net.activeBonds) ? Math.round(net.activeBonds.reduce((a, b) => a + Number(b) / 1e8, 0)) : null,
+      mimir: Object.fromEntries(wahl.filter(k => M[k] != null).map(k => [k, k === 'MINIMUMBONDINRUNE' ? kiRune(M[k]) : M[k]])) };
+  }
+  if (name === 'churn_verlauf') {
+    const n = Math.max(1, Math.min(20, Number(input.anzahl) || 8));
+    const c = await fetchFromBases(getMidgardBases(), '/churns');
+    const liste = (Array.isArray(c) ? c : []).slice(0, n + 1).map(x => ({ ms: Number(String(x.date).slice(0, 13)), hoehe: Number(x.height) }));
+    return liste.slice(0, n).map((x, i) => ({ datum: iso(x.ms), hoehe: x.hoehe, abstandTage: liste[i + 1] ? Math.round((x.ms - liste[i + 1].ms) / 864e5 * 100) / 100 : null }));
+  }
+  if (name === 'node_info') {
+    const a = String(input.adresse || '').trim().toLowerCase();
+    if (!/^thor1[0-9a-z]{38}$/.test(a)) return { fehler: 'ungueltige Node-Adresse' };
+    const n = await fetchFromBases(getThornodeBases(), '/thorchain/node/' + a);
+    if (!n) return { fehler: 'Node nicht gefunden' };
+    const bp = n.bond_providers || {};
+    return { status: n.status, bondRUNE: kiRune(n.total_bond), slashPunkte: Number(n.slash_points) || 0, aktuellerRewardRUNE: kiRune(n.current_award),
+      jailBisBlock: n.jail && n.jail.release_height ? Number(n.jail.release_height) : null, austrittAngefragt: !!n.requested_to_leave, rausgeworfen: !!n.forced_to_leave,
+      betreiberGebuehrProzent: bp.node_operator_fee != null ? Number(bp.node_operator_fee) / 100 : null, version: n.version || null,
+      preflight: n.preflight_status ? { status: n.preflight_status.status, grund: String(n.preflight_status.reason || '').slice(0, 120) } : null,
+      bondProvider: (bp.providers || []).slice(0, 12).map(p => ({ adresse: '…' + String(p.bond_address || '').slice(-4), bondRUNE: kiRune(p.bond) })) };
+  }
+  if (name === 'rune_kurs_und_volumen') {
+    const tage = Math.max(1, Math.min(14, Number(input.tage) || 7));
+    const [st, s] = await Promise.all([fetchFromBases(getMidgardBases(), '/stats').catch(() => null), fetchFromBases(getMidgardBases(), `/history/swaps?interval=day&count=${tage + 1}`).catch(() => null)]);
+    const heute = new Date().toISOString().slice(0, 10);
+    return { runeKursJetztUSD: st && Number(st.runePriceUSD) > 0 ? Math.round(Number(st.runePriceUSD) * 10000) / 10000 : null,
+      tage: ((s && s.intervals) || []).map(x => ({ tag: new Date(Number(x.startTime) * 1000).toISOString().slice(0, 10), runeKursUSD: Math.round(Number(x.runePriceUSD) * 10000) / 10000, volumenUSD: Math.round(Number(x.totalVolumeUSD) / 100), swaps: Number(x.totalCount) || 0 }))
+        .map(x => ({ ...x, laufend: x.tag === heute })) };
+  }
+  if (name === 'pools') {
+    const p = await fetchFromBases(getMidgardBases(), '/pools?status=available');
+    let liste = (Array.isArray(p) ? p : []).map(x => ({ asset: x.asset, tiefeRUNE: kiRune(x.runeDepth), volumen24hUSD: Math.round(Number(x.volume24h) / 1e8 * Number(x.assetPriceUSD || 0) / Math.max(1e-12, Number(x.assetPrice || 1))) || null, apyProzent: x.annualPercentageRate != null ? Math.round(Number(x.annualPercentageRate) * 1000) / 10 : null, preisUSD: Number(x.assetPriceUSD) || null, status: x.status }));
+    if (input.asset) liste = liste.filter(x => String(x.asset).toUpperCase() === String(input.asset).toUpperCase());
+    return liste.sort((a, b) => (b.tiefeRUNE || 0) - (a.tiefeRUNE || 0)).slice(0, 15);
+  }
+  if (name === 'pol') {
+    const p = await fetchFromBases(getThornodeBases(), '/thorchain/pol');
+    return p ? { eingezahltRUNE: kiRune(p.rune_deposited), abgezogenRUNE: kiRune(p.rune_withdrawn), wertRUNE: kiRune(p.value), ergebnisRUNE: kiRune(p.pnl), aktuelleEinzahlungRUNE: kiRune(p.current_deposit) } : { fehler: 'nicht verfuegbar' };
+  }
+  if (name === 'bot_signale') {
+    const [a, b, live] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env)]);
+    const tab = S => S ? { gelernt: S.at ? new Date(S.at).toISOString().slice(0, 10) : null, marktlagen: (S.signale || []).map(x => ({ phase: KI_PHASE_DE[x.phase] || x.phase, situation: KI_SITUATION_DE[x.key] || x.key, richtung: x.dir === 'up' ? 'hoch' : 'runter', backtestProzent: x.treffer, basisProzent: x.basis })) } : null;
+    let neu = []; try { neu = ((await env.DB.prepare('SELECT coin, ebene, at, key, phase, dir FROM bot_sig_live WHERE folge = 0 AND at > ? ORDER BY at DESC LIMIT 30').bind(Date.now() - 7 * 864e5).all()).results || [])
+      .map(r => ({ coin: r.coin, ebene: r.ebene, zeit: iso(r.at), situation: KI_SITUATION_DE[r.key] || r.key, richtung: r.dir === 'up' ? 'hoch' : 'runter' })); } catch (e) {}
+    return { tabelle4h: tab(a), tabelleTag: tab(b), signaleLetzte7Tage: neu, liveQuote: live && live.ausgewertet ? { ereignisse: live.ausgewertet, richtig: live.richtig, quoteProzent: Math.round(100 * live.quote), offen: live.offen } : 'noch keine ausgewerteten Ereignisse' };
+  }
+  if (name === 'cross_chain_vergleich') {
+    const d = await env.DB.prepare('SELECT payload FROM dex_volume_cache WHERE id = 1').first().catch(() => null);
+    if (!d || !d.payload) return { fehler: 'nicht verfuegbar' };
+    const p = JSON.parse(d.payload);
+    return { stichtag: p.asOfDay, protokolle: (p.protocols || []).map(x => ({ name: x.name, quelle: x.source, volumen1T: x.d1 != null ? Math.round(x.d1) : null, volumen7T: x.d7 != null ? Math.round(x.d7) : null, volumen30T: x.d30 != null ? Math.round(x.d30) : null })) };
+  }
+  return { fehler: 'unbekanntes Werkzeug' };
+}
+async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, maxRunden = 5 }) {
+  if (!env.ANTHROPIC_API_KEY) throw new Error('NO_KEY');
+  const verlauf = nachrichten.slice(); const genutzt = [];
+  for (let runde = 0; runde < maxRunden; runde++) {
+    const letzte = runde === maxRunden - 1;
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: modell || env.KI_MODELL_FRAGE || env.KI_MODELL || KI_MODELL_STD, max_tokens: maxTokens, system, messages: verlauf, ...(letzte ? {} : { tools: KI_WERKZEUGE }) }),
+      signal: AbortSignal.timeout(45000) });
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new Error('KI_HTTP_' + r.status + (j && j.error && j.error.message ? ': ' + String(j.error.message).slice(0, 160) : ''));
+    const inhalt = (j && j.content) || [];
+    const aufrufe = inhalt.filter(c => c.type === 'tool_use');
+    if (!aufrufe.length || j.stop_reason !== 'tool_use') {
+      const text = inhalt.filter(c => c.type === 'text').map(c => c.text).join('').trim();
+      if (!text) throw new Error('KI_LEER (stop: ' + (j && j.stop_reason) + ')');
+      return { text, genutzt };
+    }
+    verlauf.push({ role: 'assistant', content: inhalt });
+    const ergebnisse = await Promise.all(aufrufe.map(async a => {
+      genutzt.push(a.name);
+      let erg; try { erg = await kiWerkzeugAusfuehren(env, a.name, a.input); } catch (e) { erg = { fehler: String(e && e.message || e).slice(0, 160) }; }
+      return { type: 'tool_result', tool_use_id: a.id, content: JSON.stringify(erg).slice(0, 8000) };
+    }));
+    verlauf.push({ role: 'user', content: ergebnisse });
+  }
+  throw new Error('KI_ZU_VIELE_RUNDEN');
 }
 // Tageslimit je Anschluss (IP nur als Tages-Hash gespeichert)
 async function kiLimit(env, request, art, max) {
@@ -6948,11 +7061,24 @@ async function handleKi(request, env, url) {
     const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:bericht'").first().catch(() => null);
     return json(r ? JSON.parse(r.v) : { leer: true }, env);
   }
+  if (url.pathname === '/ki/feedback' && request.method === 'GET') {
+    // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
+    if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS ki_feedback (at INTEGER, gut INTEGER, frage TEXT, antwort TEXT, notiz TEXT, werkzeuge TEXT)').run();
+    const r = await env.DB.prepare('SELECT * FROM ki_feedback ORDER BY at DESC LIMIT 100').all();
+    return json({ eintraege: (r.results || []).map(x => ({ ...x, zeit: new Date(x.at).toISOString().slice(0, 16) })) }, env);
+  }
   if (request.method !== 'POST') return json({ error: 'METHOD' }, env, 405);
-  if (!env.ANTHROPIC_API_KEY) return json({ error: 'NO_KEY' }, env, 503);
+  if (url.pathname !== '/ki/feedback' && !env.ANTHROPIC_API_KEY) return json({ error: 'NO_KEY' }, env, 503);
   const body = await request.json().catch(() => null);
   if (!body || typeof body !== 'object') return json({ error: 'BAD_REQUEST' }, env, 400);
   const de = body.lang === 'de';
+  // TESTPHASE: nur fuer die eigenen Adressen (STATS_EXCLUDED_ADDRESSES), bis KI_FUER_ALLE = "1" gesetzt ist
+  if (!kiFuerAlle(env)) {
+    const aus = getStatsExcludedAddresses(env);
+    const frei = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase()));
+    if (!frei) return json({ error: 'NUR_TEST' }, env, 403);
+  }
   const kurz = (x, n) => { const s = JSON.stringify(x == null ? null : x); return s.length > n ? s.slice(0, n) + '…' : s; };
   if (url.pathname === '/ki/frage') {
     if (!(await kiLimit(env, request, 'frage', 40))) return json({ error: 'LIMIT' }, env, 429);
@@ -6964,10 +7090,21 @@ async function handleKi(request, env, url) {
     const nachrichten = [];
     for (const m of verlauf) { if (!nachrichten.length && m.role !== 'user') continue; if (nachrichten.length && nachrichten[nachrichten.length - 1].role === m.role) continue; nachrichten.push(m); }
     if (nachrichten.length && nachrichten[nachrichten.length - 1].role === 'user') nachrichten.pop();
-    nachrichten.push({ role: 'user', content: `KONTEXT (was rune.watch gerade für diesen Nutzer anzeigt, JSON):\n${kurz(body.kontext, 9000)}\n\nFRAGE: ${frage}` });
-    const system = `Du bist "Frag rune.watch", der Assistent im THORChain-Dashboard rune.watch. Du erklärst dem Nutzer seine eigenen Zahlen und die Begriffe der App. ${KI_GRUNDREGELN(de)} Höchstens etwa 120 Wörter. ${KI_GLOSSAR}`;
-    const antwort = await kiText(env, { system, nachrichten, maxTokens: 1200 });
-    return json({ antwort }, env);
+    const nodeAdr = (Array.isArray(body.nodeAdressen) ? body.nodeAdressen : []).map(a => String(a || '').trim().toLowerCase()).filter(a => /^thor1[0-9a-z]{38}$/.test(a)).slice(0, 10);
+    nachrichten.push({ role: 'user', content: `JETZT (UTC): ${new Date().toISOString().slice(0, 16).replace('T', ' ')}\nNODE-ADRESSEN DES NUTZERS (fuer node_info): ${JSON.stringify(nodeAdr)}\nKONTEXT (was rune.watch gerade fuer diesen Nutzer anzeigt, JSON; Adressen gekuerzt):\n${kurz(body.kontext, 9000)}\n\nFRAGE: ${frage}` });
+    const system = `Du bist "Frag rune.watch", der Assistent im THORChain-Dashboard rune.watch. Du erklärst dem Nutzer seine eigenen Zahlen, das Netzwerk und die Begriffe der App. ${KI_GRUNDREGELN(de)}
+Arbeitsweise: Für alles Aktuelle (nächster/letzter Churn, Node-Status, Slash-Punkte, Kurs, Volumen, Pools, POL, Bot-Signale) rufe ZUERST das passende Werkzeug auf und antworte mit diesen Live-Werten; schätze nie aus dem Gedächtnis. Der KONTEXT enthält die persönlichen Zahlen aus der App (Bond, eigene Rewards, APY je Churn). Widersprechen sich Kontext und Werkzeug, gilt das Werkzeug und du sagst es. Zeitangaben immer mit Datum und "UTC" oder relativ zu JETZT. Rechne nur mit gelieferten Zahlen und nenne bei Schätzungen die Annahme.
+Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards werden bei jedem Churn gutgeschrieben; ihre Höhe hängt von der Churn-Dauer, der Gesamt-Systemeinnahme, Slash-Punkten der Node und der Betreiber-Gebühr ab. Mehr Slash-Punkte im Vergleich zu anderen Nodes = weniger Reward. Eine Node, die nicht aktiv ist (Standby, Ready, Disabled), verdient keine Bond-Rewards. Ein längerer Churn ergibt einen größeren Reward, ein kürzerer einen kleineren. Höchstens etwa 130 Wörter. ${KI_GLOSSAR}`;
+    const erg = await kiAgent(env, { system, nachrichten, maxTokens: 1200, modell: env.KI_MODELL_FRAGE || 'claude-sonnet-5-5' });
+    return json({ antwort: erg.text, werkzeuge: erg.genutzt }, env);
+  }
+  if (url.pathname === '/ki/feedback') {
+    // DAUMEN HOCH/RUNTER je Antwort: Fehler sammeln, um Prompt und Werkzeuge gezielt zu verbessern
+    if (!(await kiLimit(env, request, 'feedback', 100))) return json({ error: 'LIMIT' }, env, 429);
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS ki_feedback (at INTEGER, gut INTEGER, frage TEXT, antwort TEXT, notiz TEXT, werkzeuge TEXT)').run();
+    await env.DB.prepare('INSERT INTO ki_feedback (at, gut, frage, antwort, notiz, werkzeuge) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(Date.now(), body.gut ? 1 : 0, String(body.frage || '').slice(0, 600), String(body.antwort || '').slice(0, 2000), String(body.notiz || '').slice(0, 600), JSON.stringify(body.werkzeuge || []).slice(0, 300)).run();
+    return json({ ok: true }, env);
   }
   if (url.pathname === '/ki/chart') {
     if (!(await kiLimit(env, request, 'chart', 30))) return json({ error: 'LIMIT' }, env, 429);
