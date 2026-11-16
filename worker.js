@@ -1012,7 +1012,7 @@ function corsHeaders(env) {
 function json(data, env, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(env) },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(env) },
   });
 }
 
@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1710'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1720'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5890,8 +5890,12 @@ export default {
       // Minuten 33/38/43/48 = Bot (Historie also 4 Paare pro Stunde, danach laufend).
       // KI zuerst und unabhaengig vom Bot (gemeldet: News blieben leer -- der KI-Teil lief erst nach dem
       // rechenintensiven Bot-Sammler und kam nie dran, wenn der Lauf vorher abbrach)
-      ctx.waitUntil(kiPlan(env));
-      ctx.waitUntil(rwPlanLaeufe(env));
+      // EIGENE MINUTE FUER DIE KI (gemeldet: "noch kein KI-Lauf"): Cloudflare erlaubt je Minuten-Aufruf nur
+      // 30 s Rechenzeit fuer ALLES darin. Lief der Bot-Sammler mit, wurde der ganze Aufruf samt KI abgebrochen,
+      // bevor sie etwas speichern konnte. Jetzt: Minuten 2, 7, 12 ... nur KI (+ Push), sonst Bot & Co.
+      const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
+      if (minute % 5 === 2) ctx.waitUntil(kiPlan(env));
+      else ctx.waitUntil(rwPlanLaeufe(env));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -5922,7 +5926,7 @@ async function kiPlan(env) {
   kiPlanSeit = Date.now();
   try {
     const L = await rwLaufInfo(env, 'ki');
-    if (!L || Date.now() - L.at > 5 * 60e3) await rwDiagLauf(env, 'ki', () => kiAgentLauf(env));
+    if (!L || Date.now() - L.at > 4 * 60e3) await rwDiagLauf(env, 'ki', () => kiAgentLauf(env));
   } catch (e) { console.warn('[ki] plan', e && e.message); }
   finally { kiPlanSeit = 0; }
 }
