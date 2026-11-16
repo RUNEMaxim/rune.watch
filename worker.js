@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-16-1850'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-16-1930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -3155,7 +3155,7 @@ async function handleStats(request, env, ctx) {
           h += '<div class="sec">What the bot has learned</div>';
           // Gelernte Signal-Tabelle
           { const sig = (name, S) => !S ? `<b>${name}</b>: not learned yet` : `<b>${name}</b>: ${S.signale.length} reliable (learned ${d10(S.at)} from ${S.n} cases)` +
-              (S.signale.length ? '<br>' + S.signale.slice(0, 6).map(x => `\u00a0\u00a0${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}% vs ${x.basis}%`).join('<br>') : '');
+              (S.signale.length ? '<br>' + S.signale.slice(0, 6).map(x => `\u00a0\u00a0${x.phase} ${x.key} ${x.dir === 'up' ? '\u2191' : '\u2193'} ${x.treffer}% vs ${x.basis}%${x.horizont ? ' \u00b7 ' + x.horizont : ''}`).join('<br>') : '');
             const n4 = stats.botSignale4h ? stats.botSignale4h.signale.length : null, n1 = stats.botSignale1d ? stats.botSignale1d.signale.length : null;
             h += karte('bot4', 'Signal situations', (n4 || 0) + (n1 || 0) || null, `4H ${n4 ?? '\u2013'} \u00b7 Daily ${n1 ?? '\u2013'}`, sig('4H', stats.botSignale4h) + '<br>' + sig('Daily', stats.botSignale1d), (n4 || n1) ? GRUEN : GRAU); }
           // Muster-Ziele
@@ -5951,7 +5951,7 @@ async function rwPlanLaeufe(env) {
       // Tabelle mit alter Zaehlweise (jeder Coin ein Fall) sofort neu lernen
       const S = await botSignale(env, iv).catch(() => null);
       const aS = await alter('signale' + iv);
-      if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte' && aS > 6 * 36e5)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
+      if (aS > 7 * 864e5 || (S && S.methode !== 'zeitpunkte-hz' && aS > 3600e3)) await rwDiagLauf(env, 'signale' + iv, () => botSignaleLernen(env, iv));
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
     // (Elliott-Test im Worker stillgelegt: zu viel Rechenzeit fuer Cloudflare. Das Training laeuft im Browser
@@ -9164,67 +9164,73 @@ async function botSignaleLernen(env, iv) {
   // ZIEL VOR STOPP: je Coin die Schlusskurse in Zeitfolge; Ziel/Stopp = 1 Schwankungsbreite (ATR) in/gegen Signalrichtung
   const proCoinReihe = {}; for (const r of alle) (proCoinReihe[r.coin] = proCoinReihe[r.coin] || []).push(r);
   for (const c in proCoinReihe) { proCoinReihe[c].sort((a, b) => a.at - b.at); proCoinReihe[c].forEach((r, i) => { r._i = i; }); }
-  const zielStopp = (r, dir) => { // 1 = Ziel zuerst, 0 = Stopp zuerst, null = keins von beiden in der Frist
+  // MEHRERE ZEITRAEUME (gewuenscht: "den Zeitraum nach einem Signal verlaengern"): fest vorgegeben, nicht
+  // nachtraeglich ausgesucht -- 4H: 3/7/14 Tage, Tag: 7/14/30 Tage. Weil mehrere Zeitraeume getestet werden,
+  // ist die Huerde hoeher (z >= 2,5; gegen den Trend 3,3). Rendite je Zeitraum aus den gespeicherten Schlusskursen.
+  const HZ = iv === '1d' ? [[7, '7d'], [14, '14d'], [30, '30d']] : [[18, '3d'], [42, '7d'], [84, '14d']];
+  for (const c in proCoinReihe) { const R = proCoinReihe[c]; for (let i = 0; i < R.length; i++) { R[i].rh = {}; for (const [hk] of HZ) R[i].rh[hk] = i + hk < R.length && R[i].close > 0 ? R[i + hk].close / R[i].close - 1 : null; } }
+  const zielStopp = (r, dir, hk) => { // 1 = Ziel zuerst, 0 = Stopp zuerst, null = keins von beiden in der Frist
     const reihe = proCoinReihe[r.coin], a = r.atrp; if (!a || !reihe) return null;
     const ziel = dir === 'up' ? r.close * (1 + a) : r.close * (1 - a), stopp = dir === 'up' ? r.close * (1 - a) : r.close * (1 + a);
-    for (let j = r._i + 1; j <= Math.min(reihe.length - 1, r._i + H); j++) { const c = reihe[j].close;
+    for (let j = r._i + 1; j <= Math.min(reihe.length - 1, r._i + hk); j++) { const c = reihe[j].close;
       if (dir === 'up' ? c >= ziel : c <= ziel) return 1; if (dir === 'up' ? c <= stopp : c >= stopp) return 0; }
     return null; };
-  const kennzahlen = (g, dir) => { let sm = 0, z = 0, zn = 0; for (const r of g) { sm += dir === 'up' ? r.ret : -r.ret; const e = zielStopp(r, dir); if (e != null) { zn++; z += e; } }
+  const kennzahlen = (g, dir, hk) => { let sm = 0, z = 0, zn = 0; for (const r of g) { sm += dir === 'up' ? r.rh[hk] : -r.rh[hk]; const e = zielStopp(r, dir, hk); if (e != null) { zn++; z += e; } }
     return { bewegung: g.length ? +(100 * sm / g.length).toFixed(2) : null, zielVorStopp: zn ? Math.round(100 * z / zn) : null }; };
-  const rows = alle.filter(r => r.ret != null);
-  if (rows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: rows.length };
-  const ats = rows.map(r => r.at).sort((a, b) => a - b), mitte = ats[Math.floor(ats.length / 2)];
-  const basis = {}; for (const r of rows) { const b = (basis[r.phase] = basis[r.phase] || { n: 0, up: 0 }); b.n++; if (r.ret > 0) b.up++; }
-  const uebernommen = [], geprueft = [];
+  const basisRows = alle.filter(r => r.rh && r.rh[HZ[0][0]] != null);
+  if (basisRows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: basisRows.length };
+  const ats = basisRows.map(r => r.at).sort((a, b) => a - b), mitte = ats[Math.floor(ats.length / 2)];
+  const kandidaten = [], geprueft = [];
   const vglCache = {};
-  const vergleich = (ph, dir) => (vglCache[ph + dir] = vglCache[ph + dir] || kennzahlen(rows.filter(r => r.phase === ph), dir));
-  for (const ph of ['auf', 'ab', 'seit']) {
-    if (!basis[ph] || basis[ph].n < 500) continue;
-    const bq = basis[ph].up / basis[ph].n;
-    for (const key in RW_SITUATIONEN) {
-      const g = rows.filter(r => r.phase === ph && RW_SITUATIONEN[key](r));
-      if (g.length < 100) continue;
-      // GLEICHZEITIGE FAELLE = EIN FALL (gemeldet: live 0 von 23 -- alles "rsiTiefFall" bei vielen Coins in
-      // derselben Kerze). Die Coins bewegen sich gemeinsam; 13 gleichzeitige Faelle sind EIN Beleg. Deshalb
-      // wird je Kerze (Zeitpunkt) gemittelt: Trefferquote = Durchschnitt ueber Zeitpunkte, Signifikanz aus
-      // der Zahl der Zeitpunkte (zusaetzlich um die Ueberlappung der Haltedauer bereinigt).
-      const up = g.filter(r => r.ret > 0).length / g.length;
-      const dir = up >= bq ? 'up' : 'down';
-      const ev = new Map(); for (const r of g) { const e = ev.get(r.at) || { n: 0, ok: 0 }; e.n++; if ((r.ret > 0) === (dir === 'up')) e.ok++; ev.set(r.at, e); }
-      const evL = [...ev.entries()];
-      if (evL.length < 40) continue;
-      const evQ = sel => { const h = evL.filter(([at]) => sel(at)); return h.length ? h.reduce((a, [, e]) => a + e.ok / e.n, 0) / h.length : null; };
-      const treffer = evQ(() => true), b = dir === 'up' ? bq : 1 - bq, vorsprung = treffer - b;
-      const nEff = evL.length / Math.max(1, H / 3); // Zeitpunkte, bereinigt um ueberlappende Haltedauer
-      const z = vorsprung / Math.sqrt(b * (1 - b) / nEff);
-      // Coins und Zeithaelften (Haelften ebenfalls je Zeitpunkt)
-      const proCoin = {}; for (const r of g) { const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, ok: 0 }); c.n++; if ((r.ret > 0) === (dir === 'up')) c.ok++; }
-      const coinsMit = Object.values(proCoin).filter(c => c.n >= 15), coinsOk = coinsMit.filter(c => c.ok / c.n - b >= 0.02).length;
-      const haelfte = sel => { const n = evL.filter(([at]) => sel(at)).length; return n >= 20 ? evQ(sel) - b : null; };
-      const h1 = haelfte(at => at < mitte), h2 = haelfte(at => at >= mitte);
-      // Gegen den Trend (Kauf im Abwaertstrend, Verkauf im Aufwaertstrend) strenger: dort schlaegt der
-      // Markt die Gegenbewegung oft -- mind. 8 Punkte Vorsprung und z >= 3.
-      const gegenTrend = (ph === 'ab' && dir === 'up') || (ph === 'auf' && dir === 'down');
-      const minV = gegenTrend ? 0.08 : 0.05, minZ = gegenTrend ? 3 : 2;
-      const eintrag = { phase: ph, key, dir, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, zeitpunkte: evL.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
-        h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2), gegenTrend };
-      geprueft.push(eintrag);
-      if (vorsprung >= minV && z >= minZ && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
-        // Zusatz-Kennzahlen nur fuer aufgenommene Situationen (spart Rechenzeit), jeweils mit Vergleich zur Phase
-        const k1 = kennzahlen(g, dir), vgl = vergleich(ph, dir);
-        Object.assign(eintrag, { bewegung: k1.bewegung, bewegungBasis: vgl.bewegung, zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
-        uebernommen.push(eintrag);
+  for (const [hk, hName] of HZ) {
+    const rows = alle.filter(r => r.rh && r.rh[hk] != null);
+    const ret = r => r.rh[hk];
+    const basis = {}; for (const r of rows) { const b = (basis[r.phase] = basis[r.phase] || { n: 0, up: 0 }); b.n++; if (ret(r) > 0) b.up++; }
+    const vergleich = (ph, dir) => (vglCache[hk + ph + dir] = vglCache[hk + ph + dir] || kennzahlen(rows.filter(r => r.phase === ph), dir, hk));
+    for (const ph of ['auf', 'ab', 'seit']) {
+      if (!basis[ph] || basis[ph].n < 500) continue;
+      const bq = basis[ph].up / basis[ph].n;
+      for (const key in RW_SITUATIONEN) {
+        const g = rows.filter(r => r.phase === ph && RW_SITUATIONEN[key](r));
+        if (g.length < 100) continue;
+        // GLEICHZEITIGE FAELLE = EIN FALL: je Kerze (Zeitpunkt) gemittelt, Signifikanz aus der Zahl der
+        // Zeitpunkte, zusaetzlich um die Ueberlappung der Haltedauer bereinigt
+        const up = g.filter(r => ret(r) > 0).length / g.length;
+        const dir = up >= bq ? 'up' : 'down';
+        const ev = new Map(); for (const r of g) { const e = ev.get(r.at) || { n: 0, ok: 0 }; e.n++; if ((ret(r) > 0) === (dir === 'up')) e.ok++; ev.set(r.at, e); }
+        const evL = [...ev.entries()];
+        if (evL.length < 40) continue;
+        const evQ = sel => { const h = evL.filter(([at]) => sel(at)); return h.length ? h.reduce((a, [, e]) => a + e.ok / e.n, 0) / h.length : null; };
+        const treffer = evQ(() => true), b = dir === 'up' ? bq : 1 - bq, vorsprung = treffer - b;
+        const nEff = evL.length / Math.max(1, hk / 3);
+        const z = vorsprung / Math.sqrt(b * (1 - b) / nEff);
+        const proCoin = {}; for (const r of g) { const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, ok: 0 }); c.n++; if ((ret(r) > 0) === (dir === 'up')) c.ok++; }
+        const coinsMit = Object.values(proCoin).filter(c => c.n >= 15), coinsOk = coinsMit.filter(c => c.ok / c.n - b >= 0.02).length;
+        const haelfte = sel => { const n = evL.filter(([at]) => sel(at)).length; return n >= 20 ? evQ(sel) - b : null; };
+        const h1 = haelfte(at => at < mitte), h2 = haelfte(at => at >= mitte);
+        const gegenTrend = (ph === 'ab' && dir === 'up') || (ph === 'auf' && dir === 'down');
+        const minV = gegenTrend ? 0.08 : 0.05, minZ = gegenTrend ? 3.3 : 2.5;
+        const eintrag = { phase: ph, key, dir, horizont: hName, hk, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, zeitpunkte: evL.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
+          h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2), gegenTrend };
+        geprueft.push(eintrag);
+        if (vorsprung >= minV && z >= minZ && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
+          const k1 = kennzahlen(g, dir, hk), vgl = vergleich(ph, dir);
+          Object.assign(eintrag, { bewegung: k1.bewegung, bewegungBasis: vgl.bewegung, zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
+          kandidaten.push(eintrag);
+        }
       }
     }
   }
+  // je Marktlage (Phase + Situation + Richtung) nur EIN Zeitraum: der mit dem staerksten Beleg (z)
+  const best = new Map(); for (const e of kandidaten) { const k = e.phase + ':' + e.key + ':' + e.dir; if (!best.has(k) || best.get(k).z < e.z) best.set(k, e); }
+  const uebernommen = [...best.values()];
   uebernommen.sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis));
   const altRoh = await env.DB.prepare('SELECT v FROM bot_status WHERE k = ?').bind('signale:' + iv).first().catch(() => null);
   const alt = altRoh ? JSON.parse(altRoh.v) : null;
   const sKey = e => e.phase + ':' + e.key + ':' + e.dir;
   const altSet = new Set(alt && alt.signale ? alt.signale.map(sKey) : []), neuSet = new Set(uebernommen.map(sKey));
   const aenderung = { neu: [...neuSet].filter(k => !altSet.has(k)), weg: [...altSet].filter(k => !neuSet.has(k)) };
-  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte', horizont: iv === '1d' ? '7d' : '3d', n: rows.length, signale: uebernommen, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
+  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz', horizont: iv === '1d' ? '7d' : '3d', zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
   return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
 }
@@ -9233,6 +9239,7 @@ async function botSignalLiveMitschreiben(env, coin, iv, neue) {
   const S = await botSignale(env, iv); if (!S || !Array.isArray(S.signale) || !S.signale.length) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_sig_live (coin TEXT, ebene TEXT, at INTEGER, key TEXT, phase TEXT, dir TEXT, treffer INTEGER, basis INTEGER, close REAL,
     folge INTEGER DEFAULT 0, PRIMARY KEY (coin, ebene, at, key))`).run();
+  await botSigLiveSpalten(env);
   const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
   for (const r of neue) {
     const t = S.signale.filter(x => x.phase === r.phase && RW_SITUATIONEN[x.key] && RW_SITUATIONEN[x.key](r)).sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis))[0];
@@ -9240,24 +9247,41 @@ async function botSignalLiveMitschreiben(env, coin, iv, neue) {
     // nur der Beginn einer Serie zaehlt (wie die Dreiecke im Chart)
     const vorher = await env.DB.prepare('SELECT at FROM bot_sig_live WHERE coin = ? AND ebene = ? AND key = ? AND dir = ? AND at < ? AND at >= ? LIMIT 1')
       .bind(coin, iv, t.key, t.dir, r.at, r.at - 3 * ivMs).first().catch(() => null);
-    await env.DB.prepare('INSERT OR IGNORE INTO bot_sig_live (coin, ebene, at, key, phase, dir, treffer, basis, close, folge) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .bind(coin, iv, r.at, t.key, r.phase, t.dir, t.treffer, t.basis, r.close, vorher ? 1 : 0).run();
+    await env.DB.prepare('INSERT OR IGNORE INTO bot_sig_live (coin, ebene, at, key, phase, dir, treffer, basis, close, folge, hk) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(coin, iv, r.at, t.key, r.phase, t.dir, t.treffer, t.basis, r.close, vorher ? 1 : 0, Number(t.hk) > 0 ? Number(t.hk) : (iv === '1d' ? 7 : 18)).run();
   }
+}
+let botSigHkOk = false;
+async function botSigLiveSpalten(env) {
+  if (botSigHkOk) return;
+  try { await env.DB.prepare('ALTER TABLE bot_sig_live ADD COLUMN hk INTEGER').run(); } catch (e) { /* gibt es schon */ }
+  botSigHkOk = true;
 }
 async function botSignalLiveBilanz(env) {
   try {
-    const rows = ((await env.DB.prepare(`SELECT s.coin, s.ebene, s.at, s.key, s.dir, s.treffer, s.basis, s.close AS close, f.ret AS ret, f.atrp AS atrp FROM bot_sig_live s
+    await botSigLiveSpalten(env);
+    const rows = ((await env.DB.prepare(`SELECT s.coin, s.ebene, s.at, s.key, s.dir, s.treffer, s.basis, s.close AS close, s.hk AS hk, f.atrp AS atrp FROM bot_sig_live s
       LEFT JOIN bot_faelle f ON f.coin = s.coin AND f.ebene = s.ebene AND f.at = s.at WHERE s.folge = 0`).all()).results) || [];
+    // JE SIGNAL SEIN EIGENER ZEITRAUM (hk Kerzen): Kursreihe je Coin/Ebene einmal laden statt je Signal abzufragen
+    const ab = new Map(); for (const r of rows) { const k = r.coin + '|' + r.ebene; if (!ab.has(k) || r.at < ab.get(k)) ab.set(k, r.at); }
+    const reihen = {};
+    for (const [k, t] of ab) { const [coin, eb] = k.split('|');
+      const R = ((await env.DB.prepare('SELECT at, close FROM bot_faelle WHERE coin = ? AND ebene = ? AND at >= ? ORDER BY at').bind(coin, eb, t).all()).results) || [];
+      reihen[k] = { R, idx: new Map(R.map((x, i) => [x.at, i])) }; }
+    for (const r of rows) {
+      const S = reihen[r.coin + '|' + r.ebene]; const i = S ? S.idx.get(r.at) : undefined;
+      const hk = Number(r.hk) > 0 ? Number(r.hk) : (r.ebene === '1d' ? 7 : 18); r._hk = hk;
+      r.ret = i != null && i + hk < S.R.length && S.R[i].close > 0 ? S.R[i + hk].close / S.R[i].close - 1 : null;
+      r._pfad = i != null ? S.R.slice(i + 1, i + 1 + hk) : [];
+    }
     const fertig = rows.filter(r => r.ret != null), ok = fertig.filter(r => (r.ret > 0) === (r.dir === 'up')).length;
     // Ø Bewegung in Signalrichtung + Ziel vor Stopp (1 ATR), fuer die letzten 200 ausgewerteten Signale
     let sm = 0, zt = 0, zn = 0;
-    for (const r of fertig.sort((a, b) => b.at - a.at).slice(0, 200)) {
+    for (const r of fertig.slice().sort((a, b) => b.at - a.at).slice(0, 200)) {
       sm += r.dir === 'up' ? r.ret : -r.ret;
       if (!r.atrp || !r.close) continue;
-      const H = r.ebene === '1d' ? 7 : 18;
-      const pfad = ((await env.DB.prepare('SELECT close FROM bot_faelle WHERE coin = ? AND ebene = ? AND at > ? ORDER BY at LIMIT ?').bind(r.coin, r.ebene, r.at, H).all()).results) || [];
       const ziel = r.dir === 'up' ? r.close * (1 + r.atrp) : r.close * (1 - r.atrp), stopp = r.dir === 'up' ? r.close * (1 - r.atrp) : r.close * (1 + r.atrp);
-      for (const p of pfad) { if (r.dir === 'up' ? p.close >= ziel : p.close <= ziel) { zn++; zt++; break; } if (r.dir === 'up' ? p.close <= stopp : p.close >= stopp) { zn++; break; } }
+      for (const p of r._pfad) { if (r.dir === 'up' ? p.close >= ziel : p.close <= ziel) { zn++; zt++; break; } if (r.dir === 'up' ? p.close <= stopp : p.close >= stopp) { zn++; break; } }
     }
     const nB = Math.min(fertig.length, 200);
     const erwartet = fertig.length ? fertig.reduce((a, r) => a + r.treffer, 0) / fertig.length : null;
