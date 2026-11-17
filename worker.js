@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-1940'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-2250'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7367,9 +7367,16 @@ Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards wer
     const system = de
       ? `Du schreibst für die "Heute"-Karte von rune.watch (THORChain) GENAU EINEN Satz, höchstens 28 Wörter, Deutsch, an den Nutzer ("du"). Nur aus den gelieferten Zahlen; nichts erfinden, nichts schätzen. Das Wichtigste zuerst: ist eine Node-Warnung oder ein Halt da, geht es darum; sonst um Rewards und Churn; den RUNE-Kurs nur, wenn er sich deutlich bewegt (mehr als 3 %). Keine Kauf- oder Verkaufsempfehlung, keine Kursprognose, keine Emojis, keine Anführungszeichen.`
       : `You write ONE sentence (max 28 words, English, addressing the user as "you") for the "Today" card of rune.watch (THORChain). Only from the numbers provided; invent or estimate nothing. Most important first: node warning or halt if present; otherwise rewards and churn; mention RUNE price only if it moved clearly (more than 3 %). No buy/sell advice, no price forecast, no emojis, no quotes.`;
-    let text = await kiText(env, { system, nachrichten: [{ role: 'user', content: `DATEN (JSON):\n${kurz(body.heute, 3000)}` }], maxTokens: 120 });
-    text = String(text || '').replace(/^["„“]+|["“”]+$/g, '').trim().slice(0, 260);
-    return json({ text, at: Date.now() }, env);
+    // ROBUSTER (gemeldet 17.11.2026: Satz zeigte "Haiku" usw.): mehr Platz fuer die Antwort, ein zweiter Versuch,
+    // und nur ein sauberer Satz geht raus -- Fehlermeldungen oder Modell-Hinweise nie als Text.
+    const sauber = t => { t = String(t || '').replace(/^["„“]+|["“”]+$/g, '').replace(/\s+/g, ' ').trim();
+      if (!t || /haiku|claude|anthropic|\bmodel\b|\bmodell\b|KI_|KI_HTTP|NO_KEY|stop_reason/i.test(t)) return ''; return t.slice(0, 260); };
+    let text = '';
+    for (let v = 0; v < 2 && !text; v++) {
+      try { text = sauber(await kiText(env, { system, nachrichten: [{ role: 'user', content: `DATEN (JSON):\n${kurz(body.heute, 3000)}` }], maxTokens: 400 })); }
+      catch (e) { console.warn('[ki/heute]', e && e.message || e); }
+    }
+    return json({ text: text || null, at: Date.now() }, env);
   }
   if (url.pathname === '/ki/chart') {
     if (!(await kiLimit(env, request, 'chart', 30))) return json({ error: 'LIMIT' }, env, 429);
