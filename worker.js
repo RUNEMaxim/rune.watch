@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-1900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-1930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8026,14 +8026,29 @@ async function keysignBlame(env) {
   const cKey = new Request('https://ks-blame.cache/v1');
   try { const c = await caches.default.match(cKey); if (c) return await c.json(); } catch (e) {}
   const filter = "message.action='/types.MsgTssKeysignFail'";
+  // Seitenweise (gesehen 17.11.2026: 100 Meldungen deckten nur ~20 Bloecke ab, also ~2 Minuten -- BASE war nicht
+  // dabei). Deshalb bis zu RW_KS_SEITEN Seiten je 100 nachladen.
+  const RW_KS_SEITEN = 15;
   const pfade = [
-    `/cosmos/tx/v1beta1/txs?query=${encodeURIComponent(filter)}&order_by=ORDER_BY_DESC&limit=100&page=1`,
-    `/cosmos/tx/v1beta1/txs?events=${encodeURIComponent(filter)}&order_by=ORDER_BY_DESC&pagination.limit=100`,
-    `/cosmos/tx/v1beta1/txs?query=${encodeURIComponent(filter)}&order_by=2&limit=100`,
+    pg => `/cosmos/tx/v1beta1/txs?query=${encodeURIComponent(filter)}&order_by=ORDER_BY_DESC&limit=100&page=${pg}`,
+    pg => `/cosmos/tx/v1beta1/txs?events=${encodeURIComponent(filter)}&order_by=ORDER_BY_DESC&pagination.limit=100&pagination.offset=${(pg - 1) * 100}`,
+    pg => `/cosmos/tx/v1beta1/txs?query=${encodeURIComponent(filter)}&order_by=2&limit=100&page=${pg}`,
   ];
   let j = null, quelle = null, fehler = [];
-  for (const pf of pfade) {
-    try { const r = await fetchFromBases(getThornodeBases(), pf, { timeoutMs: 15000 }); if (r && (Array.isArray(r.tx_responses) || Array.isArray(r.txs))) { j = r; quelle = pf.split('?')[1].split('=')[0]; break; } fehler.push('leer'); }
+  let seiten = 0;
+  for (const mk of pfade) {
+    const pf = mk(1);
+    try { const r = await fetchFromBases(getThornodeBases(), pf, { timeoutMs: 15000 }); if (r && (Array.isArray(r.tx_responses) || Array.isArray(r.txs))) { j = r; quelle = pf.split('?')[1].split('=')[0]; seiten = 1;
+        // weitere Seiten parallel; jede liefert tx_responses mit eingebettetem tx
+        const mehr = await Promise.all(Array.from({ length: RW_KS_SEITEN - 1 }, (_, i) => fetchFromBases(getThornodeBases(), mk(i + 2), { timeoutMs: 15000 }).catch(() => null)));
+        // je Seite txs und tx_responses paarweise halten (txs[i] gehoert zu tx_responses[i])
+        const alleResp = [], alleTx = [];
+        const nimm = m => { const rs = Array.isArray(m.tx_responses) ? m.tx_responses : []; const ts = Array.isArray(m.txs) ? m.txs : [];
+          rs.forEach((x, i) => { alleResp.push(x); alleTx.push(ts[i] || (x && x.tx) || null); }); return rs.length; };
+        nimm(r);
+        for (const m of mehr) if (m && nimm(m)) seiten++;
+        j = { tx_responses: alleResp, txs: alleTx };
+        break; } fehler.push('leer'); }
     catch (e) { fehler.push(String(e && e.message || e).slice(0, 80)); }
   }
   const [nodes, lb] = await Promise.all([fetchNodes().catch(() => null), fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null)]);
@@ -8065,7 +8080,7 @@ async function keysignBlame(env) {
   const liste = [...zaehl.entries()].map(([pk, e]) => { const n = proPub.get(pk);
     return { node: n ? String(n.node_address) : null, operator: n ? String(n.node_operator_address || '') : null, pubkey: pk, runden: e.runden.size, chains: [...e.chains], letzteHoehe: e.letzte || null }; })
     .sort((a, b) => b.runden - a.runden);
-  const out = { at: Date.now(), quelle, meldungen: gesehen, vonHoehe: vonH, bisHoehe: bisH, nodes: liste, fehler: j ? null : fehler };
+  const out = { at: Date.now(), quelle, seiten, meldungen: gesehen, minuten: vonH && bisH ? Math.round((bisH - vonH) * 6 / 60) : null, vonHoehe: vonH, bisHoehe: bisH, nodes: liste, fehler: j ? null : fehler };
   try { await caches.default.put(cKey, new Response(JSON.stringify(out), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' } })); } catch (e) {}
   return out;
 }
