@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-1440'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-1800'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7266,7 +7266,7 @@ const KI_APP_HANDBUCH = 'APP-HANDBUCH rune.watch (THORChain-Dashboard; du bist "
   ' (3) SWAP: Tauschfenster ueber THORChain (inkl. Hinweis auf native XMR-Swaps), zeigt angehaltene Chains.' +
   ' (4) EARN (nur sichtbar, wenn die Wallet TCY oder bRUNE haelt): TCY-Karte (gestakte TCY, taeglich RUNE fuer Staker, noch nicht abgeholte RUNE) und bRUNE-Karte (Rujira).' +
   ' (5) VOLUME: 24h-Swap-Volumen und Volumen-Historie (Midgard), POL-Karte (Protocol Owned Liquidity je Pool mit APY; Werkzeug pol, pools), RUNE-Angebot, Karte "Revenue vs. Marketcap" (Swap-Gebuehren in USD je Woche/Monat gegen die Marketcap, gruene Linie = "ausgeglichen bei", Abweichung in %; Werkzeug revenue_vs_marketcap), Cross-Chain-Vergleich THORChain / NEAR Intents / Chainflip / Maya (Werkzeug cross_chain_vergleich).' +
-  ' (6) NODES: alle Nodes mit Status, Bond, Slash-Punkten, Version, Churn-out-Kandidaten (Werkzeug node_info, thorchain_updates).' +
+  ' (6) NODES: alle Nodes mit Status, Bond, Slash-Punkten, Version, Churn-out-Kandidaten, haengende Vault-Migrationen und haengende Auszahlungen (z. B. ein Refund auf BASE, der den Churn blockiert, mit den Vault-Mitgliedern, die die Kette nicht aktuell beobachten -- meist RPC-Problem beim Betreiber; Push an Bonder, deren Node dabei ist) (Werkzeug node_info, thorchain_updates).' +
   ' MEHR-Menue: THORChain News (KI), News & Netzwerk-Status (devops.thorchain.org, Halts, Abstimmungen; Werkzeug thorchain_updates), Tutorials, direkte Links, Datenschutz, Nutzungsbedingungen, Telegram, X, GitHub, rune.watch unterstuetzen. Push-Benachrichtigungen: Churn, Rewards, Kaufsignal (KI), Tagesbericht (KI). KI-Fenster: Frag rune.watch und Tagesbericht.' +
   ' Erfinde keine Funktionen, die hier nicht stehen; wenn du nicht sicher bist, ob es etwas in der App gibt, sag das.';
 async function handleKi(request, env, url) {
@@ -8009,6 +8009,44 @@ const vultisigHinweis = (de, art) => {
   };
   return ' \u00b7 ' + (T[art] || T.bond);
 };
+// HAENGENDE AUSZAHLUNGEN (gewuenscht 17.11.2026 nach "We can't churn until this refund clears ... ask these NOs
+// to make the BASE RPC switch"): Ausgehende Zahlungen eines Vaults (alles ausser MIGRATE), die seit mehr als 300
+// Bloecken nicht signiert werden. Je Vault und Kette die Mitglieder, die diese Kette nicht oder deutlich verspaetet
+// beobachten (observe_chains) -- das sind die Betreiber, die handeln muessen. Gleiche Logik wie in der App.
+const STAU_TOL = { BTC: 2, BCH: 2, LTC: 3, DOGE: 5, ETH: 8, BSC: 25, BASE: 30, AVAX: 25, GAIA: 10, TRON: 20, XRP: 10, SOL: 60 };
+async function churnStauLage(env, nodes) {
+  const [vaults, queue, lb] = await Promise.all([
+    fetchFromBases(getThornodeBases(), '/thorchain/vaults/asgard').catch(() => null),
+    fetchFromBases(getThornodeBases(), '/thorchain/queue/outbound').catch(() => null),
+    fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null)]);
+  if (!Array.isArray(vaults) || !Array.isArray(queue)) return [];
+  const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
+  if (!H) return [];
+  const proKey = new Map();
+  for (const v of vaults) for (const k of [v.pub_key, v.pub_key_eddsa].filter(Boolean)) proKey.set(String(k), v);
+  const stau = new Map();
+  for (const x of queue) {
+    if (/^MIGRATE/i.test(String(x && x.memo || ''))) continue;
+    const v = proKey.get(String(x && x.vault_pub_key || '')); if (!v) continue;
+    const chain = String(x.chain || String(x.coin && x.coin.asset || '').split('.')[0] || '?').toUpperCase();
+    const key = v.pub_key + '|' + chain, h = Number(x.height) || 0;
+    const e = stau.get(key) || { vault: String(v.pub_key), membership: (v.membership || []).map(String), chain, count: 0, since: 0 };
+    e.count++; if (h > 0 && (!e.since || h < e.since)) e.since = h;
+    stau.set(key, e);
+  }
+  const maxH = {};
+  for (const n of nodes) if (String(n.status) === 'Active') for (const c of (n.observe_chains || [])) { const C = String(c.chain).toUpperCase(); maxH[C] = Math.max(maxH[C] || 0, Number(c.height) || 0); }
+  const out = [];
+  for (const e of stau.values()) {
+    if (!(e.since && H - e.since > 300)) continue;
+    const tol = STAU_TOL[e.chain] || 30;
+    const mitglieder = nodes.filter(n => { const secp = n.pub_key_set && n.pub_key_set.secp256k1; return (Array.isArray(n.signer_membership) && n.signer_membership.includes(e.vault)) || (secp && e.membership.includes(String(secp))); });
+    const fehlen = mitglieder.filter(n => { const c = (n.observe_chains || []).find(o => String(o.chain).toUpperCase() === e.chain); return !c || (maxH[e.chain] && Number(c.height) < maxH[e.chain] - tol); })
+      .map(n => String(n.node_address).toLowerCase());
+    out.push({ key: e.vault.slice(-10) + ':' + e.chain + ':' + e.since, chain: e.chain, count: e.count, bloecke: H - e.since, fehlen, mitglieder: mitglieder.length });
+  }
+  return out;
+}
 async function syncPushPersoenlich(env) {
   const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
   const subs = r.results || [];
@@ -8033,11 +8071,13 @@ async function syncPushPersoenlich(env) {
   const heute = new Date().toISOString().slice(0, 10);
   let abst = null;
   try { abst = await offeneAbstimmungen(env, nodes, false); } catch (e) { abst = null; }
-  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute, abst); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
+  let stau = [];
+  try { stau = await churnStauLage(env, nodes); } catch (e) { stau = []; }
+  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
 }
 // EIN ABO (eigene Funktion, damit ein Fehler bei einem Abo nicht alle folgenden stoppt -- vorher
 // brach die ganze Schleife ab, und alle spaeteren Abos bekamen in diesem Durchgang nichts).
-async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
+async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
   {
     let p = {}, z = {}, adr = [];
     try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
@@ -8223,6 +8263,21 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst) {
       // Erledigte Abstimmungen vergessen (nach 30 Tagen auch alte Eintraege)
       for (const k of Object.keys(gemeldet)) if (!offen.has(k) && Date.now() - gemeldet[k] > 3600e3) delete gemeldet[k];
       z.abst = gemeldet;
+    }
+    // DEINE NODE BLOCKIERT EINE HAENGENDE AUSZAHLUNG (und damit den Churn): einmal je Stau und Node.
+    if (p.abst !== false && Array.isArray(stau) && stau.length) {
+      const gemeldet = z.stau || {}, offen = new Set();
+      for (const st of stau) for (const na of Object.keys(neu)) {
+        if (!(neu[na].b > 0.01) || !st.fehlen.includes(String(na).toLowerCase())) continue;
+        const k = st.key + ':' + na; offen.add(k);
+        if (gemeldet[k]) continue;
+        gemeldet[k] = Date.now();
+        meldungen.push({ titel: 'rune.watch', tag: 'rw-stau-' + st.chain + '-' + na,
+          text: de ? `Deine Node ${kurzNode(na)} beobachtet ${st.chain} nicht aktuell \u2013 ${st.count} ${st.chain}-Auszahlung${st.count === 1 ? '' : 'en'} h\u00e4ng${st.count === 1 ? 't' : 'en'} und blockier${st.count === 1 ? 't' : 'en'} den Churn. Bitte deinen Betreiber, den ${st.chain}-RPC zu pr\u00fcfen.`
+                   : `Your node ${kurzNode(na)} isn't observing ${st.chain} properly \u2013 ${st.count} ${st.chain} outbound${st.count === 1 ? ' is' : 's are'} stuck and block${st.count === 1 ? 's' : ''} the churn. Ask your operator to check the ${st.chain} RPC.` });
+      }
+      for (const k of Object.keys(gemeldet)) if (!offen.has(k) && Date.now() - gemeldet[k] > 3600e3) delete gemeldet[k];
+      z.stau = gemeldet;
     }
     // TCY-AUSZAHLUNG (gewuenscht): Einmal je neuem Auszahlungstag. Betrag = gestakte TCY aller
     // Adressen x RUNE je TCY dieses Tages (dieselbe Referenz wie die TCY-Karte: tcy_native_ref,
