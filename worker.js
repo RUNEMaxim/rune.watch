@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-1830'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-1900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5689,6 +5689,7 @@ export default {
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
+      if (url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
       if (url.pathname === '/bot-check') {
         // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
         if (url.searchParams.get('neu') === '1') {
@@ -8014,6 +8015,60 @@ const vultisigHinweis = (de, art) => {
 // Bloecken nicht signiert werden. Je Vault und Kette die Mitglieder, die diese Kette nicht oder deutlich verspaetet
 // beobachten (observe_chains) -- das sind die Betreiber, die handeln muessen. Gleiche Logik wie in der App.
 const STAU_TOL = { BTC: 2, BCH: 2, LTC: 3, DOGE: 5, ETH: 8, BSC: 25, BASE: 30, AVAX: 25, GAIA: 10, TRON: 20, XRP: 10, SOL: 60 };
+// SIGNATUR-FEHLER AUS DER CHAIN (gewuenscht 17.11.2026: "wieso ist das nicht oeffentlich?"): Scheitert eine
+// Signatur-Runde (TSS keysign), reicht jede beteiligte Node eine MsgTssKeysignFail mit einer Schuldliste
+// (blame_nodes, je Pubkey) ein. Diese Transaktionen stehen oeffentlich in den Bloecken. Hier werden die letzten
+// gesucht (Cosmos-Tx-Suche), je Node gezaehlt, wie oft sie in den letzten ~24 h als fehlend gemeldet wurde, und die
+// Pubkeys den Node-Adressen zugeordnet. Das ist ungefaehr die Liste, die die Entwickler im Discord posten.
+// Defensiv gebaut: unterschiedliche Server und SDK-Versionen nehmen die Suche unterschiedlich an (query= / events=);
+// klappt keine Variante, liefert der Endpunkt eine leere Liste mit dem Grund -- keine erfundenen Daten.
+async function keysignBlame(env) {
+  const cKey = new Request('https://ks-blame.cache/v1');
+  try { const c = await caches.default.match(cKey); if (c) return await c.json(); } catch (e) {}
+  const filter = "message.action='/types.MsgTssKeysignFail'";
+  const pfade = [
+    `/cosmos/tx/v1beta1/txs?query=${encodeURIComponent(filter)}&order_by=ORDER_BY_DESC&limit=100&page=1`,
+    `/cosmos/tx/v1beta1/txs?events=${encodeURIComponent(filter)}&order_by=ORDER_BY_DESC&pagination.limit=100`,
+    `/cosmos/tx/v1beta1/txs?query=${encodeURIComponent(filter)}&order_by=2&limit=100`,
+  ];
+  let j = null, quelle = null, fehler = [];
+  for (const pf of pfade) {
+    try { const r = await fetchFromBases(getThornodeBases(), pf, { timeoutMs: 15000 }); if (r && (Array.isArray(r.tx_responses) || Array.isArray(r.txs))) { j = r; quelle = pf.split('?')[1].split('=')[0]; break; } fehler.push('leer'); }
+    catch (e) { fehler.push(String(e && e.message || e).slice(0, 80)); }
+  }
+  const [nodes, lb] = await Promise.all([fetchNodes().catch(() => null), fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null)]);
+  const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
+  const proPub = new Map();
+  for (const n of (Array.isArray(nodes) ? nodes : [])) { const k = n && n.pub_key_set && n.pub_key_set.secp256k1; if (k) proPub.set(String(k), n); }
+  const zaehl = new Map(); let gesehen = 0, vonH = null, bisH = null;
+  if (j) {
+    const resps = Array.isArray(j.tx_responses) ? j.tx_responses : [];
+    const txs = Array.isArray(j.txs) ? j.txs : resps.map(r => r && r.tx);
+    txs.forEach((tx, i) => {
+      const h = Number(resps[i] && resps[i].height) || 0;
+      if (H && h && h < H - 14400) return; // nur die letzten ~24 h
+      const msgs = (tx && tx.body && tx.body.messages) || [];
+      for (const m of msgs) {
+        if (!/TssKeysignFail/i.test(String(m && m['@type'] || ''))) continue;
+        gesehen++; if (h) { vonH = vonH == null ? h : Math.min(vonH, h); bisH = bisH == null ? h : Math.max(bisH, h); }
+        const chain = String((m.coins && m.coins[0] && m.coins[0].asset) || '').split('.')[0].toUpperCase() || null;
+        const runde = String(m.id || m.memo || h);
+        for (const b of ((m.blame && m.blame.blame_nodes) || [])) {
+          const pk = String(b && b.pubkey || ''); if (!pk) continue;
+          const e = zaehl.get(pk) || { runden: new Set(), chains: new Set(), letzte: 0 };
+          e.runden.add(runde); if (chain) e.chains.add(chain); e.letzte = Math.max(e.letzte, h);
+          zaehl.set(pk, e);
+        }
+      }
+    });
+  }
+  const liste = [...zaehl.entries()].map(([pk, e]) => { const n = proPub.get(pk);
+    return { node: n ? String(n.node_address) : null, operator: n ? String(n.node_operator_address || '') : null, pubkey: pk, runden: e.runden.size, chains: [...e.chains], letzteHoehe: e.letzte || null }; })
+    .sort((a, b) => b.runden - a.runden);
+  const out = { at: Date.now(), quelle, meldungen: gesehen, vonHoehe: vonH, bisHoehe: bisH, nodes: liste, fehler: j ? null : fehler };
+  try { await caches.default.put(cKey, new Response(JSON.stringify(out), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=300' } })); } catch (e) {}
+  return out;
+}
 async function churnStauLage(env, nodes) {
   const [vaults, queue, lb, inb] = await Promise.all([
     fetchFromBases(getThornodeBases(), '/thorchain/vaults/asgard').catch(() => null),
@@ -8040,6 +8095,9 @@ async function churnStauLage(env, nodes) {
   }
   const maxH = {};
   for (const n of nodes) if (String(n.status) === 'Active') for (const c of (n.observe_chains || [])) { const C = String(c.chain).toUpperCase(); maxH[C] = Math.max(maxH[C] || 0, Number(c.height) || 0); }
+  let blame = null;
+  try { blame = await keysignBlame(env); } catch (e) { blame = null; }
+  const blameNodes = new Map(((blame && blame.nodes) || []).filter(b => b.node).map(b => [String(b.node).toLowerCase(), b]));
   const out = [];
   for (const e of stau.values()) {
     if (!halt.has(e.chain) && !(e.since && H - e.since > 300)) continue;
@@ -8047,6 +8105,8 @@ async function churnStauLage(env, nodes) {
     const mitglieder = nodes.filter(n => { const secp = n.pub_key_set && n.pub_key_set.secp256k1; return (Array.isArray(n.signer_membership) && n.signer_membership.includes(e.vault)) || (secp && e.membership.includes(String(secp))); });
     const fehlen = mitglieder.filter(n => { const c = (n.observe_chains || []).find(o => String(o.chain).toUpperCase() === e.chain); return !c || (maxH[e.chain] && Number(c.height) < maxH[e.chain] - tol); })
       .map(n => String(n.node_address).toLowerCase());
+    // zusaetzlich: Mitglieder, die in den Signatur-Fehlern dieser Kette als Schuldige stehen
+    for (const n of mitglieder) { const a = String(n.node_address).toLowerCase(), b = blameNodes.get(a); if (b && (!b.chains.length || b.chains.includes(e.chain)) && !fehlen.includes(a)) fehlen.push(a); }
     out.push({ key: e.vault.slice(-10) + ':' + e.chain + ':' + e.since, chain: e.chain, count: e.count, bloecke: H - e.since, fehlen, mitglieder: mitglieder.length });
   }
   return out;
