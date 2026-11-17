@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-0010'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-1330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7259,6 +7259,7 @@ const KI_GLOSSAR = 'Glossar rune.watch/THORChain: Bond = gesperrte RUNE eines Bo
 // was dort steht, woher die Zahlen kommen und welches Werkzeug die KI dafuer nutzt. Bei neuen Funktionen ergaenzen.
 const KI_APP_HANDBUCH = 'APP-HANDBUCH rune.watch (THORChain-Dashboard; du bist "Frag rune.watch" in dieser App). Wenn jemand nach etwas "in der App" fragt, nutze das passende Werkzeug und sag, wo es in der App steht. Seiten (am Handy wischen oder unten antippen; Kontext ansicht.offeneSeite = chart|details|swap|earn|volume|nodes):' +
   ' (1) CHART: RUNE/USD-Kerzen (1H/4H/1D/1W), Zeichenwerkzeuge (Linie, Trendlinie, Fibonacci, Messen), Indikatoren (RSI, Volumen usw.), Log-Skala, Vergleich mit anderen Coins und RUNE/BTC, eigene Kaeufe im Chart. Bot-Signale = Dreiecke (durchgezogen = bestaetigt, gestrichelt = unsicher); Antippen zeigt die Backtest-Bilanz und die Gegenpruefung mit zweiter Bedingung (Werkzeug bot_signale). Muster-Ziele, Trendbruch-Linien, "Chart in Worten" (KI). Werkzeug: rune_kurs_und_volumen, bot_signale.' +
+  ' HEUTE-MITTEILUNG ("Dein Tag mit rune.watch", einmal am Tag beim ersten Oeffnen oben als Banner, nur mit Wallet): RUNE gestern verdient (ca., aus der Live-Rendite des laufenden Churns), Auszahlung der letzten 24 h, RUNE-Kurs 24 h, Zustand der eigenen Nodes (nicht aktiv, Austritt, Churn-out-Risiko), angehaltene Chains und ein KI-Satz zur Lage.' +
   ' (2) BOND REWARDS (details): Portfolio-Wert, Wallets (thor1, THORName), gebondete RUNE je Node, laufender Reward dieses Churns (waechst jeden Block, ausgezahlt beim Churn), Countdown zum naechsten Churn, Reward-Historie je Churn, APY je Churn und Durchschnitt (aus echten Auszahlungen, nicht geschaetzt), Rewards nach Monat, CSV-Export und Steuer-Jahresbericht, Wachstumsrechner, Steuerfrei-Status Deutschland (FIFO, 1 Jahr), Bond-Yield-Kachel (Anteil der Rewards, der ausgezahlt wird; Memo BONDYIELD) mit Planer. Daten kommen im Kontext (letzteRewards, apyJeChurn, nodes, naechsterChurn). Werkzeug: netzwerk_und_churn, churn_verlauf, node_info.' +
   ' (3) SWAP: Tauschfenster ueber THORChain (inkl. Hinweis auf native XMR-Swaps), zeigt angehaltene Chains.' +
   ' (4) EARN (nur sichtbar, wenn die Wallet TCY oder bRUNE haelt): TCY-Karte (gestakte TCY, taeglich RUNE fuer Staker, noch nicht abgeholte RUNE) und bRUNE-Karte (Rujira).' +
@@ -7355,6 +7356,17 @@ Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards wer
     await env.DB.prepare('INSERT INTO ki_feedback (at, gut, frage, antwort, notiz, werkzeuge) VALUES (?, ?, ?, ?, ?, ?)')
       .bind(Date.now(), body.gut ? 1 : 0, String(body.frage || '').slice(0, 600), String(body.antwort || '').slice(0, 2000), String(body.notiz || '').slice(0, 600), JSON.stringify(body.werkzeuge || []).slice(0, 300)).run();
     return json({ ok: true }, env);
+  }
+  // HEUTE-KARTE (gewuenscht 17.11.2026: "Heute"-Ansicht beim Oeffnen mit KI): EIN kurzer Satz zur Lage dieses
+  // Bond Providers, nur aus den Zahlen, die die App mitschickt. Die App speichert die Antwort 3 Stunden.
+  if (url.pathname === '/ki/heute') {
+    if (!(await kiLimit(env, request, 'heute', 24))) return json({ error: 'LIMIT' }, env, 429);
+    const system = de
+      ? `Du schreibst für die "Heute"-Karte von rune.watch (THORChain) GENAU EINEN Satz, höchstens 28 Wörter, Deutsch, an den Nutzer ("du"). Nur aus den gelieferten Zahlen; nichts erfinden, nichts schätzen. Das Wichtigste zuerst: ist eine Node-Warnung oder ein Halt da, geht es darum; sonst um Rewards und Churn; den RUNE-Kurs nur, wenn er sich deutlich bewegt (mehr als 3 %). Keine Kauf- oder Verkaufsempfehlung, keine Kursprognose, keine Emojis, keine Anführungszeichen.`
+      : `You write ONE sentence (max 28 words, English, addressing the user as "you") for the "Today" card of rune.watch (THORChain). Only from the numbers provided; invent or estimate nothing. Most important first: node warning or halt if present; otherwise rewards and churn; mention RUNE price only if it moved clearly (more than 3 %). No buy/sell advice, no price forecast, no emojis, no quotes.`;
+    let text = await kiText(env, { system, nachrichten: [{ role: 'user', content: `DATEN (JSON):\n${kurz(body.heute, 3000)}` }], maxTokens: 120 });
+    text = String(text || '').replace(/^["„“]+|["“”]+$/g, '').trim().slice(0, 260);
+    return json({ text, at: Date.now() }, env);
   }
   if (url.pathname === '/ki/chart') {
     if (!(await kiLimit(env, request, 'chart', 30))) return json({ error: 'LIMIT' }, env, 429);
