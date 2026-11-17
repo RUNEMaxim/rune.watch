@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-1800'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-1830'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8015,10 +8015,14 @@ const vultisigHinweis = (de, art) => {
 // beobachten (observe_chains) -- das sind die Betreiber, die handeln muessen. Gleiche Logik wie in der App.
 const STAU_TOL = { BTC: 2, BCH: 2, LTC: 3, DOGE: 5, ETH: 8, BSC: 25, BASE: 30, AVAX: 25, GAIA: 10, TRON: 20, XRP: 10, SOL: 60 };
 async function churnStauLage(env, nodes) {
-  const [vaults, queue, lb] = await Promise.all([
+  const [vaults, queue, lb, inb] = await Promise.all([
     fetchFromBases(getThornodeBases(), '/thorchain/vaults/asgard').catch(() => null),
     fetchFromBases(getThornodeBases(), '/thorchain/queue/outbound').catch(() => null),
-    fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null)]);
+    fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null),
+    fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses').catch(() => null)]);
+  // angehaltene Chains: deren Auszahlungen haengen immer (THORChain verteilt sie alle 300 Bloecke mit neuer Hoehe um,
+  // das Alter erreicht die Schwelle dann nie -- gemeldet: BASE angehalten, Refund haengt, nichts erkannt)
+  const halt = new Set((Array.isArray(inb) ? inb : []).filter(x => x && (x.halted || x.chain_trading_paused)).map(x => String(x.chain).toUpperCase()));
   if (!Array.isArray(vaults) || !Array.isArray(queue)) return [];
   const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
   if (!H) return [];
@@ -8038,7 +8042,7 @@ async function churnStauLage(env, nodes) {
   for (const n of nodes) if (String(n.status) === 'Active') for (const c of (n.observe_chains || [])) { const C = String(c.chain).toUpperCase(); maxH[C] = Math.max(maxH[C] || 0, Number(c.height) || 0); }
   const out = [];
   for (const e of stau.values()) {
-    if (!(e.since && H - e.since > 300)) continue;
+    if (!halt.has(e.chain) && !(e.since && H - e.since > 300)) continue;
     const tol = STAU_TOL[e.chain] || 30;
     const mitglieder = nodes.filter(n => { const secp = n.pub_key_set && n.pub_key_set.secp256k1; return (Array.isArray(n.signer_membership) && n.signer_membership.includes(e.vault)) || (secp && e.membership.includes(String(secp))); });
     const fehlen = mitglieder.filter(n => { const c = (n.observe_chains || []).find(o => String(o.chain).toUpperCase() === e.chain); return !c || (maxH[e.chain] && Number(c.height) < maxH[e.chain] - tol); })
