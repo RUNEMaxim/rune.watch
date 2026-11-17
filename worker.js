@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-1930'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-17-1940'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5689,7 +5689,7 @@ export default {
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
-      if (url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
+      if (false && url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
       if (url.pathname === '/bot-check') {
         // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
         if (url.searchParams.get('neu') === '1') {
@@ -8151,7 +8151,8 @@ async function syncPushPersoenlich(env) {
   let abst = null;
   try { abst = await offeneAbstimmungen(env, nodes, false); } catch (e) { abst = null; }
   let stau = [];
-  try { stau = await churnStauLage(env, nodes); } catch (e) { stau = []; }
+  // HAENGENDE AUSZAHLUNGEN AUSGESCHALTET (gewuenscht 17.11.2026: "lass das Ganze raus")
+  // try { stau = await churnStauLage(env, nodes); } catch (e) { stau = []; }
   for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
 }
 // EIN ABO (eigene Funktion, damit ein Fehler bei einem Abo nicht alle folgenden stoppt -- vorher
