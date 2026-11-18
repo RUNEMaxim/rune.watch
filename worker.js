@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1345'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8247,6 +8247,8 @@ async function netzZustand(env) {
   const churn = M('HALTCHURNING') ? 'halt' : v.some(x => /init/i.test(String(x && x.status || ''))) ? 'keygen' : v.some(x => /retiring/i.test(String(x && x.status || ''))) ? 'migration' : 'normal';
   // Nur der GLOBALE Halt zaehlt (einzelne Contracts haben eigene HALTWASM...-Schluessel -- das ist kein Netzwerk-Halt)
   const wasm = Object.keys(mimir).some(k => /^HALTWASM(GLOBAL)?$/i.test(k) && M(k));
+  // Zum Nachpruefen in der App: welche HALTWASM-Schluessel gesetzt sind (Name = Wert)
+  const wasmSchluessel = Object.keys(mimir).filter(k => /^HALTWASM/i.test(k) && Number(mimir[k]) > 0).slice(0, 12).map(k => k + ' = ' + mimir[k]);
   // Warteschlange: aeltester Eintrag in Minuten (6 s je Block)
   const q = Array.isArray(queue) ? queue : [];
   const alter = x => H && Number(x && x.height) ? Math.max(0, (H - Number(x.height)) * 6 / 60) : 0;
@@ -8282,7 +8284,7 @@ async function netzZustand(env) {
   try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abst = ((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
   const mimirWerte = {};
   for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE|SUPPLY/i.test(k)) mimirWerte[k] = w; // SUPPLY aendert sich laufend (Burn)
-  return { at: Date.now(), hoehe: H, churn, ketten, wasm, warteschlange, jails, lag, abst, aktiv: aktiv.length, mimirWerte };
+  return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, aktiv: aktiv.length, mimirWerte };
 }
 const NETZ_CHURN_TXT = {
   halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
