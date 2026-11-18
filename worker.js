@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1510'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1520'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8151,6 +8151,14 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   const kettenDa = new Set((Array.isArray(inbAbst) ? inbAbst : []).map(x => String(x && x.chain || '').toUpperCase()).filter(Boolean));
   const alt = await abstimmungenVor30Tagen(env).catch(() => null);
   const passed = await mimirPassedLaden(env).catch(() => new Map());
+  // EIGENE MITSCHRIFT (gewuenscht 18.11.2026: "erst mit Votes anfangen, die in den letzten 90 Tagen hinzukamen"): wann
+  // der Worker jede Stimme (Schluessel|Wert|Node) zum ersten Mal gesehen hat. Beim allerersten Lauf gilt alles
+  // Vorhandene als alt (0) -- danach zaehlt jede neue Stimme ab ihrem ersten Auftauchen. Unabhaengig vom Archiv-Knoten.
+  let gesehen = null, gesehenNeu = false;
+  try { gesehen = JSON.parse((await pushState(env, 'abstGesehen')) || 'null'); } catch (e) { gesehen = null; }
+  const ersterLauf = !gesehen || typeof gesehen !== 'object';
+  if (ersterLauf) gesehen = {};
+  const jetztMs = Date.now();
   const angenommen = [];
   if (!Array.isArray(nodes) || !roh) return null;
   // SCHON IN KRAFT (gemeldet 18.11.2026: "ADR25 wurde schon vor langer Zeit passed"): Stimmen bleiben bei den Nodes
@@ -8188,24 +8196,32 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     if (topWert == null || topWert === 'undefined' || topWert === '') continue;
     const addChain = /^ADD-?CHAIN-?([A-Z]+)$/i.exec(key);
     if (addChain && kettenDa.has(addChain[1].toUpperCase())) continue;
-    // LAEUFT SIE NOCH? Nur zeigen, wenn seit 90 Tagen mindestens eine aktive Node NEU fuer den fuehrenden Wert gestimmt
-    // hat. Keine Prozent-Grenze (gewuenscht 18.11.2026: "50-%-Regel ist Quatsch").
-    let neu30 = null;
+    // LAEUFT SIE NOCH? Zeigen, wenn in den letzten 90 Tagen mindestens eine aktive Node NEU fuer den fuehrenden Wert
+    // gestimmt hat -- laut Archiv-Vergleich ODER laut eigener Mitschrift. Keine Prozent-Grenze.
+    let neu30 = null, neuEigen = 0;
+    for (const [sig, w] of m) {
+      if (w !== topWert) continue;
+      const gk = key + '|' + w + '|' + sig.slice(-8);
+      if (gesehen[gk] == null) { gesehen[gk] = ersterLauf ? 0 : jetztMs; gesehenNeu = true; }
+      if (gesehen[gk] > 0 && jetztMs - gesehen[gk] < 90 * 864e5) neuEigen++;
+    }
     if (alt && alt.sets) {
       const vorher = new Set(alt.sets[key + '|' + topWert] || []);
       neu30 = 0;
       for (const [sig, w] of m) if (w === topWert && !vorher.has(sig.slice(-8))) neu30++;
-      if (!neu30) continue;
     }
+    if (!(neu30 > 0) && !(neuEigen > 0)) continue;
+    if (neu30 == null) neu30 = neuEigen;
     liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig, abgestimmt: m.size, neu30, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
       fehlen: aktiv.filter(a => !m.has(a)) });
   }
   liste.sort((a, b) => b.stimmen / b.noetig - a.stimmen / a.noetig);
   angenommen.sort((a, b) => String(b.am || '').localeCompare(String(a.am || '')));
+  if (gesehenNeu || ersterLauf) await pushStateSet(env, 'abstGesehen', JSON.stringify(gesehen)).catch(() => {});
   // Diagnose fuer die App: greift der Altlasten-Filter (Archiv-Vergleich)?
   let filterFehler = null; if (!(alt && alt.sets)) { try { const f = JSON.parse((await pushState(env, 'abstAlt30Fehler')) || 'null'); filterFehler = f ? f.fehler : 'noch kein Archiv-Stand'; } catch (e) { filterFehler = 'unbekannt'; } }
   const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20), angenommen: angenommen.slice(0, 30),
-    filter: { archiv: !!(alt && alt.sets), seitHoehe: alt && alt.h || null, fehler: filterFehler } };
+    filter: { archiv: !!(alt && alt.sets), seitHoehe: alt && alt.h || null, fehler: filterFehler, mitschrift: true } };
   try { await pushStateSet(env, 'abstCache', JSON.stringify(erg)); } catch (e) {}
   return erg;
 }
