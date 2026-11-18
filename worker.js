@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1210'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1240'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8347,6 +8347,12 @@ async function netzVerlaufSchritt(env) {
 }
 async function netzVerlaufLesen(env) {
   if (!env.DB) return { ereignisse: [], stand: await netzZustand(env).catch(() => null) };
+  // UNABHAENGIG VOM CRON (gemeldet 18.11.2026: "Meldungen kamen rein, aber nichts zu sehen"): Ist der gespeicherte
+  // Stand aelter als 2 Minuten (Minuten-Aufruf abgebrochen oder Cron fehlt), den Schritt beim Abruf selbst ausfuehren.
+  try {
+    const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
+    if (!alt || !(Date.now() - Number(alt.at) < 120000)) await netzVerlaufSchritt(env);
+  } catch (e) {}
   const [ev, st] = await Promise.all([
     env.DB.prepare('SELECT at, hoehe, art, chain, de, en FROM netz_verlauf ORDER BY at DESC LIMIT 60').all().then(r => r.results || []).catch(() => []),
     env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null)]);
