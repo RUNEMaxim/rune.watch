@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1110'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1200'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5689,6 +5689,7 @@ export default {
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
+      if (url.pathname === '/gebuehren') return json(await gebuehrenUsd().catch(() => null) || {}, env);
       if (url.pathname === '/netz-verlauf') return json(await netzVerlaufLesen(env).catch(() => ({ ereignisse: [], stand: null })), env);
       if (false && url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
       if (url.pathname === '/bot-check') {
@@ -7826,6 +7827,24 @@ async function handlePush(request, env, url) {
       .bind(id, sub.endpoint, keys.p256dh, keys.auth, prefs, body.lang === 'de' ? 'de' : 'en', besitzer, Date.now(), JSON.stringify(adr)).run();
     return json({ ok: true, besitzer: !!besitzer }, env);
   }
+  if (url.pathname === '/push/gebuehr') {
+    await sicherGebuehrTabelle(env);
+    const al = body.alarm;
+    if (!al) { await env.DB.prepare('DELETE FROM push_gebuehr WHERE id = ?').bind(id).run(); return json({ ok: true, aus: true }, env); }
+    const chain = String(al.chain || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 8), usd = Number(al.usd);
+    if (!chain || !(usd > 0) || usd > 10000) return json({ error: 'BAD_ALARM' }, env, 400);
+    // Abo noch nicht bekannt: ohne Themen anlegen (nur fuer diesen Alarm)
+    const keys = sub.keys || {};
+    const da = await env.DB.prepare('SELECT id FROM push_subs WHERE id = ?').bind(id).first();
+    if (!da) {
+      if (!keys.p256dh || !keys.auth) return json({ error: 'NO_KEYS' }, env, 400);
+      await env.DB.prepare('INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, NULL, ?)')
+        .bind(id, sub.endpoint, keys.p256dh, keys.auth, JSON.stringify({ podcast: false, woche: false, tcy: false, abst: false }), body.lang === 'de' ? 'de' : 'en', Date.now(), '[]').run();
+    }
+    await env.DB.prepare('INSERT INTO push_gebuehr (id, chain, usd, lang, unter, at) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(id) DO UPDATE SET chain = excluded.chain, usd = excluded.usd, lang = excluded.lang, unter = 0, at = excluded.at')
+      .bind(id, chain, usd, body.lang === 'de' ? 'de' : 'en', Date.now()).run();
+    return json({ ok: true }, env);
+  }
   if (url.pathname === '/push/test') {
     const row = await env.DB.prepare('SELECT * FROM push_subs WHERE id = ?').bind(id).first();
     if (!row) return json({ error: 'NOT_SUBSCRIBED' }, env, 404);
@@ -7911,6 +7930,43 @@ async function syncHaltsOps(env) {
     }
   } catch (e) {}
 }
+// GEBUEHREN-ALARM (gewuenscht 18.11.2026, Frage aus der Community: "can you set a fee limit to delay payout?"):
+// Outbound-Gebuehr je Chain in USD (inbound_addresses.outbound_fee in Gas-Asset-Einheiten x Poolpreis). Push, sobald
+// die Gebuehr der gewaehlten Chain unter die eigene Grenze faellt. Zwischengespeichert fuer 60 Sekunden.
+let GEBUEHR_CACHE = { at: 0, v: null };
+async function gebuehrenUsd() {
+  if (GEBUEHR_CACHE.v && Date.now() - GEBUEHR_CACHE.at < 60000) return GEBUEHR_CACHE.v;
+  const B = getThornodeBases();
+  const [inb, pools] = await Promise.all([fetchFromBases(B, '/thorchain/inbound_addresses').catch(() => null), fetchFromBases(B, '/thorchain/pools').catch(() => null)]);
+  if (!Array.isArray(inb) || !Array.isArray(pools)) return GEBUEHR_CACHE.v;
+  const preis = {};
+  for (const pl of pools) { const a = String(pl && pl.asset || ''); if (a.includes('-')) continue; const c = a.split('.')[0]; const usd = Number(pl.asset_tor_price) / 1e8; if (usd > 0 && !preis[c]) preis[c] = { usd, asset: a }; }
+  const v = {};
+  for (const x of inb) {
+    const c = String(x && x.chain || '').toUpperCase(); const menge = Number(x && x.outbound_fee) / 1e8; const pr = preis[c];
+    if (!c || !(menge > 0) || !pr) continue;
+    v[c] = { usd: Math.round(menge * pr.usd * 100) / 100, menge, asset: pr.asset, angehalten: !!x.halted };
+  }
+  GEBUEHR_CACHE = { at: Date.now(), v };
+  return v;
+}
+async function sicherGebuehrTabelle(env) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS push_gebuehr (id TEXT PRIMARY KEY, chain TEXT, usd REAL, lang TEXT, unter INTEGER DEFAULT 0, at INTEGER)').run(); }
+async function syncGebuehrAlarm(env) {
+  await sicherGebuehrTabelle(env);
+  const r = await env.DB.prepare('SELECT g.id AS gid, g.chain, g.usd AS grenze, g.lang AS glang, g.unter, s.* FROM push_gebuehr g JOIN push_subs s ON s.id = g.id WHERE s.fails < 20').all().catch(() => null);
+  const zeilen = (r && r.results) || [];
+  if (!zeilen.length) return;
+  const geb = await gebuehrenUsd(); if (!geb) return;
+  for (const z of zeilen) {
+    const f = geb[String(z.chain).toUpperCase()]; if (!f) continue;
+    const drunter = f.usd <= Number(z.grenze);
+    if (drunter && !z.unter) {
+      const de = (z.glang || z.lang) === 'de';
+      try { await pushSenden(env, z, { titel: de ? `${z.chain}-Gebühr niedrig` : `${z.chain} fee is low`, text: de ? `Auszahlung kostet jetzt ≈ $${f.usd.toFixed(2)} (deine Grenze $${Number(z.grenze).toFixed(2)})` : `Payout now costs ≈ $${f.usd.toFixed(2)} (your limit $${Number(z.grenze).toFixed(2)})`, tag: 'rw-gebuehr-' + z.chain, url: '/#bondyield' }); } catch (e) {}
+    }
+    if (!!drunter !== !!z.unter) await env.DB.prepare('UPDATE push_gebuehr SET unter = ? WHERE id = ?').bind(drunter ? 1 : 0, z.gid).run().catch(() => {});
+  }
+}
 async function syncPreisAlarm(env) {
   try {
     const st = await fetchFromBases(getMidgardBases(), '/stats').catch(() => null);
@@ -7942,6 +7998,7 @@ async function syncPushSchnell(env) {
   if (!Number(anzahl && anzahl.n)) return;
   try { await syncHaltsOps(env); } catch (e) { console.warn('[push] halts 6s', e?.message || e); }
   try { await syncPreisAlarm(env); } catch (e) { console.warn('[push] preis 6s', e?.message || e); }
+  try { await syncGebuehrAlarm(env); } catch (e) { console.warn('[push] gebuehr 6s', e?.message || e); }
   try { await syncPushPersoenlich(env); } catch (e) { console.warn('[push] persoenlich 6s', e?.message || e); }
 }
 async function syncPush(env) {
