@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1050'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1110'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8151,13 +8151,19 @@ async function churnStauLage(env, nodes) {
 // Einzahlungen (inbound halted), Swaps (trading paused), Auszahlungen (Signieren angehalten). Mit Blockhoehe.
 // Quellen: /thorchain/inbound_addresses, /thorchain/mimir, /thorchain/vaults/asgard, /thorchain/lastblock.
 function netzMimirAn(v, h) { v = Number(v) || 0; return v > 0 && (v === 1 || !h || v <= h); }
-async function netzZustand() {
+// ERWEITERT (gewuenscht 18.11.2026, wie thorwatch.com): zusaetzlich Alter der Auszahlungs-Warteschlange, Jails,
+// Chains, bei denen Nodes hinterherhinken (observe_chains), Keygen-Ergebnis, Solvency- und Smart-Contract-Halt,
+// offene Mimir-Abstimmungen und geaenderte Mimir-Werte.
+const NETZ_LAG_MAX = { BTC: 2, BCH: 2, LTC: 3, ZEC: 3, XMR: 5, DOGE: 10, ETH: 20, GAIA: 30, XRP: 30, TRON: 60, BSC: 60, AVAX: 60, BASE: 100, SOL: 300 };
+async function netzZustand(env) {
   const B = getThornodeBases();
-  const [inb, mimir, vaults, lb] = await Promise.all([
+  const [inb, mimir, vaults, lb, nodes, queue] = await Promise.all([
     fetchFromBases(B, '/thorchain/inbound_addresses').catch(() => null),
     fetchFromBases(B, '/thorchain/mimir').catch(() => null),
     fetchFromBases(B, '/thorchain/vaults/asgard').catch(() => null),
-    fetchFromBases(B, '/thorchain/lastblock').catch(() => null)]);
+    fetchFromBases(B, '/thorchain/lastblock').catch(() => null),
+    fetchFromBases(B, '/thorchain/nodes').catch(() => null),
+    fetchFromBases(B, '/thorchain/queue/outbound').catch(() => null)]);
   if (!Array.isArray(inb) || !mimir || typeof mimir !== 'object') return null;
   const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
   const M = k => netzMimirAn(mimir[k], H);
@@ -8168,11 +8174,40 @@ async function netzZustand() {
       ein: !(a.halted || M('HALT' + c + 'CHAIN')),
       swap: !(a.chain_trading_paused || a.global_trading_paused || M('HALT' + c + 'TRADING') || M('HALTTRADING')),
       aus: !(M('HALTSIGNING' + c) || M('HALTSIGNING') || M('HALT' + c + 'CHAIN')),
+      solv: !M('SOLVENCYHALT' + c + 'CHAIN'),
     };
   }
   const v = Array.isArray(vaults) ? vaults : [];
   const churn = M('HALTCHURNING') ? 'halt' : v.some(x => /init/i.test(String(x && x.status || ''))) ? 'keygen' : v.some(x => /retiring/i.test(String(x && x.status || ''))) ? 'migration' : 'normal';
-  return { at: Date.now(), hoehe: H, churn, ketten };
+  const wasm = Object.keys(mimir).some(k => /^HALTWASM/i.test(k) && M(k));
+  // Warteschlange: aeltester Eintrag in Minuten (6 s je Block)
+  const q = Array.isArray(queue) ? queue : [];
+  const alter = x => H && Number(x && x.height) ? Math.max(0, (H - Number(x.height)) * 6 / 60) : 0;
+  const jeKette = {};
+  for (const x of q) { const c = String(x && x.chain || '?').toUpperCase(); jeKette[c] = Math.max(jeKette[c] || 0, alter(x)); }
+  const aeltest = Math.max(0, ...Object.values(jeKette));
+  const warteschlange = { n: q.length, min: Math.round(aeltest), stufe: aeltest >= 240 ? 2 : aeltest >= 60 ? 1 : 0,
+    ketten: Object.entries(jeKette).filter(([, m]) => m >= 60).sort((x, y) => y[1] - x[1]).map(([c]) => c).slice(0, 4) };
+  // Jails und hinterherhinkende Scanner
+  const N = Array.isArray(nodes) ? nodes : [];
+  const aktiv = N.filter(n => n && n.status === 'Active');
+  const jails = N.filter(n => n && (n.status === 'Active' || n.status === 'Ready') && Number(n.jail && n.jail.release_height) > H)
+    .map(n => ({ a: String(n.node_address).slice(-4), k: n.status === 'Active' ? 'a' : 'k', r: String(n.jail && n.jail.reason || '').slice(0, 50) }));
+  const hoechst = {};
+  for (const n of aktiv) for (const o of (n.observe_chains || [])) { const c = String(o.chain).toUpperCase(); hoechst[c] = Math.max(hoechst[c] || 0, Number(o.height) || 0); }
+  const lag = {};
+  for (const c of Object.keys(hoechst)) {
+    const grenze = NETZ_LAG_MAX[c] || 30;
+    const hinten = aktiv.filter(n => { const o = (n.observe_chains || []).find(x => String(x.chain).toUpperCase() === c); return !o || hoechst[c] - (Number(o.height) || 0) > grenze; }).length;
+    const stufe = aktiv.length && hinten >= aktiv.length / 3 ? 2 : hinten >= 3 ? 1 : 0;
+    if (stufe) lag[c] = { n: hinten, stufe };
+  }
+  // Offene Abstimmungen ab der Haelfte der noetigen Stimmen
+  let abst = [];
+  try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abst = ((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
+  const mimirWerte = {};
+  for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE/i.test(k)) mimirWerte[k] = w;
+  return { at: Date.now(), hoehe: H, churn, ketten, wasm, warteschlange, jails, lag, abst, aktiv: aktiv.length, mimirWerte };
 }
 const NETZ_CHURN_TXT = {
   halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
@@ -8181,6 +8216,7 @@ const NETZ_CHURN_TXT = {
   normal: ['Churn abgeschlossen – Netzwerk im Normalbetrieb', 'Churn done – network back to normal'],
 };
 function netzKettenText(c, k) {
+  if (k.solv === false) return { art: 'halt', de: `${c}: Solvency-Halt (Vault-Bestand stimmt nicht)`, en: `${c}: solvency halt (vault balance mismatch)` };
   const alles = k.ein && k.swap && k.aus, nichts = !k.ein && !k.swap && !k.aus;
   if (alles) return { art: 'ok', de: `${c} läuft wieder: Einzahlungen, Auszahlungen und Swaps`, en: `${c} works again: deposits, payouts and swaps` };
   if (nichts) return { art: 'halt', de: `${c} angehalten: keine Einzahlungen, Auszahlungen oder Swaps`, en: `${c} halted: no deposits, payouts or swaps` };
@@ -8188,32 +8224,70 @@ function netzKettenText(c, k) {
   const t = [j(k.aus, 'Auszahlungen', 'payouts'), j(k.ein, 'Einzahlungen', 'deposits'), j(k.swap, 'Swaps', 'swaps')];
   return { art: 'teil', de: `${c} teilweise: ` + t.map(x => x.de).join(' · '), en: `${c} partly working: ` + t.map(x => x.en).join(' · ') };
 }
+function netzWechsel(alt, z) {
+  const neu = [];
+  const add = (art, chain, de, en) => neu.push({ art, chain, de, en });
+  if (alt.churn !== z.churn) {
+    if (alt.churn === 'keygen' && z.churn === 'migration') add('gut', null, 'Keygen erfolgreich – neue Vaults stehen, Migration beginnt', 'Keygen succeeded – new vaults ready, migration starting');
+    else if (alt.churn === 'keygen' && z.churn === 'normal') add('warn', null, 'Keygen ohne Ergebnis – kein neuer Vault, nächster Versuch folgt', 'Keygen without result – no new vault, next attempt follows');
+    else { const t = NETZ_CHURN_TXT[z.churn]; add('churn-' + z.churn, null, t[0], t[1]); }
+  }
+  for (const c of Object.keys(z.ketten)) {
+    const a = alt.ketten && alt.ketten[c], b = z.ketten[c];
+    if (!a || (a.ein === b.ein && a.swap === b.swap && a.aus === b.aus && (a.solv !== false) === (b.solv !== false))) continue;
+    const t = netzKettenText(c, b); add(t.art, c, t.de, t.en);
+  }
+  if (alt.wasm !== undefined && !!alt.wasm !== !!z.wasm) z.wasm ? add('halt', null, 'Smart Contracts angehalten (App-Ebene, z. B. Rujira)', 'Smart contracts halted (app layer, e.g. Rujira)') : add('ok', null, 'Smart Contracts laufen wieder', 'Smart contracts running again');
+  const qa = alt.warteschlange, qz = z.warteschlange;
+  if (qa && qz && qa.stufe !== qz.stufe) {
+    const k = qz.ketten.length ? ' (' + qz.ketten.join(', ') + ')' : '';
+    if (qz.stufe === 0) add('ok', null, 'Auszahlungen laufen wieder zügig', 'Payouts flowing normally again');
+    else add(qz.stufe === 2 ? 'halt' : 'warn', null, `Auszahlungen warten seit über ${qz.stufe === 2 ? 4 : 1} Std.${k} · ${qz.n} in der Warteschlange`, `Payouts waiting over ${qz.stufe === 2 ? 4 : 1} h${k} · ${qz.n} queued`);
+  }
+  if (Array.isArray(alt.jails)) {
+    const vorher = new Set(alt.jails.map(j => j.a));
+    const frisch = (z.jails || []).filter(j => !vorher.has(j.a));
+    if (frisch.length > 3) add('warn', null, `${frisch.length} Nodes gesperrt (Jail)`, `${frisch.length} nodes jailed`);
+    else for (const j of frisch) add('warn', null, `Node …${j.a} gesperrt${j.k === 'k' ? ' (Kandidat, Keygen)' : ''}${j.r ? ': ' + j.r : ''}`, `Node …${j.a} jailed${j.k === 'k' ? ' (candidate, keygen)' : ''}${j.r ? ': ' + j.r : ''}`);
+  }
+  if (alt.lag) {
+    for (const c of new Set([...Object.keys(alt.lag), ...Object.keys(z.lag || {})])) {
+      const sa = (alt.lag[c] || {}).stufe || 0, sz = ((z.lag || {})[c] || {}).stufe || 0;
+      if (sa === sz) continue;
+      if (!sz) add('ok', c, `${c}: Scanner der Nodes wieder aktuell`, `${c}: node scanners caught up`);
+      else add(sz === 2 ? 'halt' : 'warn', c, `${c}: ${z.lag[c].n} von ${z.aktiv} Nodes hängen beim Scannen hinterher`, `${c}: ${z.lag[c].n} of ${z.aktiv} nodes behind scanning`);
+    }
+  }
+  if (Array.isArray(alt.abst)) {
+    const vorher = new Set(alt.abst.map(x => x.key + '=' + x.wert));
+    for (const x of z.abst || []) if (!vorher.has(x.key + '=' + x.wert)) add('info', null, `Abstimmung ${x.key} = ${x.wert}: ${x.stimmen} von ${x.noetig} Stimmen`, `Vote ${x.key} = ${x.wert}: ${x.stimmen} of ${x.noetig} votes`);
+  }
+  if (alt.mimirWerte && z.mimirWerte) {
+    const geaendert = Object.keys(z.mimirWerte).filter(k => String(alt.mimirWerte[k]) !== String(z.mimirWerte[k]));
+    if (geaendert.length <= 4) for (const k of geaendert) add('info', null, `Mimir ${k}: ${alt.mimirWerte[k] ?? '–'} → ${z.mimirWerte[k]}`, `Mimir ${k}: ${alt.mimirWerte[k] ?? '–'} → ${z.mimirWerte[k]}`);
+    else add('info', null, `${geaendert.length} Mimir-Werte geändert`, `${geaendert.length} mimir values changed`);
+  }
+  return neu;
+}
 async function netzVerlaufSchritt(env) {
   if (!env.DB) return;
-  const z = await netzZustand(); if (!z) return;
+  const z = await netzZustand(env); if (!z) return;
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_verlauf (at INTEGER, hoehe INTEGER, art TEXT, chain TEXT, de TEXT, en TEXT)').run();
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
   const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
-  const neu = [];
-  if (alt) {
-    if (alt.churn !== z.churn) { const t = NETZ_CHURN_TXT[z.churn]; neu.push({ art: 'churn-' + z.churn, chain: null, de: t[0], en: t[1] }); }
-    for (const c of Object.keys(z.ketten)) {
-      const a = alt.ketten && alt.ketten[c], b = z.ketten[c];
-      if (!a || (a.ein === b.ein && a.swap === b.swap && a.aus === b.aus)) continue;
-      const t = netzKettenText(c, b); neu.push({ art: t.art, chain: c, de: t.de, en: t.en });
-    }
-  }
+  const neu = alt ? netzWechsel(alt, z) : [];
   for (const e of neu) await env.DB.prepare('INSERT INTO netz_verlauf (at, hoehe, art, chain, de, en) VALUES (?, ?, ?, ?, ?, ?)').bind(z.at, z.hoehe, e.art, e.chain, e.de, e.en).run();
   await env.DB.prepare("INSERT INTO netz_stand (k, v) VALUES ('z', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(z)).run();
   if (neu.length) await env.DB.prepare('DELETE FROM netz_verlauf WHERE at < ?').bind(Date.now() - 60 * 864e5).run().catch(() => {});
 }
 async function netzVerlaufLesen(env) {
-  if (!env.DB) return { ereignisse: [], stand: await netzZustand().catch(() => null) };
+  if (!env.DB) return { ereignisse: [], stand: await netzZustand(env).catch(() => null) };
   const [ev, st] = await Promise.all([
     env.DB.prepare('SELECT at, hoehe, art, chain, de, en FROM netz_verlauf ORDER BY at DESC LIMIT 60').all().then(r => r.results || []).catch(() => []),
     env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null)]);
   // Noch kein gespeicherter Stand (Cron lief noch nicht): Zustand direkt live lesen, damit die Karte sofort erscheint
-  const stand = st || await netzZustand().catch(() => null);
+  const stand = st || await netzZustand(env).catch(() => null);
+  if (stand) delete stand.mimirWerte;
   return { ereignisse: ev, stand };
 }
 async function syncPushPersoenlich(env) {
