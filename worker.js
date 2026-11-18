@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1545'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1550'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8115,14 +8115,16 @@ async function abstimmungenVor30Tagen(env) {
   const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
   const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
   if (!H) return null;
-  const hAlt = H - 90 * 14400; // 90 Tage (Altlasten sind meist Jahre alt und bekommen nie neue Stimmen)
+  // Liquify lieferte fuer 90 Tage HTTP 500 (gemeldet 18.11.2026) -- dann kuerzere Rueckblicke probieren.
+  let hAlt = H - 90 * 14400;
   // Nur Archiv-Knoten (Liquify) fragen -- andere Knoten halten keine 90 Tage alten Staende; laengere Wartezeit,
   // Archiv-Abfragen dauern. Fehler merken (Diagnose in der App).
   let roh = null, fehler = '';
   const archiv = getThornodeBases({ needsHeight: true }).filter(b => /liquify/i.test(b));
-  for (const h of [hAlt, hAlt + 1, hAlt + 10]) {
-    roh = await fetchFromBases(archiv.length ? archiv : getThornodeBases({ needsHeight: true }), `/thorchain/mimir/nodes_all?height=${h}`, { timeoutMs: 25000 }).catch(e => { fehler = String(e && e.message || e).slice(0, 120); return null; });
-    if (roh) break;
+  for (const tage of [90, 60, 30, 14, 7]) {
+    const h = H - tage * 14400;
+    roh = await fetchFromBases(archiv.length ? archiv : getThornodeBases({ needsHeight: true }), `/thorchain/mimir/nodes_all?height=${h}`, { timeoutMs: 25000 }).catch(e => { fehler = tage + ' T.: ' + String(e && e.message || e).slice(0, 100); return null; });
+    if (roh) { hAlt = h; break; }
   }
   if (!roh) { await pushStateSet(env, 'abstAlt30Fehler', JSON.stringify({ t: Date.now(), fehler: fehler || 'leer' })).catch(() => {}); return typeof altCache !== 'undefined' ? altCache : null; }
   const stimmen = Array.isArray(roh) ? roh : (Array.isArray(roh.mimirs) ? roh.mimirs : []);
