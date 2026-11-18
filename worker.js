@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1200'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1210'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7937,10 +7937,18 @@ let GEBUEHR_CACHE = { at: 0, v: null };
 async function gebuehrenUsd() {
   if (GEBUEHR_CACHE.v && Date.now() - GEBUEHR_CACHE.at < 60000) return GEBUEHR_CACHE.v;
   const B = getThornodeBases();
-  const [inb, pools] = await Promise.all([fetchFromBases(B, '/thorchain/inbound_addresses').catch(() => null), fetchFromBases(B, '/thorchain/pools').catch(() => null)]);
+  const [inb, pools, netz] = await Promise.all([fetchFromBases(B, '/thorchain/inbound_addresses').catch(() => null), fetchFromBases(B, '/thorchain/pools').catch(() => null),
+    fetchFromBases(B, '/thorchain/network').catch(() => null)]);
   if (!Array.isArray(inb) || !Array.isArray(pools)) return GEBUEHR_CACHE.v;
+  // Preis je Gas-Asset: asset_tor_price, sonst ueber das Poolverhaeltnis x RUNE-Preis
+  const runeUsd = Number(netz && netz.rune_price_in_tor) / 1e8;
   const preis = {};
-  for (const pl of pools) { const a = String(pl && pl.asset || ''); if (a.includes('-')) continue; const c = a.split('.')[0]; const usd = Number(pl.asset_tor_price) / 1e8; if (usd > 0 && !preis[c]) preis[c] = { usd, asset: a }; }
+  for (const pl of pools) {
+    const a = String(pl && pl.asset || ''); if (a.includes('-') || a.includes('/') || a.includes('~')) continue; const c = a.split('.')[0];
+    let usd = Number(pl.asset_tor_price) / 1e8;
+    if (!(usd > 0) && runeUsd > 0 && Number(pl.balance_asset) > 0) usd = Number(pl.balance_rune) / Number(pl.balance_asset) * runeUsd;
+    if (usd > 0 && !preis[c]) preis[c] = { usd, asset: a };
+  }
   const v = {};
   for (const x of inb) {
     const c = String(x && x.chain || '').toUpperCase(); const menge = Number(x && x.outbound_fee) / 1e8; const pr = preis[c];
