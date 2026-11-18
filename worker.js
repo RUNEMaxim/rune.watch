@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1550'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8199,6 +8199,17 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     if (!werte.size) continue;
     const sortiert = [...werte.entries()].sort((a, b) => b[1] - a[1]);
     const [topWert, topAnzahl] = sortiert[0];
+    // OPERATIVE MIMIR-WERTE (gemeldet 18.11.2026: "Das sind keine 2/3-Votes"): Halts/Pausen gelten schon ab 3 Stimmen
+    // aktiver Nodes, wenn kein anderer Wert mehr Stimmen hat. Mit 3+ gilt der Halt bereits (steht im Netzwerk-Verlauf),
+    // darunter ist er offen mit Schwelle 3.
+    if (/^(HALT|PAUSE|SOLVENCYHALT|STOPSOLVENCYCHECK|NODEPAUSE)/i.test(key)) {
+      const zweiter = sortiert[1] ? sortiert[1][1] : 0;
+      if (topAnzahl >= 3 && topAnzahl > zweiter) continue;
+      if (topWert == null || topWert === 'undefined' || topWert === '') continue;
+      liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig: 3, operativ: true, abgestimmt: m.size, neu30: null, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
+        fehlen: aktiv.filter(a => !m.has(a)) });
+      continue;
+    }
     // SCHON EINMAL ANGENOMMEN (Dune: set_mimir-Ereignis mit genau diesem Wert) -> in "Angenommen" statt offen
     const p = passed.get(key + '|' + mimirNorm(topWert));
     if (p) { angenommen.push({ key, wert: topWert, am: p.last_set || null }); continue; }
