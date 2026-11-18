@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1405'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1415'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8055,8 +8055,14 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     } catch (e) {}
   }
   const nodes = Array.isArray(nodesVorab) ? nodesVorab : await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
-  const roh = await fetchFromBases(getThornodeBases(), '/thorchain/mimir/nodes_all').catch(() => null);
+  const [roh, mimirJetzt] = await Promise.all([
+    fetchFromBases(getThornodeBases(), '/thorchain/mimir/nodes_all').catch(() => null),
+    fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null)]);
   if (!Array.isArray(nodes) || !roh) return null;
+  // SCHON IN KRAFT (gemeldet 18.11.2026: "ADR25 wurde schon vor langer Zeit passed"): Stimmen bleiben bei den Nodes
+  // stehen; nach einem Churn haben weniger AKTIVE Nodes dafuer gestimmt -> sah wieder "offen" aus. Gilt der fuehrende
+  // Wert schon (aktueller Mimir-Wert gleich), ist die Abstimmung erledigt und wird nicht gezeigt.
+  const giltSchon = (key, wert) => mimirJetzt && typeof mimirJetzt === 'object' && mimirJetzt[key] != null && String(mimirJetzt[key]) === String(wert);
   const stimmen = Array.isArray(roh) ? roh : (Array.isArray(roh.mimirs) ? roh.mimirs : []);
   const aktiv = nodes.filter(n => String(n && n.status) === 'Active').map(n => String(n.node_address).toLowerCase());
   const aktivSet = new Set(aktiv);
@@ -8075,7 +8081,7 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     for (const w of m.values()) werte.set(w, (werte.get(w) || 0) + 1);
     const sortiert = [...werte.entries()].sort((a, b) => b[1] - a[1]);
     const [topWert, topAnzahl] = sortiert[0];
-    if (topAnzahl >= noetig) continue;
+    if (topAnzahl >= noetig || giltSchon(key, topWert)) continue;
     liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig, abgestimmt: m.size, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
       fehlen: aktiv.filter(a => !m.has(a)) });
   }
