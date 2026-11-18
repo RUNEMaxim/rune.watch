@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-0700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-0900'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5689,6 +5689,7 @@ export default {
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
           trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
+      if (url.pathname === '/netz-verlauf') return json(await netzVerlaufLesen(env).catch(() => ({ ereignisse: [], stand: null })), env);
       if (false && url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
       if (url.pathname === '/bot-check') {
         // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
@@ -5959,6 +5960,8 @@ export default {
         const kiDran = minute % 5 === 2 || (minute % 2 === 0 && await kiNewsAktiv(env));
         if (kiDran) await kiPlan(env); else await rwPlanLaeufe(env);
       })());
+      // Netzwerk-Verlauf: jede Minute Zustand vergleichen und Wechsel speichern
+      ctx.waitUntil(netzVerlaufSchritt(env).catch(e => console.warn('[netz-verlauf]', e && e.message || e)));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -8137,6 +8140,74 @@ async function churnStauLage(env, nodes) {
     out.push({ key: e.vault.slice(-10) + ':' + e.chain + ':' + e.since, chain: e.chain, count: e.count, bloecke: H - e.since, fehlen, mitglieder: mitglieder.length });
   }
   return out;
+}
+// NETZWERK-VERLAUF (gewuenscht 18.11.2026, Vorbild ThorWatch): jede Minute den Zustand von THORChain lesen und
+// jeden WECHSEL als Ereignis speichern -- Churn angehalten/laeuft/Vault-Wechsel, und je Kette getrennt:
+// Einzahlungen (inbound halted), Swaps (trading paused), Auszahlungen (Signieren angehalten). Mit Blockhoehe.
+// Quellen: /thorchain/inbound_addresses, /thorchain/mimir, /thorchain/vaults/asgard, /thorchain/lastblock.
+function netzMimirAn(v, h) { v = Number(v) || 0; return v > 0 && (v === 1 || !h || v <= h); }
+async function netzZustand() {
+  const B = getThornodeBases();
+  const [inb, mimir, vaults, lb] = await Promise.all([
+    fetchFromBases(B, '/thorchain/inbound_addresses').catch(() => null),
+    fetchFromBases(B, '/thorchain/mimir').catch(() => null),
+    fetchFromBases(B, '/thorchain/vaults/asgard').catch(() => null),
+    fetchFromBases(B, '/thorchain/lastblock').catch(() => null)]);
+  if (!Array.isArray(inb) || !mimir || typeof mimir !== 'object') return null;
+  const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
+  const M = k => netzMimirAn(mimir[k], H);
+  const ketten = {};
+  for (const a of inb) {
+    const c = String(a && a.chain || '').toUpperCase(); if (!c) continue;
+    ketten[c] = {
+      ein: !(a.halted || M('HALT' + c + 'CHAIN')),
+      swap: !(a.chain_trading_paused || a.global_trading_paused || M('HALT' + c + 'TRADING') || M('HALTTRADING')),
+      aus: !(M('HALTSIGNING' + c) || M('HALTSIGNING') || M('HALT' + c + 'CHAIN')),
+    };
+  }
+  const v = Array.isArray(vaults) ? vaults : [];
+  const churn = M('HALTCHURNING') ? 'halt' : v.some(x => /init/i.test(String(x && x.status || ''))) ? 'keygen' : v.some(x => /retiring/i.test(String(x && x.status || ''))) ? 'migration' : 'normal';
+  return { at: Date.now(), hoehe: H, churn, ketten };
+}
+const NETZ_CHURN_TXT = {
+  halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
+  keygen: ['Churn: neue Vault-Schlüssel werden erzeugt (Keygen)', 'Churn: making new vault keys (keygen)'],
+  migration: ['Churn: Mittel ziehen in die neuen Vaults um', 'Churn: funds migrating to the new vaults'],
+  normal: ['Churn abgeschlossen – Netzwerk im Normalbetrieb', 'Churn done – network back to normal'],
+};
+function netzKettenText(c, k) {
+  const alles = k.ein && k.swap && k.aus, nichts = !k.ein && !k.swap && !k.aus;
+  if (alles) return { art: 'ok', de: `${c} läuft wieder: Einzahlungen, Auszahlungen und Swaps`, en: `${c} works again: deposits, payouts and swaps` };
+  if (nichts) return { art: 'halt', de: `${c} angehalten: keine Einzahlungen, Auszahlungen oder Swaps`, en: `${c} halted: no deposits, payouts or swaps` };
+  const j = (b, de, en) => ({ de: de + (b ? ' ✓' : ' ✗'), en: en + (b ? ' ✓' : ' ✗') });
+  const t = [j(k.aus, 'Auszahlungen', 'payouts'), j(k.ein, 'Einzahlungen', 'deposits'), j(k.swap, 'Swaps', 'swaps')];
+  return { art: 'teil', de: `${c} teilweise: ` + t.map(x => x.de).join(' · '), en: `${c} partly working: ` + t.map(x => x.en).join(' · ') };
+}
+async function netzVerlaufSchritt(env) {
+  if (!env.DB) return;
+  const z = await netzZustand(); if (!z) return;
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_verlauf (at INTEGER, hoehe INTEGER, art TEXT, chain TEXT, de TEXT, en TEXT)').run();
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
+  const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
+  const neu = [];
+  if (alt) {
+    if (alt.churn !== z.churn) { const t = NETZ_CHURN_TXT[z.churn]; neu.push({ art: 'churn-' + z.churn, chain: null, de: t[0], en: t[1] }); }
+    for (const c of Object.keys(z.ketten)) {
+      const a = alt.ketten && alt.ketten[c], b = z.ketten[c];
+      if (!a || (a.ein === b.ein && a.swap === b.swap && a.aus === b.aus)) continue;
+      const t = netzKettenText(c, b); neu.push({ art: t.art, chain: c, de: t.de, en: t.en });
+    }
+  }
+  for (const e of neu) await env.DB.prepare('INSERT INTO netz_verlauf (at, hoehe, art, chain, de, en) VALUES (?, ?, ?, ?, ?, ?)').bind(z.at, z.hoehe, e.art, e.chain, e.de, e.en).run();
+  await env.DB.prepare("INSERT INTO netz_stand (k, v) VALUES ('z', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(z)).run();
+  if (neu.length) await env.DB.prepare('DELETE FROM netz_verlauf WHERE at < ?').bind(Date.now() - 60 * 864e5).run().catch(() => {});
+}
+async function netzVerlaufLesen(env) {
+  if (!env.DB) return { ereignisse: [], stand: null };
+  const [ev, st] = await Promise.all([
+    env.DB.prepare('SELECT at, hoehe, art, chain, de, en FROM netz_verlauf ORDER BY at DESC LIMIT 60').all().then(r => r.results || []).catch(() => []),
+    env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null)]);
+  return { ereignisse: ev, stand: st };
 }
 async function syncPushPersoenlich(env) {
   const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
