@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1520'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1545'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8144,10 +8144,21 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     } catch (e) {}
   }
   const nodes = Array.isArray(nodesVorab) ? nodesVorab : await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
-  const [roh, mimirJetzt, inbAbst] = await Promise.all([
+  const [roh, mimirJetzt, inbAbst, upgRoh, lbAbst] = await Promise.all([
     fetchFromBases(getThornodeBases(), '/thorchain/mimir/nodes_all').catch(() => null),
     fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null),
-    fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses').catch(() => null)]);
+    fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses').catch(() => null),
+    // UPGRADES (gewuenscht 18.11.2026: "Auch bitte Upgrades"): on-chain Upgrade-Vorschlaege mit Zustimmung der Validatoren
+    fetchFromBases(getThornodeBases(), '/thorchain/upgrade_proposals').catch(() => null),
+    fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null)]);
+  const hJetzt = Array.isArray(lbAbst) ? Math.max(0, ...lbAbst.map(x => Number(x && x.thorchain) || 0)) : 0;
+  // Nur kommende Upgrades (Hoehe noch nicht erreicht); bereits ausgefuehrte zaehlen als erledigt.
+  const upgrades = (Array.isArray(upgRoh) ? upgRoh : []).filter(u => u && u.name && (!hJetzt || Number(u.height) > hJetzt))
+    .map(u => ({ name: String(u.name), hoehe: Number(u.height) || null, angenommen: !!u.approved,
+      prozent: u.approved_percent != null ? Math.round(Number(u.approved_percent) * (Number(u.approved_percent) <= 1 ? 100 : 1)) : null,
+      fehlen: u.validators_to_quorum != null ? Number(u.validators_to_quorum) : null,
+      inMin: hJetzt && Number(u.height) > hJetzt ? Math.round((Number(u.height) - hJetzt) * 6 / 60) : null }))
+    .sort((a, b) => (a.hoehe || 0) - (b.hoehe || 0)).slice(0, 5);
   const kettenDa = new Set((Array.isArray(inbAbst) ? inbAbst : []).map(x => String(x && x.chain || '').toUpperCase()).filter(Boolean));
   const alt = await abstimmungenVor30Tagen(env).catch(() => null);
   const passed = await mimirPassedLaden(env).catch(() => new Map());
@@ -8220,7 +8231,7 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   if (gesehenNeu || ersterLauf) await pushStateSet(env, 'abstGesehen', JSON.stringify(gesehen)).catch(() => {});
   // Diagnose fuer die App: greift der Altlasten-Filter (Archiv-Vergleich)?
   let filterFehler = null; if (!(alt && alt.sets)) { try { const f = JSON.parse((await pushState(env, 'abstAlt30Fehler')) || 'null'); filterFehler = f ? f.fehler : 'noch kein Archiv-Stand'; } catch (e) { filterFehler = 'unbekannt'; } }
-  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20), angenommen: angenommen.slice(0, 30),
+  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20), angenommen: angenommen.slice(0, 30), upgrades,
     filter: { archiv: !!(alt && alt.sets), seitHoehe: alt && alt.h || null, fehler: filterFehler, mitschrift: true } };
   try { await pushStateSet(env, 'abstCache', JSON.stringify(erg)); } catch (e) {}
   return erg;
@@ -8423,7 +8434,7 @@ async function netzZustand(env) {
   // Offene Abstimmungen ab der Haelfte der noetigen Stimmen
   let abst = [], abstN = null;
   // abstN = Zahl ALLER offenen Abstimmungen wie in der Liste (gemeldet 18.11.2026: Kachel zeigte 5, Liste mehr)
-  try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abstN = o && Array.isArray(o.liste) ? o.liste.length : null; abst =((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
+  try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abstN = o && Array.isArray(o.liste) ? o.liste.length + (Array.isArray(o.upgrades) ? o.upgrades.length : 0) : null; abst =((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
   const mimirWerte = {};
   for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE|SUPPLY/i.test(k)) mimirWerte[k] = w; // SUPPLY aendert sich laufend (Burn)
   return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, abstN, aktiv: aktiv.length, mimirWerte };
