@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1240'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1310'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8245,7 +8245,8 @@ async function netzZustand(env) {
   }
   const v = Array.isArray(vaults) ? vaults : [];
   const churn = M('HALTCHURNING') ? 'halt' : v.some(x => /init/i.test(String(x && x.status || ''))) ? 'keygen' : v.some(x => /retiring/i.test(String(x && x.status || ''))) ? 'migration' : 'normal';
-  const wasm = Object.keys(mimir).some(k => /^HALTWASM/i.test(k) && M(k));
+  // Nur der GLOBALE Halt zaehlt (einzelne Contracts haben eigene HALTWASM...-Schluessel -- das ist kein Netzwerk-Halt)
+  const wasm = Object.keys(mimir).some(k => /^HALTWASM(GLOBAL)?$/i.test(k) && M(k));
   // Warteschlange: aeltester Eintrag in Minuten (6 s je Block)
   const q = Array.isArray(queue) ? queue : [];
   const alter = x => H && Number(x && x.height) ? Math.max(0, (H - Number(x.height)) * 6 / 60) : 0;
@@ -8265,7 +8266,8 @@ async function netzZustand(env) {
   for (const c of Object.keys(hoechst)) {
     const grenze = NETZ_LAG_MAX[c] || 30;
     const hinten = aktiv.filter(n => { const o = (n.observe_chains || []).find(x => String(x.chain).toUpperCase() === c); return !o || hoechst[c] - (Number(o.height) || 0) > grenze; }).length;
-    const stufe = aktiv.length && hinten >= aktiv.length / 3 ? 2 : hinten >= 3 ? 1 : 0;
+    // Weniger empfindlich: erst ab 10 % der aktiven Nodes (mind. 5) melden, rot ab einem Drittel
+    const stufe = aktiv.length && hinten >= aktiv.length / 3 ? 2 : hinten >= Math.max(5, aktiv.length * 0.1) ? 1 : 0;
     if (stufe) lag[c] = { n: hinten, stufe };
   }
   // Offene Abstimmungen ab der Haelfte der noetigen Stimmen
@@ -8310,7 +8312,8 @@ function netzWechsel(alt, z) {
     if (qz.stufe === 0) add('ok', null, 'Auszahlungen laufen wieder zügig', 'Payouts flowing normally again');
     else add(qz.stufe === 2 ? 'halt' : 'warn', null, `Auszahlungen warten seit über ${qz.stufe === 2 ? 4 : 1} Std.${k} · ${qz.n} in der Warteschlange`, `Payouts waiting over ${qz.stufe === 2 ? 4 : 1} h${k} · ${qz.n} queued`);
   }
-  if (Array.isArray(alt.jails)) {
+  // Jails nicht mehr im Verlauf (gewuenscht 18.11.2026: stehen schon im Balkendiagramm der Node-Karte)
+  if (false && Array.isArray(alt.jails)) {
     const vorher = new Set(alt.jails.map(j => j.a));
     const frisch = (z.jails || []).filter(j => !vorher.has(j.a));
     if (frisch.length > 3) add('warn', null, `${frisch.length} Nodes gesperrt (Jail)`, `${frisch.length} nodes jailed`);
