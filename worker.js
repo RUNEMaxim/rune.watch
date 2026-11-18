@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1345'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1405'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8280,11 +8280,12 @@ async function netzZustand(env) {
     if (stufe) lag[c] = { n: hinten, stufe, nodes: liste.slice(0, 40) };
   }
   // Offene Abstimmungen ab der Haelfte der noetigen Stimmen
-  let abst = [];
-  try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abst = ((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
+  let abst = [], abstN = null;
+  // abstN = Zahl ALLER offenen Abstimmungen wie in der Liste (gemeldet 18.11.2026: Kachel zeigte 5, Liste mehr)
+  try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abstN = o && Array.isArray(o.liste) ? o.liste.length : null; abst =((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
   const mimirWerte = {};
   for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE|SUPPLY/i.test(k)) mimirWerte[k] = w; // SUPPLY aendert sich laufend (Burn)
-  return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, aktiv: aktiv.length, mimirWerte };
+  return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, abstN, aktiv: aktiv.length, mimirWerte };
 }
 const NETZ_CHURN_TXT = {
   halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
