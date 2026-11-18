@@ -7462,7 +7462,8 @@ async function kiNewsLauf(env, erzwingen = false) {
   let job = await kiNewsJobLesen(env);
   if (!job || job.fertig) {
     const zuletzt = Number(await pushState(env, 'ki_news_at')) || 0;
-    if (!erzwingen && jetzt - zuletzt < 1 * 36e5) { // stuendlich (gewuenscht 18.11.2026: "3 Stunden viel zu lang") await pushStateSet(env, 'ki_news_aktiv', '0'); return null; }
+    // stuendlich (gewuenscht 18.11.2026: "3 Stunden viel zu lang")
+    if (!erzwingen && jetzt - zuletzt < 1 * 36e5) { await pushStateSet(env, 'ki_news_aktiv', '0'); return null; }
     if (!env.ANTHROPIC_API_KEY) return null;
     await pushStateSet(env, 'ki_news_at', jetzt); await pushStateSet(env, 'ki_news_aktiv', '1');
     job = { start: jetzt, phase: 'quellen', runde: 0 };
