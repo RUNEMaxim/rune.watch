@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-17-2250'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-0700'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7370,7 +7370,12 @@ Hintergrundwissen (nur Begriffe, keine Zahlen daraus ableiten): Bond-Rewards wer
     // ROBUSTER (gemeldet 17.11.2026: Satz zeigte "Haiku" usw.): mehr Platz fuer die Antwort, ein zweiter Versuch,
     // und nur ein sauberer Satz geht raus -- Fehlermeldungen oder Modell-Hinweise nie als Text.
     const sauber = t => { t = String(t || '').replace(/^["„“]+|["“”]+$/g, '').replace(/\s+/g, ' ').trim();
-      if (!t || /haiku|claude|anthropic|\bmodel\b|\bmodell\b|KI_|KI_HTTP|NO_KEY|stop_reason/i.test(t)) return ''; return t.slice(0, 260); };
+      if (!t || /haiku|claude|anthropic|\bmodel\b|\bmodell\b|KI_|KI_HTTP|NO_KEY|stop_reason/i.test(t)) return '';
+      // NUR VOLLSTAENDIGE SAETZE (gemeldet 18.11.2026: "Der Satz ist nicht vollstaendig"): abgeschnittenen Rest bis
+      // zum letzten Satzende kuerzen; gibt es keins, zaehlt die Antwort als leer (zweiter Versuch).
+      t = t.slice(0, 300);
+      if (!/[.!?…]$/.test(t)) { const m = t.match(/^[\s\S]*[.!?…](?=\s|$)/); t = m ? m[0].trim() : ''; }
+      return t; };
     let text = '';
     for (let v = 0; v < 2 && !text; v++) {
       try { text = sauber(await kiText(env, { system, nachrichten: [{ role: 'user', content: `DATEN (JSON):\n${kurz(body.heute, 3000)}` }], maxTokens: 400 })); }
