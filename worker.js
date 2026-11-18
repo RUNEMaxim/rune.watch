@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1510'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8116,14 +8116,17 @@ async function abstimmungenVor30Tagen(env) {
   const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
   if (!H) return null;
   const hAlt = H - 90 * 14400; // 90 Tage (Altlasten sind meist Jahre alt und bekommen nie neue Stimmen)
-  let roh = null;
+  // Nur Archiv-Knoten (Liquify) fragen -- andere Knoten halten keine 90 Tage alten Staende; laengere Wartezeit,
+  // Archiv-Abfragen dauern. Fehler merken (Diagnose in der App).
+  let roh = null, fehler = '';
+  const archiv = getThornodeBases({ needsHeight: true }).filter(b => /liquify/i.test(b));
   for (const h of [hAlt, hAlt + 1, hAlt + 10]) {
-    roh = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/mimir/nodes_all?height=${h}`).catch(() => null);
+    roh = await fetchFromBases(archiv.length ? archiv : getThornodeBases({ needsHeight: true }), `/thorchain/mimir/nodes_all?height=${h}`, { timeoutMs: 25000 }).catch(e => { fehler = String(e && e.message || e).slice(0, 120); return null; });
     if (roh) break;
   }
-  if (!roh) return typeof altCache !== 'undefined' ? altCache : null;
+  if (!roh) { await pushStateSet(env, 'abstAlt30Fehler', JSON.stringify({ t: Date.now(), fehler: fehler || 'leer' })).catch(() => {}); return typeof altCache !== 'undefined' ? altCache : null; }
   const stimmen = Array.isArray(roh) ? roh : (Array.isArray(roh.mimirs) ? roh.mimirs : []);
-  if (!stimmen.length) return null;
+  if (!stimmen.length) { await pushStateSet(env, 'abstAlt30Fehler', JSON.stringify({ t: Date.now(), fehler: 'keine Stimmen im Archiv-Stand' })).catch(() => {}); return null; }
   const sets = {};
   for (const v of stimmen) {
     const k = String(v && v.key || '').toUpperCase() + '|' + String(v && v.value);
@@ -8171,7 +8174,8 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   for (const [key, m] of jeSchluessel) {
     if (m.size < 5) continue;
     const werte = new Map();
-    for (const w of m.values()) werte.set(w, (werte.get(w) || 0) + 1);
+    for (const w of m.values()) if (w != null && w !== 'undefined' && w !== '') werte.set(w, (werte.get(w) || 0) + 1);
+    if (!werte.size) continue;
     const sortiert = [...werte.entries()].sort((a, b) => b[1] - a[1]);
     const [topWert, topAnzahl] = sortiert[0];
     // SCHON EINMAL ANGENOMMEN (Dune: set_mimir-Ereignis mit genau diesem Wert) -> in "Angenommen" statt offen
@@ -8198,7 +8202,10 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   }
   liste.sort((a, b) => b.stimmen / b.noetig - a.stimmen / a.noetig);
   angenommen.sort((a, b) => String(b.am || '').localeCompare(String(a.am || '')));
-  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20), angenommen: angenommen.slice(0, 30) };
+  // Diagnose fuer die App: greift der Altlasten-Filter (Archiv-Vergleich)?
+  let filterFehler = null; if (!(alt && alt.sets)) { try { const f = JSON.parse((await pushState(env, 'abstAlt30Fehler')) || 'null'); filterFehler = f ? f.fehler : 'noch kein Archiv-Stand'; } catch (e) { filterFehler = 'unbekannt'; } }
+  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20), angenommen: angenommen.slice(0, 30),
+    filter: { archiv: !!(alt && alt.sets), seitHoehe: alt && alt.h || null, fehler: filterFehler } };
   try { await pushStateSet(env, 'abstCache', JSON.stringify(erg)); } catch (e) {}
   return erg;
 }
