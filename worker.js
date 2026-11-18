@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1310'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1330'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8260,21 +8260,28 @@ async function netzZustand(env) {
   const aktiv = N.filter(n => n && n.status === 'Active');
   const jails = N.filter(n => n && (n.status === 'Active' || n.status === 'Ready') && Number(n.jail && n.jail.release_height) > H)
     .map(n => ({ a: String(n.node_address).slice(-4), k: n.status === 'Active' ? 'a' : 'k', r: String(n.jail && n.jail.reason || '').slice(0, 50) }));
+  // BEZUG = MEDIAN statt Hoechstwert (gemeldet 18.11.2026: "DOGE: 85 von 102 hinterher" -- eine einzelne Node mit zu
+  // hoher Meldung liess fast alle anderen "hinterher" aussehen). Je Chain auch WELCHE Nodes wie weit zurueckliegen.
+  const hoehen = {};
+  for (const n of aktiv) for (const o of (n.observe_chains || [])) { const c = String(o.chain).toUpperCase(); const h = Number(o.height) || 0; if (h > 0) (hoehen[c] = hoehen[c] || []).push(h); }
   const hoechst = {};
-  for (const n of aktiv) for (const o of (n.observe_chains || [])) { const c = String(o.chain).toUpperCase(); hoechst[c] = Math.max(hoechst[c] || 0, Number(o.height) || 0); }
+  for (const [c, l] of Object.entries(hoehen)) { l.sort((x, y) => x - y); hoechst[c] = l[Math.floor(l.length / 2)]; }
   const lag = {};
   for (const c of Object.keys(hoechst)) {
     const grenze = NETZ_LAG_MAX[c] || 30;
-    const hinten = aktiv.filter(n => { const o = (n.observe_chains || []).find(x => String(x.chain).toUpperCase() === c); return !o || hoechst[c] - (Number(o.height) || 0) > grenze; }).length;
+    const liste = [];
+    for (const n of aktiv) { const o = (n.observe_chains || []).find(x => String(x.chain).toUpperCase() === c); const d = o ? hoechst[c] - (Number(o.height) || 0) : null; if (d == null || d > grenze) liste.push({ a: String(n.node_address).slice(-5), b: d }); }
+    liste.sort((x, y) => (y.b == null ? 1e12 : y.b) - (x.b == null ? 1e12 : x.b));
+    const hinten = liste.length;
     // Weniger empfindlich: erst ab 10 % der aktiven Nodes (mind. 5) melden, rot ab einem Drittel
     const stufe = aktiv.length && hinten >= aktiv.length / 3 ? 2 : hinten >= Math.max(5, aktiv.length * 0.1) ? 1 : 0;
-    if (stufe) lag[c] = { n: hinten, stufe };
+    if (stufe) lag[c] = { n: hinten, stufe, nodes: liste.slice(0, 40) };
   }
   // Offene Abstimmungen ab der Haelfte der noetigen Stimmen
   let abst = [];
   try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abst = ((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
   const mimirWerte = {};
-  for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE/i.test(k)) mimirWerte[k] = w;
+  for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE|SUPPLY/i.test(k)) mimirWerte[k] = w; // SUPPLY aendert sich laufend (Burn)
   return { at: Date.now(), hoehe: H, churn, ketten, wasm, warteschlange, jails, lag, abst, aktiv: aktiv.length, mimirWerte };
 }
 const NETZ_CHURN_TXT = {
