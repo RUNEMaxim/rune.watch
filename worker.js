@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1415'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-18-1500'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5963,6 +5963,7 @@ export default {
       })());
       // Netzwerk-Verlauf: jede Minute Zustand vergleichen und Wechsel speichern
       ctx.waitUntil(netzVerlaufSchritt(env).catch(e => console.warn('[netz-verlauf]', e && e.message || e)));
+      ctx.waitUntil(syncMimirDune(env).catch(e => console.warn('[mimir-dune]', e && e.message || e)));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -8047,6 +8048,91 @@ const kurzNode = a => '\u2026' + String(a || '').slice(-4);
 // /thorchain/mimir/nodes_all jede Stimme (Schluessel, Wert, Node). Gezaehlt werden nur AKTIVE Nodes.
 // Angenommen ist ein Wert ab 2/3 der aktiven Nodes. "Offen" = mindestens 5 Stimmen, aber die
 // staerkste Antwort hat die Mehrheit noch nicht. Zwischengespeichert fuer 30 Sekunden.
+// ANGENOMMENE MIMIR-WERTE AUS DUNE (gewuenscht 18.11.2026: "Gibt es keine History aller passed ADRs?"): Jede
+// angenommene Mimir-Aenderung ist on-chain ein set_mimir-Ereignis; Dune fuehrt sie in thorchain.core_set_mimir_events.
+// Abgefragt werden nur die Schluessel, ueber die gerade abgestimmt wird (wenige Datenpunkte), hoechstens einmal am Tag
+// oder sobald neue Schluessel auftauchen. Nicht blockierend: Start -> naechste Minute Status -> Ergebnis nach D1.
+const mimirNorm = v => { const n = Number(v); return v != null && String(v).trim() !== '' && Number.isFinite(n) ? String(n) : String(v); };
+let mimirPassedCache = { at: 0, map: null };
+async function mimirPassedLaden(env) {
+  if (mimirPassedCache.map && Date.now() - mimirPassedCache.at < 10 * 60e3) return mimirPassedCache.map;
+  const map = new Map();
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS mimir_passed (k TEXT PRIMARY KEY, key TEXT, val TEXT, last_set TEXT, at INTEGER)').run();
+    const r = await env.DB.prepare('SELECT k, key, val, last_set FROM mimir_passed').all();
+    for (const z of (r.results || [])) map.set(z.k, z);
+  } catch (e) {}
+  mimirPassedCache = { at: Date.now(), map };
+  return map;
+}
+async function syncMimirDune(env) {
+  if (!env || !env.DUNE_API_KEY || !env.DB) return;
+  let meta = {}; try { meta = JSON.parse((await pushState(env, 'mimirDune')) || '{}') || {}; } catch (e) {}
+  let keys = []; try { keys = JSON.parse((await pushState(env, 'abstKeys')) || '[]') || []; } catch (e) {}
+  keys = [...new Set(keys.map(k => String(k).toUpperCase()).filter(k => /^[A-Z0-9._-]{2,80}$/.test(k)))].slice(0, 300);
+  if (!keys.length) return;
+  const jetzt = Date.now();
+  const setze = m => pushStateSet(env, 'mimirDune', JSON.stringify(m)).catch(() => {});
+  if (meta.pending_exec) {
+    if (jetzt - (meta.pending_since || 0) > 2 * 3600e3) { await setze({ ...meta, pending_exec: null }); return; }
+    const st = await duneJson(env, `/execution/${meta.pending_exec}/status`).catch(() => null);
+    const z = st && st.state;
+    if (z === 'QUERY_STATE_FAILED' || z === 'QUERY_STATE_CANCELLED' || z === 'QUERY_STATE_EXPIRED') { await setze({ ...meta, pending_exec: null, last_error: 'DUNE_' + z, fehler_at: jetzt }); return; }
+    if (z !== 'QUERY_STATE_COMPLETED') return;
+    const erg = await duneJson(env, `/execution/${meta.pending_exec}/results?limit=2000`, { timeoutMs: 20000 }).catch(e => ({ fehler: e?.message || String(e) }));
+    if (erg && erg.fehler) { await setze({ ...meta, last_error: erg.fehler, fehler_at: jetzt }); return; }
+    const rows = (erg && erg.result && Array.isArray(erg.result.rows)) ? erg.result.rows : [];
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS mimir_passed (k TEXT PRIMARY KEY, key TEXT, val TEXT, last_set TEXT, at INTEGER)').run();
+    const stmts = rows.filter(r => r && r.k).map(r => { const key = String(r.k).toUpperCase(), val = mimirNorm(r.v);
+      return env.DB.prepare('INSERT OR REPLACE INTO mimir_passed (k, key, val, last_set, at) VALUES (?, ?, ?, ?, ?)').bind(key + '|' + val, key, val, String(r.t || '').slice(0, 19), jetzt); });
+    for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+    mimirPassedCache.at = 0;
+    await setze({ last_ok: jetzt, gefragt: meta.gefragt_neu || keys, pending_exec: null, last_error: null, zeilen: rows.length });
+    return;
+  }
+  const gefragt = new Set(meta.gefragt || []);
+  const neueKeys = keys.some(k => !gefragt.has(k));
+  if (!neueKeys && meta.last_ok && jetzt - meta.last_ok < 24 * 3600e3) return;
+  if (meta.fehler_at && jetzt - meta.fehler_at < 6 * 3600e3) return; // nach Fehler (z. B. 402 Datenlimit) Pause
+  const sql = `SELECT upper(key) AS k, CAST(value AS varchar) AS v, CAST(max(block_timestamp) AS varchar) AS t
+FROM thorchain.core_set_mimir_events WHERE upper(key) IN (${keys.map(k => "'" + k + "'").join(', ')}) GROUP BY 1, 2`;
+  try {
+    const r = await duneJson(env, '/sql/execute', { method: 'POST', body: { sql } });
+    if (!r || !r.execution_id) throw new Error('DUNE_KEINE_EXECUTION_ID');
+    await setze({ ...meta, pending_exec: r.execution_id, pending_since: jetzt, gefragt_neu: keys });
+  } catch (e) { await setze({ ...meta, last_error: e?.message || String(e), fehler_at: jetzt }); }
+}
+// ABSTIMMUNGEN VOR 30 TAGEN (gewuenscht 18.11.2026: "Es muss einen Mechanismus geben, dass die Fehler nicht mehr
+// auftauchen"): THORChain loescht alte Node-Stimmen nie. Ob eine Abstimmung LAEUFT, sieht man daran, dass sie neue
+// Stimmen bekommt. Dazu der Stand von vor 30 Tagen aus dem Archiv-Knoten (?height=), je "SCHLUESSEL|Wert" die Menge der
+// Nodes (letzte 8 Zeichen). Zwischengespeichert fuer 12 Stunden.
+async function abstimmungenVor30Tagen(env) {
+  try {
+    const c = JSON.parse((await pushState(env, 'abstAlt30')) || 'null');
+    if (c && Date.now() - c.t < 12 * 3600e3 && c.sets) return c;
+    var altCache = c && c.sets ? c : null; // aelterer Stand als Rueckfall, falls das Archiv gerade nicht antwortet
+  } catch (e) {}
+  const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
+  const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
+  if (!H) return null;
+  const hAlt = H - 90 * 14400; // 90 Tage (Altlasten sind meist Jahre alt und bekommen nie neue Stimmen)
+  let roh = null;
+  for (const h of [hAlt, hAlt + 1, hAlt + 10]) {
+    roh = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/mimir/nodes_all?height=${h}`).catch(() => null);
+    if (roh) break;
+  }
+  if (!roh) return typeof altCache !== 'undefined' ? altCache : null;
+  const stimmen = Array.isArray(roh) ? roh : (Array.isArray(roh.mimirs) ? roh.mimirs : []);
+  if (!stimmen.length) return null;
+  const sets = {};
+  for (const v of stimmen) {
+    const k = String(v && v.key || '').toUpperCase() + '|' + String(v && v.value);
+    (sets[k] = sets[k] || []).push(String(v && v.signer || '').toLowerCase().slice(-8));
+  }
+  const erg = { t: Date.now(), h: hAlt, sets };
+  await pushStateSet(env, 'abstAlt30', JSON.stringify(erg)).catch(() => {});
+  return erg;
+}
 async function offeneAbstimmungen(env, nodesVorab, frisch) {
   if (!frisch) {
     try {
@@ -8055,9 +8141,14 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     } catch (e) {}
   }
   const nodes = Array.isArray(nodesVorab) ? nodesVorab : await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
-  const [roh, mimirJetzt] = await Promise.all([
+  const [roh, mimirJetzt, inbAbst] = await Promise.all([
     fetchFromBases(getThornodeBases(), '/thorchain/mimir/nodes_all').catch(() => null),
-    fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null)]);
+    fetchFromBases(getThornodeBases(), '/thorchain/mimir').catch(() => null),
+    fetchFromBases(getThornodeBases(), '/thorchain/inbound_addresses').catch(() => null)]);
+  const kettenDa = new Set((Array.isArray(inbAbst) ? inbAbst : []).map(x => String(x && x.chain || '').toUpperCase()).filter(Boolean));
+  const alt = await abstimmungenVor30Tagen(env).catch(() => null);
+  const passed = await mimirPassedLaden(env).catch(() => new Map());
+  const angenommen = [];
   if (!Array.isArray(nodes) || !roh) return null;
   // SCHON IN KRAFT (gemeldet 18.11.2026: "ADR25 wurde schon vor langer Zeit passed"): Stimmen bleiben bei den Nodes
   // stehen; nach einem Churn haben weniger AKTIVE Nodes dafuer gestimmt -> sah wieder "offen" aus. Gilt der fuehrende
@@ -8074,6 +8165,8 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     if (!jeSchluessel.has(key)) jeSchluessel.set(key, new Map());
     jeSchluessel.get(key).set(sig, String(v.value));
   }
+  // Schluessel fuer die Dune-Abfrage merken (syncMimirDune fragt nur diese ab)
+  pushStateSet(env, 'abstKeys', JSON.stringify([...jeSchluessel.keys()])).catch(() => {});
   const liste = [];
   for (const [key, m] of jeSchluessel) {
     if (m.size < 5) continue;
@@ -8081,12 +8174,31 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     for (const w of m.values()) werte.set(w, (werte.get(w) || 0) + 1);
     const sortiert = [...werte.entries()].sort((a, b) => b[1] - a[1]);
     const [topWert, topAnzahl] = sortiert[0];
+    // SCHON EINMAL ANGENOMMEN (Dune: set_mimir-Ereignis mit genau diesem Wert) -> in "Angenommen" statt offen
+    const p = passed.get(key + '|' + mimirNorm(topWert));
+    if (p) { angenommen.push({ key, wert: topWert, am: p.last_set || null }); continue; }
     if (topAnzahl >= noetig || giltSchon(key, topWert)) continue;
-    liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig, abgestimmt: m.size, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
+    // ALTLASTEN RAUS (gemeldet 18.11.2026: "BASE ist schon laengst drin"): Stimmen bleiben ewig stehen und schrumpfen
+    // mit jedem Churn. Nicht gezeigt werden: Werte ohne Inhalt, ADD-CHAIN fuer Chains, die es schon gibt, und alles
+    // unter der Haelfte der noetigen Stimmen (alte Abstimmungen sinken dorthin ab).
+    if (topWert == null || topWert === 'undefined' || topWert === '') continue;
+    const addChain = /^ADD-?CHAIN-?([A-Z]+)$/i.exec(key);
+    if (addChain && kettenDa.has(addChain[1].toUpperCase())) continue;
+    // LAEUFT SIE NOCH? Nur zeigen, wenn seit 90 Tagen mindestens eine aktive Node NEU fuer den fuehrenden Wert gestimmt
+    // hat. Keine Prozent-Grenze (gewuenscht 18.11.2026: "50-%-Regel ist Quatsch").
+    let neu30 = null;
+    if (alt && alt.sets) {
+      const vorher = new Set(alt.sets[key + '|' + topWert] || []);
+      neu30 = 0;
+      for (const [sig, w] of m) if (w === topWert && !vorher.has(sig.slice(-8))) neu30++;
+      if (!neu30) continue;
+    }
+    liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig, abgestimmt: m.size, neu30, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
       fehlen: aktiv.filter(a => !m.has(a)) });
   }
   liste.sort((a, b) => b.stimmen / b.noetig - a.stimmen / a.noetig);
-  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20) };
+  angenommen.sort((a, b) => String(b.am || '').localeCompare(String(a.am || '')));
+  const erg = { t: Date.now(), aktiv: aktiv.length, noetig, liste: liste.slice(0, 20), angenommen: angenommen.slice(0, 30) };
   try { await pushStateSet(env, 'abstCache', JSON.stringify(erg)); } catch (e) {}
   return erg;
 }
