@@ -7440,18 +7440,19 @@ const KI_NEWS_ABSCHLUSS = { name: 'meldungen_speichern', description: 'Speichert
     titelDe: { type: 'string', description: 'Schlagzeile, max. 70 Zeichen' }, titelEn: { type: 'string', description: 'headline, max 70 chars' },
     zeileDe: { type: 'string', description: 'optional, eine Zeile Kontext, max. 110 Zeichen' }, zeileEn: { type: 'string', description: 'optional, one line of context, max 110 chars' },
     quelle: { type: 'string', description: 'kurzer Quellenname, z. B. GitLab, THORChain Blog, X @THORChain, devops' }, link: { type: 'string', description: 'https-URL zur Originalquelle' } } } } } } };
-// NEWS-TICKER (gewuenscht: "weniger schreiben -- Schlagzeilen und die jeweiligen Verlinkungen, ein nicer News Channel")
-const kiNewsSystem = heute => `Du bist die Redaktion des News-Tickers von rune.watch (THORChain-Dashboard). Heute ist ${heute}. Aus den Rohquellen (JSON) und eigenen Websuchen erstellst du einen aktuellen Nachrichten-Ticker der letzten 7 Tage (laufende Abstimmungen/Upgrades auch älter).
-Recherche (Websuche, höchstens 4 Suchen): 1) THORChain-News dieser Woche, 2) neueste Posts von @THORChain und @RujiraNetwork auf X, 3) THORChain Upgrade / ADR / Mimir / Sicherheit, 4) Integrationen, Partnerschaften, Ökosystem (TCY, RUNEPool, Secured Assets).
-Stil: Schlagzeilen wie bei einem guten Krypto-News-Ticker: konkret, aktiv, mit Zahl oder Name, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen), nur wenn sie etwas Neues sagt (wen betrifft es, was ändert sich). Keine Erklärtexte.
-Links: Jede Meldung braucht einen Link zur ORIGINALquelle (GitLab-Release oder -MR, Blogpost, X-Post, devops-Eintrag). Ohne passenden Link nur bei Live-Daten (Mimir-Abstimmung, Node-Versionen) – dann quelle = 'THORNode live'.
-Genauigkeit: Nur Fakten aus Quellen bzw. Websuche, nichts erfinden, keine Kursprognosen. KEINE Meldungen über den aktuellen Versionsstand der Nodes, angehaltene Chains, Churn-Halt oder Mimir-Stimmenstände – diese Live-Meldungen erzeugt rune.watch selbst aus den Netzwerkdaten. Neue Releases (was ist drin) und Ankündigungen dazu sind erlaubt. Viele kleine GitLab-Änderungen zu einer Meldung bündeln. Datum = Datum des Ereignisses. Neueste zuerst.
-Ergebnis: Rufe am Ende meldungen_speichern auf (8 bis 16 Meldungen). Kein Fließtext, keine Zwischenberichte.`;
+// NEWSBLOG (gewuenscht 18.11.2026: "Es muessen wirklich News sein. Ein Newsblog. Nicht das suchen, was die ThorWatch-Funktion macht"):
+// nur echte Artikel ueber THORChain, recherchiert und verlinkt -- keine Netzwerkzustaende, Versionen, Halts, Abstimmungen.
+const kiNewsSystem = heute => `Du bist die Redaktion des Newsblogs von rune.watch. Heute ist ${heute}. Du recherchierst echte NACHRICHTENARTIKEL über THORChain (und sein Ökosystem: Rujira, TCY, RUNE, THORSwap, Vultisig, Integrationen) aus den letzten 7 Tagen und verlinkst sie.
+Recherche (Websuche, höchstens 4 Suchen): 1) "THORChain" News dieser Woche (Krypto-Medien wie CoinDesk, The Block, Decrypt, Cointelegraph, The Defiant, Blockworks u. a.), 2) THORChain/Rujira Blog- und Medium-Artikel, 3) Partnerschaften, Integrationen, Listings, Wallets, 4) RUNE Markt- und Analyseartikel. Die Rohquellen (JSON) sind nur Hintergrund, keine Meldungsquelle.
+Stil: Schlagzeilen wie in einem guten Krypto-Newsblog: konkret, mit Name oder Zahl, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen).
+Links: Jede Meldung MUSS auf den Artikel verlinken (https-URL des Artikels selbst, keine Startseite). Ohne Artikel-Link keine Meldung. quelle = Name des Mediums.
+VERBOTEN: Meldungen über Netzwerkzustand (angehaltene Chains, Churn, Halts, Vault-Migration), Node-Versionen/Upgrade-Stand, Mimir-Abstimmungen, GitLab-Commits/Tags – das zeigt rune.watch anderswo. Nichts erfinden, keine Kursprognosen. Datum = Erscheinungsdatum des Artikels. Neueste zuerst.
+Ergebnis: Rufe am Ende meldungen_speichern auf (6 bis 16 Meldungen). Kein Fließtext, keine Zwischenberichte.`;
 // PRUEFRUNDE: zweiter Durchgang, der den Entwurf wie ein Redakteur gegencheckt
-const kiNewsPruefSystem = heute => `Du bist der Faktenprüfer des News-Tickers von rune.watch (THORChain). Heute ist ${heute}. Du bekommst einen ENTWURF mit Meldungen.
-Prüfe JEDE Meldung: Stimmt die Aussage? Ist sie aktuell (nicht älter als 7 Tage, außer laufende Upgrades/Abstimmungen)? Führt der Link wirklich zu dieser Nachricht? Nutze dafür die Werkzeuge: seite_lesen für den Link bzw. die Quelle, thorchain_updates / netzwerk_und_churn / pools / pol für Live-Fakten, web_search nur wenn nötig.
-Dann: falsche oder unbestätigte Meldungen STREICHEN; ungenaue Schlagzeilen korrigieren (max. 70 Zeichen, konkret); falsche Links durch den richtigen ersetzen oder die Meldung streichen; Dubletten zusammenführen. Nichts Neues erfinden. Keine Meldungen über aktuellen Versionsstand der Nodes, Halts, Churn-Halt oder Mimir-Stimmenstände (die erzeugt rune.watch selbst).
-Ergebnis: Rufe meldungen_speichern mit der geprüften Liste auf (lieber 6 sichere als 12 zweifelhafte). Kein Fließtext.`;
+const kiNewsPruefSystem = heute => `Du bist der Faktenprüfer des Newsblogs von rune.watch (THORChain). Heute ist ${heute}. Du bekommst einen ENTWURF mit Meldungen.
+Prüfe JEDE Meldung: Gibt es den Artikel unter dem Link wirklich (seite_lesen)? Stimmt die Schlagzeile mit dem Artikel überein? Ist er höchstens 7 Tage alt? web_search nur wenn nötig.
+Dann: Meldungen ohne echten Artikel-Link, falsche, zu alte oder doppelte STREICHEN; ungenaue Schlagzeilen korrigieren (max. 70 Zeichen). Ebenfalls streichen: Netzwerkzustand, Halts, Churn, Node-Versionen, Mimir-Abstimmungen, GitLab. Nichts Neues erfinden.
+Ergebnis: Rufe meldungen_speichern mit der geprüften Liste auf (lieber 5 echte als 12 zweifelhafte). Kein Fließtext.`;
 async function kiNewsJobLesen(env) { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news_job'").first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; } }
 async function kiNewsJobSchreiben(env, job) { await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify(job)).run(); }
 async function kiNewsLauf(env, erzwingen = false) {
@@ -7460,7 +7461,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   let job = await kiNewsJobLesen(env);
   if (!job || job.fertig) {
     const zuletzt = Number(await pushState(env, 'ki_news_at')) || 0;
-    if (!erzwingen && jetzt - zuletzt < 3 * 36e5) { await pushStateSet(env, 'ki_news_aktiv', '0'); return null; }
+    if (!erzwingen && jetzt - zuletzt < 1 * 36e5) { // stuendlich (gewuenscht 18.11.2026: "3 Stunden viel zu lang") await pushStateSet(env, 'ki_news_aktiv', '0'); return null; }
     if (!env.ANTHROPIC_API_KEY) return null;
     await pushStateSet(env, 'ki_news_at', jetzt); await pushStateSet(env, 'ki_news_aktiv', '1');
     job = { start: jetzt, phase: 'quellen', runde: 0 };
@@ -7532,7 +7533,7 @@ async function kiNewsLauf(env, erzwingen = false) {
       for (const x of job.tags || []) { const v = String(x.tag || '').replace(/^v/, ''); if (/^\d+\.\d+\.\d+$/.test(v) && x.datum >= grenze && !vers.has(v)) vers.set(v, { datum: x.datum, link: 'https://gitlab.com/thorchain/thornode/-/tags/' + x.tag }); }
       for (const [v, info] of vers) {
         if (sauber.some(e => (e.titelDe + ' ' + e.textDe + ' ' + e.titelEn).includes(v))) continue;
-        sauber.unshift({ kategorie: 'upgrade', wichtig: true, datum: info.datum, titelDe: `THORNode v${v} veröffentlicht`, textDe: '',
+        if (false) sauber.unshift({ kategorie: 'upgrade', wichtig: true, datum: info.datum, titelDe: `THORNode v${v} veröffentlicht`, textDe: '',
           titelEn: `THORNode v${v} released`, textEn: '', quelle: 'GitLab', link: info.link || null });
       }
       sauber.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
@@ -7556,8 +7557,10 @@ async function kiNewsLauf(env, erzwingen = false) {
       const mm = L.mimir && Array.isArray(L.mimir.offen) ? L.mimir.offen.filter(x => x.noetig && x.stimmen / x.noetig >= 0.85).slice(0, 3) : [];
       for (const x of mm) liveListe.push({ kategorie: 'abstimmung', wichtig: x.noetig - x.stimmen <= 2, datum: heute, titelDe: `Abstimmung ${x.schluessel}: ${x.stimmen} von ${x.noetig} Stimmen`, titelEn: `Vote ${x.schluessel}: ${x.stimmen} of ${x.noetig} votes`,
         textDe: x.noetig - x.stimmen === 1 ? 'Es fehlt nur noch eine Stimme.' : `Es fehlen noch ${x.noetig - x.stimmen} Stimmen.`, textEn: x.noetig - x.stimmen === 1 ? 'Only one vote missing.' : `${x.noetig - x.stimmen} votes missing.`, quelle: 'THORNode live', link: null });
-      sauber.unshift(...liveListe);
+      if (false) sauber.unshift(...liveListe); // Newsblog: keine Live-Netzmeldungen mehr
     } catch (e) {}
+    // Newsblog: nur Meldungen mit echtem Artikel-Link
+    for (let k = sauber.length - 1; k >= 0; k--) { const e = sauber[k]; if (!/^https:\/\//.test(e.link || '') || /THORNode live|gitlab/i.test((e.quelle || '') + ' ' + (e.link || ''))) sauber.splice(k, 1); }
     const genutzt = (job.genutzt || []);
     const daten = { at: Date.now(), eintraege: sauber.slice(0, 16), werkzeuge: genutzt, quellenStatus: job.quellenStatus, versionen: (job.tags || []).slice(0, 5).map(t => t.tag + ' ' + t.datum), runden: job.runde };
     await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(daten)).run();
@@ -8205,11 +8208,13 @@ async function netzVerlaufSchritt(env) {
   if (neu.length) await env.DB.prepare('DELETE FROM netz_verlauf WHERE at < ?').bind(Date.now() - 60 * 864e5).run().catch(() => {});
 }
 async function netzVerlaufLesen(env) {
-  if (!env.DB) return { ereignisse: [], stand: null };
+  if (!env.DB) return { ereignisse: [], stand: await netzZustand().catch(() => null) };
   const [ev, st] = await Promise.all([
     env.DB.prepare('SELECT at, hoehe, art, chain, de, en FROM netz_verlauf ORDER BY at DESC LIMIT 60').all().then(r => r.results || []).catch(() => []),
     env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null)]);
-  return { ereignisse: ev, stand: st };
+  // Noch kein gespeicherter Stand (Cron lief noch nicht): Zustand direkt live lesen, damit die Karte sofort erscheint
+  const stand = st || await netzZustand().catch(() => null);
+  return { ereignisse: ev, stand };
 }
 async function syncPushPersoenlich(env) {
   const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
