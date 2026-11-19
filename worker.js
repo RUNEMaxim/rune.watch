@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-0940'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1210'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -2792,7 +2792,7 @@ async function handleStats(request, env, ctx) {
     botEwTab: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
       return { at: t.at, cfg: t.cfg || null, b4: t['4h'] ? t['4h'].zeilen.filter(z => z.bestanden).length : 0, b1: t['1d'] ? t['1d'].zeilen.filter(z => z.bestanden).length : 0 }; } catch (e) { return null; } })(),
     botMuster: await (async () => { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first(); if (!r) return null; const t = JSON.parse(r.v);
-      const o = { at: t.at, tab: {} }; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.tab[k] = t[k] ? Object.values(t[k]).filter(z => z && z.ok && z.erw != null).length : 0; return o; } catch (e) { return null; } })(),
+      const o = { at: t.at, tab: {} }; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.tab[k] = t[k] ? Object.values(t[k]).filter(z => z && z.ok && z.erw != null).length : 0; o.richtung = 0; for (const k of ['lin:4h', 'log:4h', 'lin:1d', 'log:1d']) o.richtung += t[k] ? Object.values(t[k]).filter(z => z && z.richtung).length : 0; return o; } catch (e) { return null; } })(),
     botSignale1d: await botSignale(env, '1d'),
     botExp: await botExperimentBilanz(env),
     botGegen4h: await botGegen(env, '4h'),
@@ -3205,7 +3205,7 @@ async function handleStats(request, env, ctx) {
           // Muster-Ziele
           { const M = stats.botMuster; const s = M ? Object.values(M.tab).reduce((a, b) => a + b, 0) : null;
             h += karte('bot8', 'Pattern targets', M ? s : null, M ? `trained ${d10(M.at)} \u00b7 only quotes \u2265 5 points better than chance` : 'not trained yet \u2013 backtest page \u2192 \u201cMuster trainieren\u201d',
-              M ? Object.entries(M.tab).map(([k, n]) => `${k.replace(':', ' \u00b7 ').toUpperCase()}: ${n}`).join('<br>') : null, M ? (s ? GRUEN : GELB) : GRAU); }
+              M ? Object.entries(M.tab).map(([k, n]) => `${k.replace(':', ' \u00b7 ').toUpperCase()}: ${n}`).join('<br>') + `<br>Breakout direction by market phase: ${M.richtung || 0}${M.richtung ? '' : ' – train again with the new worker'}` : null, M ? (s ? GRUEN : GELB) : GRAU); }
           // Elliott
           { const EW = stats.botEwTab;
             h += karte('bot7', 'Elliott count types', EW ? EW.b4 + EW.b1 : null, EW ? `trained ${d10(EW.at)} \u00b7 4H ${EW.b4} \u00b7 Daily ${EW.b1}` : 'not trained yet \u2013 backtest page \u2192 \u201cElliott trainieren\u201d',
@@ -5720,6 +5720,12 @@ export default {
           const T = b[tab]; if (!T || typeof T !== 'object') continue;
           const o = {};
           for (const [k, z] of Object.entries(T).slice(0, 2000)) {
+            // Ausbruchsrichtung je Muster und Marktphase (fuer "welches Muster ist wahrscheinlicher")
+            if (/^[a-zA-Z]+\|richtung\|(alle|auf|ab|seit|x)$/.test(k) && z && typeof z === 'object') {
+              const up = Math.max(0, Math.round(+z.up || 0)), down = Math.max(0, Math.round(+z.down || 0));
+              if (up + down >= 15) { o[k] = { up, down, n: up + down, richtung: true }; }
+              continue;
+            }
             if (!/^[a-zA-Z]+\|(up|down)\|[0-9.]+\|(alle|auf|ab|seit|x)$/.test(k) || !z || typeof z !== 'object') continue;
             if (!z.ok) continue; // nur bestandene speichern -- die App nutzt nur diese (haelt /bot-signale klein)
             if (z.erw == null || !isFinite(+z.erw)) continue; // ohne Zufalls-Vergleich nicht mehr uebernehmen
