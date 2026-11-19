@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1530'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1535'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5691,7 +5691,13 @@ export default {
       }
       if (url.pathname === '/gebuehren') return json(await gebuehrenUsd().catch(() => null) || {}, env);
       if (url.pathname === '/netz-verlauf') return json(await netzVerlaufLesen(env).catch(() => ({ ereignisse: [], stand: null })), env);
-      if (url.pathname === '/node-geo') return json(await nodeGeo(env).catch(e => ({ fehler: String(e && e.message || e), punkte: [], laender: [], anbieter: [] })), env);
+      if (url.pathname === '/node-geo') {
+        // SOFORT ANTWORTEN (gemeldet 19.11.2026: "Karte muss sofort erscheinen"): gespeicherten Stand sofort liefern,
+        // ist er aelter als 6 h, im Hintergrund erneuern. Nur ganz ohne Stand wird gewartet.
+        const st = await nodeGeoStand(env);
+        if (st) { if (Date.now() - Number(st.at) > NODE_GEO_TTL) ctx.waitUntil(nodeGeo(env, true).catch(() => {})); return json(st, env); }
+        return json(await nodeGeo(env, true).catch(e => ({ fehler: String(e && e.message || e), punkte: [], laender: [], anbieter: [] })), env);
+      }
       if (false && url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
       if (url.pathname === '/bot-check') {
         // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
@@ -5971,6 +5977,8 @@ export default {
       // Netzwerk-Verlauf: jede Minute Zustand vergleichen und Wechsel speichern
       ctx.waitUntil(netzVerlaufSchritt(env).catch(e => console.warn('[netz-verlauf]', e && e.message || e)));
       ctx.waitUntil(syncMimirDune(env).catch(e => console.warn('[mimir-dune]', e && e.message || e)));
+      // Node-Weltkarte vorwaermen (Minute 17 jeder Stunde): so liegt immer ein frischer Stand bereit.
+      if (minute === 17) ctx.waitUntil(nodeGeo(env).catch(e => console.warn('[node-geo]', e && e.message || e)));
       ctx.waitUntil((async () => {
         const t0 = Date.now();
         try { await syncPush(env); } catch (e) { console.warn('[push] minute', e?.message || e); }
@@ -8598,18 +8606,22 @@ async function netzVerlaufSchritt(env) {
 // Je IP 14 Tage zwischengespeichert, das Ergebnis 6 Stunden -- die Karte kostet also kaum Anfragen.
 const NODE_GEO_TTL = 6 * 3600e3, NODE_GEO_IP_TTL = 14 * 864e5;
 const anbieterName = s => {
-  const t = String(s || '').replace(/\b(GmbH|Inc\.?|LLC|Ltd\.?|S\.?A\.?S?|SAS|B\.V\.|AG|Corp(oration)?\.?|Limited|Co\.)\b/gi, '').replace(/[,.]+$/g, '').replace(/\s+/g, ' ').trim();
+  const t = String(s || '').replace(/\bsp\.?\s*z\s*o\.?\s*o\.?/gi, '').replace(/\b(GmbH|Inc\.?|LLC|Ltd\.?|S\.?A\.?S?|SAS|B\.V\.|AG|Corp(oration)?\.?|Limited|Co\.)\b/gi, '').replace(/[,.]+$/g, '').replace(/\s+/g, ' ').trim();
   if (/amazon|aws/i.test(t)) return 'AWS'; if (/google/i.test(t)) return 'Google Cloud'; if (/microsoft|azure/i.test(t)) return 'Azure';
   if (/digitalocean/i.test(t)) return 'DigitalOcean'; if (/hetzner/i.test(t)) return 'Hetzner'; if (/^ovh|ovh /i.test(t)) return 'OVH';
   if (/linode|akamai/i.test(t)) return 'Akamai/Linode'; if (/vultr|choopa/i.test(t)) return 'Vultr'; if (/contabo/i.test(t)) return 'Contabo';
   return t.slice(0, 28) || '?';
 };
-async function nodeGeo(env) {
+async function nodeGeoStand(env) {
+  if (!env.DB) return null;
+  return env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'nodeGeo'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
+}
+async function nodeGeo(env, erzwingen) {
   if (!env.DB) return { punkte: [], laender: [], anbieter: [] };
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS node_geo (ip TEXT PRIMARY KEY, v TEXT, at INTEGER)').run();
-  const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'nodeGeo'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
-  if (alt && Date.now() - Number(alt.at) < NODE_GEO_TTL) return alt;
+  const alt = await nodeGeoStand(env);
+  if (!erzwingen && alt && Date.now() - Number(alt.at) < NODE_GEO_TTL) return alt;
   const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
   if (!Array.isArray(nodes)) { if (alt) return alt; throw new Error('NODES_FAIL'); }
   const liste = nodes.filter(n => n && /^(Active|Ready|Standby)$/.test(String(n.status)) && /^\d{1,3}(\.\d{1,3}){3}$/.test(String(n.ip_address || '')));
@@ -8627,12 +8639,15 @@ async function nodeGeo(env) {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fehlt.slice(i, i + 100).map(q => ({ query: q }))), signal: AbortSignal.timeout(10000) });
       if (!r.ok) break;
       const arr = await r.json();
+      const schreib = [];
       for (const g of Array.isArray(arr) ? arr : []) {
         if (!g || g.status !== 'success' || !g.query) continue;
         const v = { land: g.country || '?', code: g.countryCode || '', stadt: g.city || '', lat: Number(g.lat), lon: Number(g.lon), anbieter: anbieterName(g.org || g.isp) };
         geo[g.query] = { ...v, at: Date.now() };
-        await env.DB.prepare('INSERT OR REPLACE INTO node_geo (ip, v, at) VALUES (?, ?, ?)').bind(g.query, JSON.stringify(v), Date.now()).run().catch(() => {});
+        schreib.push(env.DB.prepare('INSERT OR REPLACE INTO node_geo (ip, v, at) VALUES (?, ?, ?)').bind(g.query, JSON.stringify(v), Date.now()));
       }
+      // In EINEM Rutsch speichern (vorher eine Anfrage je IP -- beim ersten Aufruf ueber 100 nacheinander)
+      if (schreib.length) await env.DB.batch(schreib).catch(() => {});
     } catch (e) { break; }
   }
   // Ausgabe ohne IP-Adressen: nur Ort, Status und Kurzkennung der Node
