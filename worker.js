@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-18-1600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-0940'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -8742,6 +8742,8 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
       const offen = new Set();
       const gemeldet = z.abst || {};
       for (const a of abst.liste) {
+        // Halts/Pausen (operative Werte, 3 Stimmen) sind keine Abstimmung, bei der eine Node "fehlt"
+        if (a.operativ || /^(HALT|PAUSE|SOLVENCYHALT|STOPSOLVENCYCHECK|NODEPAUSE)/i.test(a.key)) continue;
         for (const na of Object.keys(neu)) {
           // Nur Nodes mit echtem Bond (nicht nur freigeschaltet mit 0 RUNE).
           if (neu[na].s !== 'Active' || !(neu[na].b > 0.01) || !a.fehlen.includes(String(na).toLowerCase())) continue;
