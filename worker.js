@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1440'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1530'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5691,6 +5691,7 @@ export default {
       }
       if (url.pathname === '/gebuehren') return json(await gebuehrenUsd().catch(() => null) || {}, env);
       if (url.pathname === '/netz-verlauf') return json(await netzVerlaufLesen(env).catch(() => ({ ereignisse: [], stand: null })), env);
+      if (url.pathname === '/node-geo') return json(await nodeGeo(env).catch(e => ({ fehler: String(e && e.message || e), punkte: [], laender: [], anbieter: [] })), env);
       if (false && url.pathname === '/keysign-blame') return json(await keysignBlame(env).catch(e => ({ fehler: [String(e && e.message || e)] , nodes: [] })), env);
       if (url.pathname === '/bot-check') {
         // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
@@ -8591,6 +8592,69 @@ async function netzVerlaufSchritt(env) {
   for (const e of neu) await env.DB.prepare('INSERT INTO netz_verlauf (at, hoehe, art, chain, de, en) VALUES (?, ?, ?, ?, ?, ?)').bind(z.at, z.hoehe, e.art, e.chain, e.de, e.en).run();
   await env.DB.prepare("INSERT INTO netz_stand (k, v) VALUES ('z', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(z)).run();
   if (neu.length) await env.DB.prepare('DELETE FROM netz_verlauf WHERE at < ?').bind(Date.now() - 60 * 864e5).run().catch(() => {});
+}
+// WO DIE NODES STEHEN (gewuenscht 19.11.2026: Weltkarte auf der Node-Seite). IP -> Land/Ort/Anbieter ueber
+// ip-api.com (Batch, bis 100 IPs je Anfrage, ohne Schluessel; kostenlos nur fuer nicht-kommerzielle Nutzung).
+// Je IP 14 Tage zwischengespeichert, das Ergebnis 6 Stunden -- die Karte kostet also kaum Anfragen.
+const NODE_GEO_TTL = 6 * 3600e3, NODE_GEO_IP_TTL = 14 * 864e5;
+const anbieterName = s => {
+  const t = String(s || '').replace(/\b(GmbH|Inc\.?|LLC|Ltd\.?|S\.?A\.?S?|SAS|B\.V\.|AG|Corp(oration)?\.?|Limited|Co\.)\b/gi, '').replace(/[,.]+$/g, '').replace(/\s+/g, ' ').trim();
+  if (/amazon|aws/i.test(t)) return 'AWS'; if (/google/i.test(t)) return 'Google Cloud'; if (/microsoft|azure/i.test(t)) return 'Azure';
+  if (/digitalocean/i.test(t)) return 'DigitalOcean'; if (/hetzner/i.test(t)) return 'Hetzner'; if (/^ovh|ovh /i.test(t)) return 'OVH';
+  if (/linode|akamai/i.test(t)) return 'Akamai/Linode'; if (/vultr|choopa/i.test(t)) return 'Vultr'; if (/contabo/i.test(t)) return 'Contabo';
+  return t.slice(0, 28) || '?';
+};
+async function nodeGeo(env) {
+  if (!env.DB) return { punkte: [], laender: [], anbieter: [] };
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS node_geo (ip TEXT PRIMARY KEY, v TEXT, at INTEGER)').run();
+  const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'nodeGeo'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
+  if (alt && Date.now() - Number(alt.at) < NODE_GEO_TTL) return alt;
+  const nodes = await fetchFromBases(getThornodeBases(), '/thorchain/nodes').catch(() => null);
+  if (!Array.isArray(nodes)) { if (alt) return alt; throw new Error('NODES_FAIL'); }
+  const liste = nodes.filter(n => n && /^(Active|Ready|Standby)$/.test(String(n.status)) && /^\d{1,3}(\.\d{1,3}){3}$/.test(String(n.ip_address || '')));
+  const ips = [...new Set(liste.map(n => String(n.ip_address)))];
+  const geo = {};
+  for (let i = 0; i < ips.length; i += 90) {
+    const teil = ips.slice(i, i + 90);
+    const r = await env.DB.prepare(`SELECT ip, v, at FROM node_geo WHERE ip IN (${teil.map(() => '?').join(',')})`).bind(...teil).all().catch(() => null);
+    for (const z of (r && r.results) || []) { try { geo[z.ip] = { ...JSON.parse(z.v), at: z.at }; } catch (e) {} }
+  }
+  const fehlt = ips.filter(ip => !geo[ip] || Date.now() - Number(geo[ip].at) > NODE_GEO_IP_TTL);
+  for (let i = 0; i < fehlt.length && i < 200; i += 100) {
+    try {
+      const r = await fetch('http://ip-api.com/batch?fields=status,query,country,countryCode,city,lat,lon,isp,org', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fehlt.slice(i, i + 100).map(q => ({ query: q }))), signal: AbortSignal.timeout(10000) });
+      if (!r.ok) break;
+      const arr = await r.json();
+      for (const g of Array.isArray(arr) ? arr : []) {
+        if (!g || g.status !== 'success' || !g.query) continue;
+        const v = { land: g.country || '?', code: g.countryCode || '', stadt: g.city || '', lat: Number(g.lat), lon: Number(g.lon), anbieter: anbieterName(g.org || g.isp) };
+        geo[g.query] = { ...v, at: Date.now() };
+        await env.DB.prepare('INSERT OR REPLACE INTO node_geo (ip, v, at) VALUES (?, ?, ?)').bind(g.query, JSON.stringify(v), Date.now()).run().catch(() => {});
+      }
+    } catch (e) { break; }
+  }
+  // Ausgabe ohne IP-Adressen: nur Ort, Status und Kurzkennung der Node
+  const punkte = [], laender = {}, anbieter = {};
+  let aktiv = 0, bekannt = 0;
+  for (const n of liste) {
+    const g = geo[String(n.ip_address)];
+    const s = String(n.status) === 'Active' ? 'A' : 'W';
+    if (s === 'A') aktiv++;
+    if (!g || !Number.isFinite(g.lat)) continue;
+    punkte.push({ lat: Math.round(g.lat * 10) / 10, lon: Math.round(g.lon * 10) / 10, s, n: String(n.node_address || '').slice(-4), stadt: g.stadt, land: g.land });
+    if (s === 'A') {
+      bekannt++;
+      const lk = g.code || g.land; laender[lk] = laender[lk] || { land: g.land, code: g.code, n: 0 }; laender[lk].n++;
+      anbieter[g.anbieter] = (anbieter[g.anbieter] || 0) + 1;
+    }
+  }
+  const erg = { at: Date.now(), aktiv, bekannt, punkte,
+    laender: Object.values(laender).sort((a, b) => b.n - a.n),
+    anbieter: Object.entries(anbieter).map(([name, n]) => ({ name, n })).sort((a, b) => b.n - a.n) };
+  if (punkte.length) await env.DB.prepare("INSERT INTO netz_stand (k, v) VALUES ('nodeGeo', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(erg)).run().catch(() => {});
+  return erg;
 }
 async function netzVerlaufLesen(env) {
   if (!env.DB) return { ereignisse: [], stand: await netzZustand(env).catch(() => null) };
