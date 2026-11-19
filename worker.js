@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1630'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1710'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7334,7 +7334,9 @@ async function handleKi(request, env, url) {
     // Diagnose ZUERST (am Handy sieht man sonst nur die lange Meldungsliste)
     // "aktiv" = es entsteht WIRKLICH gerade eine Ausgabe (Flag des Schritt-Ablaufs), nicht nur ein alter Schritt-Eintrag
     const aktiv = (await pushState(env, 'ki_news_aktiv').catch(() => null)) === '1';
-    return json(r ? { diagnose: { aktiv, letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...JSON.parse(r.v), letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, diagnose: { aktiv, schritt: schrittInfo }, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
+    let gespeichert = {}; try { gespeichert = r ? JSON.parse(r.v) || {} : {}; } catch (e) {}
+    if (Array.isArray(gespeichert.eintraege)) gespeichert.eintraege = gespeichert.eintraege.filter(e => !kiNewsNegativ(e)); // nur gute News, sofort
+    return json(r ? { diagnose: { aktiv, letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...gespeichert, letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, diagnose: { aktiv, schritt: schrittInfo }, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
     // Liste der Rueckmeldungen (nur mit Statistik-Schluessel) -- zum Auswerten und Verbessern
@@ -7453,7 +7455,7 @@ async function kiNewsQuellen(env) {
 // den Zwischenstand in D1. Bricht ein Lauf ab, setzt der naechste an derselben Stelle fort. Waehrend eine
 // Ausgabe entsteht, laeuft die KI jede zweite Minute.
 const KI_NEWS_ABSCHLUSS = { name: 'meldungen_speichern', description: 'Speichert die fertigen News-Meldungen fuer den rune.watch-News-Kanal.',
-  input_schema: { type: 'object', required: ['meldungen'], properties: { meldungen: { type: 'array', maxItems: 16, items: { type: 'object', required: ['kategorie', 'datum', 'titelDe', 'titelEn'], properties: {
+  input_schema: { type: 'object', required: ['meldungen'], properties: { meldungen: { type: 'array', maxItems: 30, items: { type: 'object', required: ['kategorie', 'datum', 'titelDe', 'titelEn'], properties: {
     kategorie: { type: 'string', enum: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'] }, wichtig: { type: 'boolean' }, datum: { type: 'string', description: 'YYYY-MM-DD' },
     titelDe: { type: 'string', description: 'Schlagzeile, max. 70 Zeichen' }, titelEn: { type: 'string', description: 'headline, max 70 chars' },
     zeileDe: { type: 'string', description: 'optional, eine Zeile Kontext, max. 110 Zeichen' }, zeileEn: { type: 'string', description: 'optional, one line of context, max 110 chars' },
@@ -7461,11 +7463,12 @@ const KI_NEWS_ABSCHLUSS = { name: 'meldungen_speichern', description: 'Speichert
 // NEWSBLOG (gewuenscht 18.11.2026: "Es muessen wirklich News sein. Ein Newsblog. Nicht das suchen, was die ThorWatch-Funktion macht"):
 // nur echte Artikel ueber THORChain, recherchiert und verlinkt -- keine Netzwerkzustaende, Versionen, Halts, Abstimmungen.
 const kiNewsSystem = heute => `Du bist die Redaktion des Newsblogs von rune.watch. Heute ist ${heute}. Du recherchierst echte NACHRICHTENARTIKEL über THORChain (und sein Ökosystem: Rujira, TCY, RUNE, THORSwap, Vultisig, Integrationen) aus den letzten 7 Tagen und verlinkst sie.
-Recherche (Websuche, höchstens 4 Suchen): 1) "THORChain" News dieser Woche (Krypto-Medien wie CoinDesk, The Block, Decrypt, Cointelegraph, The Defiant, Blockworks u. a.), 2) THORChain/Rujira Blog- und Medium-Artikel, 3) Partnerschaften, Integrationen, Listings, Wallets, 4) RUNE Markt- und Analyseartikel. Die Rohquellen (JSON) sind nur Hintergrund, keine Meldungsquelle.
+Recherche (Websuche, gründlich: bis zu 8 Suchen je Schritt, insgesamt bis zu 30, jede Suche mit anderem Blickwinkel): 1) "THORChain" News dieser Woche (CoinDesk, The Block, Decrypt, Cointelegraph, The Defiant, Blockworks, CryptoSlate, Bitcoin Magazine u. a.), 2) THORChain-, Rujira- und TCY-Blog- und Medium-Artikel, 3) Partnerschaften, Integrationen, Listings, Wallets (Vultisig, Ledger, Trust, Ctrl, THORSwap, Asgardex), 4) Rekorde bei Volumen, TVL, Swaps, 5) neue Funktionen und Upgrades (z. B. Lending, Secured Assets, neue Chains), 6) RUNE Analyse- und Research-Artikel (Messari, Delphi, Kaiko u. a.), 7) Interviews und Podcasts, 8) Artikel in anderen Sprachen. Die Rohquellen (JSON) sind nur Hintergrund, keine Meldungsquelle.
 Stil: Schlagzeilen wie in einem guten Krypto-Newsblog: konkret, mit Name oder Zahl, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen).
 Links: Jede Meldung MUSS auf den Artikel verlinken (https-URL des Artikels selbst, keine Startseite). Ohne Artikel-Link keine Meldung. quelle = Name des Mediums.
+NUR POSITIVE ARTIKEL: Wachstum, Rekorde, neue Funktionen, Integrationen, Partnerschaften, Listings, Upgrades, gute Analysen. KEINE negativen Artikel: Hacks, Exploits, Diebstahl, Geldwäsche-Vorwürfe, Klagen, Ermittlungen, Kurseinbrüche, Kritik, Verluste, Pleiten, Streit.
 VERBOTEN: Meldungen über Netzwerkzustand (angehaltene Chains, Churn, Halts, Vault-Migration), Node-Versionen/Upgrade-Stand, Mimir-Abstimmungen, GitLab-Commits/Tags – das zeigt rune.watch anderswo. Nichts erfinden, keine Kursprognosen. Datum = Erscheinungsdatum des Artikels. Neueste zuerst.
-Ergebnis: Rufe am Ende meldungen_speichern auf (6 bis 16 Meldungen). Kein Fließtext, keine Zwischenberichte.`;
+Ergebnis: Rufe am Ende meldungen_speichern auf (so viele echte Meldungen wie gefunden, bis 30). Kein Fließtext, keine Zwischenberichte.`;
 // PRUEFRUNDE: zweiter Durchgang, der den Entwurf wie ein Redakteur gegencheckt
 const kiNewsPruefSystem = heute => `Du bist der Faktenprüfer des Newsblogs von rune.watch (THORChain). Heute ist ${heute}. Du bekommst einen ENTWURF mit Meldungen.
 Prüfe JEDE Meldung: Gibt es den Artikel unter dem Link wirklich (seite_lesen)? Stimmt die Schlagzeile mit dem Artikel überein? Ist er höchstens 7 Tage alt? web_search nur wenn nötig.
@@ -7487,6 +7490,12 @@ async function kiNewsLinksPruefen(liste) {
   };
   const erg = await Promise.all(liste.map(pruef));
   return erg.filter(Boolean);
+}
+// NUR GUTE NEWS (gewuenscht 19.11.2026: "nur positive, also gute Artikel"): Sicherheitsnetz zusaetzlich zur
+// KI-Anweisung -- Schlagzeilen mit negativen Stichworten fliegen raus, auch aus der bisherigen Liste.
+function kiNewsNegativ(e) {
+  const t = ' ' + String((e && (e.titelEn || '')) + ' ' + (e && (e.titelDe || '')) + ' ' + (e && (e.zeileEn || e.textEn || ''))).toLowerCase() + ' ';
+  return /hack|exploit|drain|stolen|theft|heist|launder|lazarus|lawsuit|sued|\bsue\b|probe|investigat|sanction|seiz|scam|fraud|crash|plung|tumbl|slump|plummet|sell-?off|dump|bearish|loss(es)?\b|insolv|bankrupt|halt(ed|s)?\b|outage|vulnerab|attack|warn|risk|fear|concern|critic|controvers|delist|diebstahl|geldw|klage|ermittl|einbruch|absturz|verlust|pleite|angriff|warnung|kritik|stopp/.test(t);
 }
 // Blog-Artikel (RSS) sofort in die gespeicherte Liste uebernehmen -- sie sind echt und brauchen keine KI.
 async function kiNewsBlogSofort(env, blog) {
@@ -7553,7 +7562,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   if (job.runde !== 99) {
     const letzte = job.runde >= maxR;
     const wz = letzte ? { tools: [KI_NEWS_ABSCHLUSS], tool_choice: { type: 'tool', name: KI_NEWS_ABSCHLUSS.name } }
-      : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 4 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
+      : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 8 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
       body: JSON.stringify({ model: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', max_tokens: 16000, system: pruefen ? kiNewsPruefSystem(heute) : kiNewsSystem(heute), messages: job.verlauf, ...wz }),
@@ -7569,7 +7578,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   // Entwurf fertig -> Links direkt pruefen und speichern (vorher eine KI-Pruefrunde mit bis zu 6 weiteren Schritten)
   if (!pruefen && fertig && fertig.input && Array.isArray(fertig.input.meldungen)) {
     await schritt('Links prüfen');
-    fertig = { input: { meldungen: await kiNewsLinksPruefen(fertig.input.meldungen.slice(0, 16)) } };
+    fertig = { input: { meldungen: await kiNewsLinksPruefen(fertig.input.meldungen.slice(0, 30)) } };
     fertig.leerOk = true;
   }
   if (fertig && fertig.input && Array.isArray(fertig.input.meldungen) && (fertig.input.meldungen.length || fertig.leerOk)) {
@@ -7631,7 +7640,7 @@ async function kiNewsLauf(env, erzwingen = false) {
       const titelK = e => String(e.titelEn || e.titelDe || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 50);
       const gesehen = new Set(), gesehenT = new Set(), alle = [];
       for (const e of [...sauber, ...blogE, ...altE]) {
-        if (!e || !/^https:\/\//.test(e.link || '') || !(e.datum >= grenze14)) continue;
+        if (!e || !/^https:\/\//.test(e.link || '') || !(e.datum >= grenze14) || kiNewsNegativ(e)) continue;
         const k = schluessel(e), t = titelK(e);
         if (gesehen.has(k) || (t && gesehenT.has(t))) continue;
         gesehen.add(k); if (t) gesehenT.add(t); alle.push(e);
