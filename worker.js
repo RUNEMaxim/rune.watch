@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1535'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7496,6 +7496,7 @@ async function kiNewsLauf(env, erzwingen = false) {
     job = { ...job, phase: 'ki', runde: 0, quellenStatus,
       releases: Array.isArray(quellen.thornodeReleases) ? quellen.thornodeReleases.map(r => ({ version: r.version, datum: r.datum, link: r.link })) : [],
       tags: Array.isArray(quellen.thornodeTags) ? quellen.thornodeTags : [],
+      blog: Array.isArray(quellen.blog) ? quellen.blog.filter(b => b && b.link && b.titel).slice(0, 8) : [],
       live: { aktiveNodes: quellen.aktiveNodes || null, version: quellen.version || null, angehalten: Array.isArray(quellen.angehalten) ? quellen.angehalten : [], mimir: quellen.mimirAbstimmungen || null },
       verlauf: [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }] };
     await kiNewsJobSchreiben(env, job); await schritt('KI schreibt (Websuche)');
@@ -7579,8 +7580,33 @@ async function kiNewsLauf(env, erzwingen = false) {
     } catch (e) {}
     // Newsblog: nur Meldungen mit echtem Artikel-Link
     for (let k = sauber.length - 1; k >= 0; k--) { const e = sauber[k]; if (!/^https:\/\//.test(e.link || '') || /THORNode live|gitlab/i.test((e.quelle || '') + ' ' + (e.link || ''))) sauber.splice(k, 1); }
+    // NEWSBLOG SAMMELT (gemeldet 19.11.2026: "Was ist mit den Artikeln?" -- nur ein Artikel zu sehen): Vorher ersetzte
+    // jeder stuendliche Lauf die ganze Liste; strich die Pruefrunde fast alles, blieb fast nichts. Jetzt: neue
+    // Meldungen + bisherige der letzten 14 Tage + Artikel des offiziellen THORChain-Blogs (RSS, immer echt verlinkt),
+    // ohne Doppelte, neueste zuerst, bis 30.
+    try {
+      // Gewuenscht 19.11.2026: "Lass alle Artikel, die du gefunden hast. Alle neu gefundenen hinzufuegen" --
+      // nichts mehr verwerfen ausser sehr alten (90 Tage), bis 80 Artikel.
+      const grenze14 = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+      const altRoh2 = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
+      const altE = altRoh2 ? ((JSON.parse(altRoh2.v) || {}).eintraege || []) : [];
+      const blogE = (job.blog || []).filter(b => b.datum && b.datum >= grenze14).map(b => ({ kategorie: 'oekosystem', wichtig: false, datum: b.datum,
+        titelDe: String(b.titel).slice(0, 100), titelEn: String(b.titel).slice(0, 100), textDe: String(b.auszug || '').slice(0, 160), textEn: String(b.auszug || '').slice(0, 160),
+        quelle: 'THORChain Blog', link: String(b.link).slice(0, 300) }));
+      const schluessel = e => String(e.link || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+      const titelK = e => String(e.titelEn || e.titelDe || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 50);
+      const gesehen = new Set(), gesehenT = new Set(), alle = [];
+      for (const e of [...sauber, ...blogE, ...altE]) {
+        if (!e || !/^https:\/\//.test(e.link || '') || !(e.datum >= grenze14)) continue;
+        const k = schluessel(e), t = titelK(e);
+        if (gesehen.has(k) || (t && gesehenT.has(t))) continue;
+        gesehen.add(k); if (t) gesehenT.add(t); alle.push(e);
+      }
+      alle.sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0));
+      sauber.length = 0; sauber.push(...alle.slice(0, 80));
+    } catch (e) { console.warn('[ki news] sammeln', e && e.message || e); }
     const genutzt = (job.genutzt || []);
-    const daten = { at: Date.now(), eintraege: sauber.slice(0, 16), werkzeuge: genutzt, quellenStatus: job.quellenStatus, versionen: (job.tags || []).slice(0, 5).map(t => t.tag + ' ' + t.datum), runden: job.runde };
+    const daten = { at: Date.now(), eintraege: sauber.slice(0, 80), werkzeuge: genutzt, quellenStatus: job.quellenStatus, versionen: (job.tags || []).slice(0, 5).map(t => t.tag + ' ' + t.datum), runden: job.runde };
     await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(daten)).run();
     await beenden(); await schritt('fertig');
     return { n: sauber.length, runden: job.runde };
