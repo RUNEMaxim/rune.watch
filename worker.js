@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1715'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1720'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7236,7 +7236,7 @@ async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, max
   for (let runde = 0; runde < maxRunden; runde++) {
     const letzte = runde === maxRunden - 1;
     const basisWz = kiWebsucheAus ? KI_WERKZEUGE : [...KI_WERKZEUGE, { type: 'web_search_20250305', name: 'web_search', max_uses: webSuchen }];
-    const werkzeuge = abschluss ? (letzte ? { tools: [abschluss], tool_choice: { type: 'tool', name: abschluss.name } } : { tools: [...basisWz, abschluss] }) : (letzte ? {} : { tools: basisWz });
+    const werkzeuge = abschluss ? { tools: [...basisWz, abschluss] } /* kein erzwungenes tool_choice: vom Modell nicht unterstuetzt */ : (letzte ? {} : { tools: basisWz });
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
       body: JSON.stringify({ model: modell || env.KI_MODELL_FRAGE || env.KI_MODELL || KI_MODELL_STD, max_tokens: maxTokens, system, messages: verlauf, ...werkzeuge }),
@@ -7583,11 +7583,21 @@ async function kiNewsLauf(env, erzwingen = false) {
   let inhalt = [], j = null;
   if (job.runde !== 99) {
     const letzte = job.runde >= maxR;
-    const wz = letzte ? { tools: [KI_NEWS_ABSCHLUSS], tool_choice: { type: 'tool', name: KI_NEWS_ABSCHLUSS.name } }
-      : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 12 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
+    // Letzte Runde: KEIN erzwungenes tool_choice mehr (gemeldet 19.11.2026: "KI_HTTP_400: tool_choice type tool
+    // and any are not supported for this model"). Stattdessen dieselben Werkzeuge ohne Websuche und eine klare
+    // Anweisung, jetzt zu speichern.
+    const wz = { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: letzte ? 1 : pruefen ? 3 : 12 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
+    let nachrichten = job.verlauf;
+    if (letzte) {
+      const hinweis = { type: 'text', text: 'Keine weitere Recherche. Rufe JETZT meldungen_speichern mit allen gefundenen positiven Artikeln auf.' };
+      nachrichten = job.verlauf.slice();
+      const l = nachrichten[nachrichten.length - 1];
+      if (l && l.role === 'user') nachrichten[nachrichten.length - 1] = { role: 'user', content: Array.isArray(l.content) ? [...l.content, hinweis] : [{ type: 'text', text: String(l.content || '') }, hinweis] };
+      else nachrichten.push({ role: 'user', content: [hinweis] });
+    }
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', max_tokens: 16000, system: pruefen ? kiNewsPruefSystem(heute) : kiNewsSystem(heute), messages: job.verlauf, ...wz }),
+      body: JSON.stringify({ model: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', max_tokens: 16000, system: pruefen ? kiNewsPruefSystem(heute) : kiNewsSystem(heute), messages: nachrichten, ...wz }),
       signal: AbortSignal.timeout(240000) });
     j = await r.json().catch(() => null);
     if (!r.ok && r.status === 400 && !job.ohneSuche && /web_search|server tool/i.test(String(j && j.error && j.error.message))) { job.ohneSuche = true; job.runde--; await kiNewsJobSchreiben(env, job); return { schritt: 'ohne Websuche' }; }
