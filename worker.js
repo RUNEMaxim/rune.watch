@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1210'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1440'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -7650,7 +7650,7 @@ async function kiKaufsignale(env) {
       }
       texte[de ? 'de' : 'en'] = t || vorlage(de);
     }
-    await pushAnThema(env, 'kauf', (de, p, row) => (!kiFuerAlle(env) && !row.besitzer) ? null : ({ titel: de ? `Kaufsignal ${r0.ebene.toUpperCase()}` : `Buy signal ${r0.ebene.toUpperCase()}`, text: de ? texte.de : texte.en, tag: 'rw-kauf-' + r0.ebene + '-' + r0.at, url: '/' }));
+    await pushAnThema(env, 'kauf', (de, p, row) => (!kiFuerAlle(env) && !row.besitzer) ? null : ({ titel: (de ? 'Kaufsignal ' : 'Buy signal ') + r0.ebene.toUpperCase(), text: de ? texte.de : texte.en, tag: 'rw-kauf-' + r0.ebene + '-' + r0.at, url: '/' }));
   }
   await pushStateSet(env, 'ki_kauf_bis', maxAt);
 }
@@ -7710,7 +7710,7 @@ async function kiTagesbericht(env) {
   }
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:bericht', JSON.stringify(bericht)).run();
   const kopf = t => String(t || '').split('\n')[0].replace(/^[•\s]+/, '').slice(0, 120);
-  await pushAnThema(env, 'bericht', (de, p, row) => (!kiFuerAlle(env) && !row.besitzer) ? null : ({ titel: de ? 'rune.watch · Tagesbericht' : 'rune.watch · Daily report', text: kopf(de ? bericht.de : bericht.en), tag: 'rw-bericht-' + tag, url: '/#bericht' }));
+  await pushAnThema(env, 'bericht', (de, p, row) => (!kiFuerAlle(env) && !row.besitzer) ? null : ({ titel: de ? 'Tagesbericht' : 'Daily report', text: kopf(de ? bericht.de : bericht.en), tag: 'rw-bericht-' + tag, url: '/#bericht' }));
 }
 
 // WEB PUSH (Etappe 1): Meldungen auch bei geschlossener App.
@@ -7726,6 +7726,9 @@ async function sicherePushTabellen(env) {
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_subs (id TEXT PRIMARY KEY, endpoint TEXT, p256dh TEXT, auth TEXT, prefs TEXT, lang TEXT, besitzer INTEGER, at INTEGER, fails INTEGER DEFAULT 0, zustand TEXT)`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_state (k TEXT PRIMARY KEY, v TEXT)`),
+    // NACHSENDE-WARTESCHLANGE (gewuenscht 19.11.2026: "jede Push zuverlaessig und puenktlich"): Scheitert die
+    // Zustellung voruebergehend (Netzfehler, 429, 5xx beim Push-Dienst), geht die Meldung nicht mehr verloren.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS push_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, sub_id TEXT, nachricht TEXT, versuche INTEGER DEFAULT 0, naechster INTEGER, at INTEGER)`),
   ]);
   // Etappe 2: Adressen je Abo (fuer persoenliche Meldungen). Spalte bei bestehender Tabelle nachruesten.
   try { await env.DB.prepare('ALTER TABLE push_subs ADD COLUMN adressen TEXT').run(); } catch (e) { /* gibt es schon */ }
@@ -7784,7 +7787,33 @@ async function pushVerschluesseln(sub, nutzlast) {
   const rs = new Uint8Array([0, 0, 16, 0]); // 4096
   return verbinde(salt, rs, new Uint8Array([asPub.length]), asPub, geheim);
 }
-async function pushSenden(env, sub, nachricht) {
+// ZUVERLAESSIG ZUSTELLEN (gewuenscht 19.11.2026): bis zu 3 Versuche sofort (0,4 s / 1,2 s Pause) bei Netzfehlern,
+// 429 und 5xx. Klappt es dann noch nicht, kommt die Meldung in die Warteschlange und wird im 6-Sekunden-Takt
+// nachgesendet (bis zu 30 Minuten lang -- danach waere sie nicht mehr puenktlich).
+async function pushSenden(env, sub, nachricht, ausWarteschlange) {
+  let erg = null;
+  for (let i = 0; i < 3; i++) {
+    try { erg = await pushSendenEinmal(env, sub, nachricht); } catch (e) { erg = 'netz'; }
+    if (!(erg === 'netz' || /^fehler (429|5\d\d)$/.test(String(erg)))) return erg;
+    if (i < 2) await new Promise(r => setTimeout(r, 400 * Math.pow(3, i)));
+  }
+  if (!ausWarteschlange) {
+    try { await env.DB.prepare('INSERT INTO push_queue (sub_id, nachricht, versuche, naechster, at) VALUES (?, ?, 0, ?, ?)').bind(sub.id, JSON.stringify(nachricht), Date.now() + 20000, Date.now()).run(); } catch (e) {}
+  }
+  return erg;
+}
+async function pushWarteschlange(env) {
+  const r = await env.DB.prepare('SELECT * FROM push_queue WHERE naechster <= ? ORDER BY id LIMIT 20').bind(Date.now()).all().catch(() => null);
+  for (const q of (r && r.results) || []) {
+    const sub = await env.DB.prepare('SELECT * FROM push_subs WHERE id = ?').bind(q.sub_id).first().catch(() => null);
+    if (!sub || Date.now() - Number(q.at) > 30 * 60e3) { await env.DB.prepare('DELETE FROM push_queue WHERE id = ?').bind(q.id).run().catch(() => {}); continue; }
+    let n = null; try { n = JSON.parse(q.nachricht); } catch (e) {}
+    const erg = n ? await pushSenden(env, sub, n, true) : 'weg';
+    if (erg === 'netz' || /^fehler (429|5\d\d)$/.test(String(erg))) await env.DB.prepare('UPDATE push_queue SET versuche = versuche + 1, naechster = ? WHERE id = ?').bind(Date.now() + Math.min(300000, 20000 * Math.pow(2, Number(q.versuche) || 0)), q.id).run().catch(() => {});
+    else await env.DB.prepare('DELETE FROM push_queue WHERE id = ?').bind(q.id).run().catch(() => {});
+  }
+}
+async function pushSendenEinmal(env, sub, nachricht) {
   const koerper = await pushVerschluesseln(sub, JSON.stringify(nachricht));
   const { jwt, pub } = await vapidJwt(env, sub.endpoint);
   // WICHTIGES SOFORT (Halt, Slash, Node raus): Urgency "high" -- iPhones stellen "normal" im
@@ -7793,7 +7822,8 @@ async function pushSenden(env, sub, nachricht) {
   // spaeter zu. Jetzt ist alles "high" ausser dem Wochen-Review und dem Test.
   const tagStr = String(nachricht && nachricht.tag || '');
   const dringend = !/^rw-(woche|push-test)/.test(tagStr);
-  const r = await fetch(sub.endpoint, { method: 'POST', body: koerper, headers: {
+  // Hoechstens 8 s warten -- ein haengender Push-Dienst darf die anderen Meldungen nicht aufhalten.
+  const r = await fetch(sub.endpoint, { method: 'POST', body: koerper, signal: AbortSignal.timeout(8000), headers: {
     'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '86400', Urgency: dringend ? 'high' : 'normal',
     Authorization: `vapid t=${jwt}, k=${pub}` } });
   if (r.status === 404 || r.status === 410) { await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(sub.id).run(); return 'weg'; }
@@ -7824,7 +7854,7 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
-      churn: !!p.churn, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false,
+      churn: !!p.churn, churnNetz: !!p.churnNetz, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false,
       kauf: !!p.kauf, bericht: !!p.bericht, podcast: p.podcast !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
     // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
@@ -7857,7 +7887,7 @@ async function handlePush(request, env, url) {
     const row = await env.DB.prepare('SELECT * FROM push_subs WHERE id = ?').bind(id).first();
     if (!row) return json({ error: 'NOT_SUBSCRIBED' }, env, 404);
     const de = row.lang === 'de';
-    const erg = await pushSenden(env, row, { titel: 'rune.watch', text: de ? 'Push funktioniert. So sehen Meldungen bei geschlossener App aus.' : 'Push works. This is how notifications look with the app closed.', tag: 'rw-push-test' });
+    const erg = await pushSenden(env, row, { titel: de ? 'Push funktioniert' : 'Push works', text: de ? 'So sehen Meldungen bei geschlossener App aus.' : 'This is how notifications look with the app closed.', tag: 'rw-push-test' });
     return json({ ok: erg === 'ok', ergebnis: erg }, env);
   }
   return json({ error: 'NOT_FOUND' }, env, 404);
@@ -7866,13 +7896,19 @@ async function handlePush(request, env, url) {
 async function pushAnThema(env, thema, baue) {
   const r = await env.DB.prepare('SELECT * FROM push_subs WHERE fails < 20').all();
   let n = 0;
+  const jobs = [];
   for (const row of r.results || []) {
     let p = {}; try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
     // Neue Podcast-Folge: AUTOMATISCH fuer alle (gewuenscht) -- nur wer es ausdruecklich abgeschaltet hat, nicht
     if (thema === 'podcast' ? p.podcast === false : !p[thema]) continue;
     const nachricht = baue(row.lang === 'de', p, row);
-    if (!nachricht) continue;
-    try { if ((await pushSenden(env, row, nachricht)) === 'ok') n++; } catch (e) {}
+    if (nachricht) jobs.push([row, nachricht]);
+  }
+  // PARALLEL in Zehnergruppen (puenktlich auch bei vielen Abos): vorher nacheinander -- beim hundertsten
+  // Abo kam ein Halt erst Sekunden bis Minuten spaeter an.
+  for (let i = 0; i < jobs.length; i += 10) {
+    const erg = await Promise.all(jobs.slice(i, i + 10).map(([row, m]) => pushSenden(env, row, m).catch(() => 'netz')));
+    n += erg.filter(x => x === 'ok').length;
   }
   return n;
 }
@@ -7915,15 +7951,20 @@ async function syncHaltsOps(env) {
         // fuer Halts gibt, bleibt der alte Stand gespeichert -- der naechste Lauf versucht es nochmal.
         const haltAbos = (await env.DB.prepare("SELECT prefs FROM push_subs WHERE fails < 20").all()).results.filter(r => { try { return JSON.parse(r.prefs || '{}').halt; } catch (e) { return false; } }).length;
         let gesendet = 0;
-        if (neu.length) gesendet += await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: neu.includes('GLOBAL') ? (de ? 'Handel netzweit angehalten' : 'Trading halted network-wide') : (de ? `Angehalten: ${neu.join(', ')}` : `Halted: ${neu.join(', ')}`), tag: 'rw-halt-' + neu.join('-') }));
-        if (frei.length) gesendet += await pushAnThema(env, 'halt', de => ({ titel: 'THORChain', text: frei.includes('GLOBAL') ? (de ? 'Handel l\u00e4uft wieder' : 'Trading resumed') : (de ? `Wieder aktiv: ${frei.join(', ')}` : `Active again: ${frei.join(', ')}`), tag: 'rw-frei-' + frei.join('-') }));
+        // KLARE MELDUNGEN (gewuenscht 19.11.2026: "sofort sehen, worum es geht"): Symbol + Thema im Titel, die Folge im Text.
+        if (neu.length) gesendet += await pushAnThema(env, 'halt', de => neu.includes('GLOBAL')
+          ? { titel: de ? 'Handel netzweit angehalten' : 'Trading halted network-wide', text: de ? 'Gerade nichts an THORChain senden.' : 'Don\u2019t send anything to THORChain right now.', tag: 'rw-halt-' + neu.join('-') }
+          : { titel: (de ? 'Angehalten: ' : 'Halted: ') + neu.join(', '), text: de ? `Swaps mit ${neu.join(', ')} pausiert \u2013 jetzt nichts dorthin senden.` : `Swaps with ${neu.join(', ')} paused \u2013 don\u2019t send there now.`, tag: 'rw-halt-' + neu.join('-') });
+        if (frei.length) gesendet += await pushAnThema(env, 'halt', de => frei.includes('GLOBAL')
+          ? { titel: de ? 'Handel l\u00e4uft wieder' : 'Trading resumed', text: de ? 'THORChain ist wieder normal erreichbar.' : 'THORChain is back to normal.', tag: 'rw-frei-' + frei.join('-') }
+          : { titel: (de ? 'Wieder aktiv: ' : 'Active again: ') + frei.join(', '), text: de ? `Swaps mit ${frei.join(', ')} laufen wieder.` : `Swaps with ${frei.join(', ')} are running again.`, tag: 'rw-frei-' + frei.join('-') });
         if ((neu.length || frei.length) && haltAbos > 0 && gesendet === 0) console.warn('[push] Halt-Meldung an niemanden zugestellt, neuer Versuch im naechsten Lauf');
         else await pushStateSet(env, 'halts', JSON.stringify([...jetzt]));
       } else await pushStateSet(env, 'halts', JSON.stringify([...jetzt]));
       // 2) UPDATES: Bond Yield freigeschaltet
       const by = Number(mimir.BONDYIELDENABLED) > 0;
       const byAlt = await pushState(env, 'bondyield');
-      if (byAlt === '0' && by) await pushAnThema(env, 'ops', de => ({ titel: 'THORChain', text: de ? 'Bond Yield ist freigeschaltet. Du kannst jetzt einen Teil deiner Rewards auszahlen lassen.' : 'Bond Yield is enabled. You can now have part of your rewards paid out.', tag: 'rw-bondyield' }));
+      if (byAlt === '0' && by) await pushAnThema(env, 'ops', de => ({ titel: de ? 'Bond Yield ist live' : 'Bond Yield is live', text: de ? 'Lass dir jetzt einen Teil deiner Rewards auszahlen.' : 'You can now have part of your rewards paid out.', tag: 'rw-bondyield' }));
       await pushStateSet(env, 'bondyield', by ? '1' : '0');
     }
   } catch (e) { console.warn('[push] halts', e?.message || e); }
@@ -7933,7 +7974,7 @@ async function syncHaltsOps(env) {
     if (Array.isArray(pools)) {
       const xmr = pools.some(p => /^XMR\./.test(String(p.asset)) && String(p.status) === 'Available');
       const alt = await pushState(env, 'xmr');
-      if (alt === '0' && xmr) await pushAnThema(env, 'ops', de => ({ titel: 'THORChain', text: de ? 'Monero (XMR) ist jetzt handelbar.' : 'Monero (XMR) is now tradable.', tag: 'rw-xmr' }));
+      if (alt === '0' && xmr) await pushAnThema(env, 'ops', de => ({ titel: de ? 'Monero (XMR) handelbar' : 'Monero (XMR) tradable', text: de ? 'XMR lässt sich jetzt über THORChain tauschen.' : 'XMR can now be swapped on THORChain.', tag: 'rw-xmr' }));
       await pushStateSet(env, 'xmr', xmr ? '1' : '0');
     }
   } catch (e) {}
@@ -7978,7 +8019,7 @@ async function syncGebuehrAlarm(env) {
     const drunter = f.usd <= Number(z.grenze);
     if (drunter && !z.unter) {
       const de = (z.glang || z.lang) === 'de';
-      try { await pushSenden(env, z, { titel: de ? `${z.chain}-Gebühr niedrig` : `${z.chain} fee is low`, text: de ? `Auszahlung kostet jetzt ≈ $${f.usd.toFixed(2)} (deine Grenze $${Number(z.grenze).toFixed(2)})` : `Payout now costs ≈ $${f.usd.toFixed(2)} (your limit $${Number(z.grenze).toFixed(2)})`, tag: 'rw-gebuehr-' + z.chain, url: '/#bondyield' }); } catch (e) {}
+      try { await pushSenden(env, z, { titel: de ? `${z.chain}-Gebühr niedrig: ≈ $${f.usd.toFixed(2)}` : `${z.chain} fee low: ≈ $${f.usd.toFixed(2)}`, text: de ? `Guter Moment für deine Bond-Yield-Auszahlung (Grenze $${Number(z.grenze).toFixed(2)})` : `Good moment for your Bond Yield payout (limit $${Number(z.grenze).toFixed(2)})`, tag: 'rw-gebuehr-' + z.chain, url: '/#bondyield' }); } catch (e) {}
     }
     if (!!drunter !== !!z.unter) await env.DB.prepare('UPDATE push_gebuehr SET unter = ? WHERE id = ?').bind(drunter ? 1 : 0, z.gid).run().catch(() => {});
   }
@@ -7995,8 +8036,8 @@ async function syncPreisAlarm(env) {
         let z = {}; try { z = JSON.parse(row.zustand || '{}'); } catch (e) {}
         const de = row.lang === 'de';
         const meldungen = [];
-        if (p.preisOben > 0) { const d = preis >= p.preisOben; if (d && z.oben === false) meldungen.push({ titel: de ? `RUNE \u00fcber $${p.preisOben}` : `RUNE above $${p.preisOben}`, text: '$' + preis.toFixed(3), tag: 'rw-preis-oben' }); z.oben = d; }
-        if (p.preisUnten > 0) { const d = preis <= p.preisUnten; if (d && z.unten === false) meldungen.push({ titel: de ? `RUNE unter $${p.preisUnten}` : `RUNE below $${p.preisUnten}`, text: '$' + preis.toFixed(3), tag: 'rw-preis-unten' }); z.unten = d; }
+        if (p.preisOben > 0) { const d = preis >= p.preisOben; if (d && z.oben === false) meldungen.push({ titel: (de ? 'RUNE \u00fcber $' : 'RUNE above $') + p.preisOben, text: (de ? 'Jetzt $' : 'Now $') + preis.toFixed(3), tag: 'rw-preis-oben' }); z.oben = d; }
+        if (p.preisUnten > 0) { const d = preis <= p.preisUnten; if (d && z.unten === false) meldungen.push({ titel: (de ? 'RUNE unter $' : 'RUNE below $') + p.preisUnten, text: (de ? 'Jetzt $' : 'Now $') + preis.toFixed(3), tag: 'rw-preis-unten' }); z.unten = d; }
         for (const m of meldungen) { try { await pushSenden(env, row, m); } catch (e) {} }
         const zNeu = JSON.stringify(z);
         if (zNeu !== (row.zustand || '')) await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(zNeu, row.id).run();
@@ -8016,6 +8057,7 @@ async function syncPushSchnell(env) {
   try { await syncPreisAlarm(env); } catch (e) { console.warn('[push] preis 6s', e?.message || e); }
   try { await syncGebuehrAlarm(env); } catch (e) { console.warn('[push] gebuehr 6s', e?.message || e); }
   try { await syncPushPersoenlich(env); } catch (e) { console.warn('[push] persoenlich 6s', e?.message || e); }
+  try { await pushWarteschlange(env); } catch (e) { console.warn('[push] warteschlange', e?.message || e); }
 }
 async function syncPush(env) {
   await sicherePushTabellen(env);
@@ -8037,7 +8079,7 @@ async function syncPush(env) {
     const neu = ((await env.DB.prepare('SELECT ms, asset, betrag, usd FROM donation_history WHERE ms > ? ORDER BY ms ASC').bind(bis).all()).results || []);
     if (bis && neu.length) {
       for (const e of neu) {
-        await pushAnThema(env, 'spende', (de, p, row) => row.besitzer ? ({ titel: de ? 'Neue Spende \u2764' : 'New donation \u2764',
+        await pushAnThema(env, 'spende', (de, p, row) => row.besitzer ? ({ titel: de ? 'Neue Spende' : 'New donation',
           text: '+' + Number(e.betrag).toLocaleString('en-US', { maximumFractionDigits: e.asset === 'ETH' ? 6 : 4 }) + ' ' + e.asset + (e.usd != null ? ' \u00b7 $' + Number(e.usd).toFixed(2) : ''), tag: 'rw-spende-' + e.ms }) : null);
       }
     }
@@ -8456,7 +8498,8 @@ async function netzZustand(env) {
   try { const o = env ? await offeneAbstimmungen(env, N, false) : null; abstN = o && Array.isArray(o.liste) ? o.liste.length + (Array.isArray(o.upgrades) ? o.upgrades.length : 0) : null; abst =((o && o.liste) || []).filter(x => x.stimmen >= x.noetig / 2).slice(0, 5).map(x => ({ key: x.key, wert: x.wert, stimmen: x.stimmen, noetig: x.noetig })); } catch (e) {}
   const mimirWerte = {};
   for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE|SUPPLY/i.test(k)) mimirWerte[k] = w; // SUPPLY aendert sich laufend (Burn)
-  return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, abstN, aktiv: aktiv.length, mimirWerte };
+  // aktivIds: Kurzkennungen der aktiven Nodes -- fuer "Churn abgeschlossen: X rein, Y raus"
+  return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, abstN, aktiv: aktiv.length, aktivIds: aktiv.map(n => String(n.node_address || '').slice(-8)), mimirWerte };
 }
 const NETZ_CHURN_TXT = {
   halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
@@ -8526,6 +8569,25 @@ async function netzVerlaufSchritt(env) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
   const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
   const neu = alt ? netzWechsel(alt, z) : [];
+  // CHURN ABGESCHLOSSEN ALS PUSH (gewuenscht 19.11.2026, Nutzer-Wunsch auf X): Basis = aktive Nodes vor dem Churn
+  // (im Normalbetrieb laufend aktualisiert, waehrend Keygen/Migration festgehalten). Erfolgreich = Migration -> Normal.
+  z.basis = z.churn === 'normal' ? (z.aktivIds || []) : ((alt && (alt.basis || alt.aktivIds)) || []);
+  if (alt && alt.churn === 'migration' && z.churn === 'normal') {
+    try {
+      const letzt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'churnPush'").first().then(r => r ? Number(r.v) : 0).catch(() => 0);
+      if (!(Date.now() - letzt < 30 * 60e3)) {
+        await env.DB.prepare("INSERT INTO netz_stand (k, v) VALUES ('churnPush', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(String(Date.now())).run();
+        const b = new Set(alt.basis || []), j = new Set(z.aktivIds || []);
+        const rein = [...j].filter(x => !b.has(x)).length, raus = [...b].filter(x => !j.has(x)).length;
+        const zahlen = b.size ? true : false;
+        await pushAnThema(env, 'churnNetz', de => ({
+          titel: de ? 'Churn erfolgreich' : 'Churn completed',
+          text: zahlen ? (de ? `${rein} Nodes rein · ${raus} raus · ${z.aktiv} aktiv` : `${rein} nodes in · ${raus} out · ${z.aktiv} active`)
+                       : (de ? `Neue Vaults stehen · ${z.aktiv} Nodes aktiv` : `New vaults ready · ${z.aktiv} nodes active`),
+          tag: 'rw-churnnetz-' + z.hoehe }));
+      }
+    } catch (e) { console.warn('[push] churnNetz:', e?.message || e); }
+  }
   for (const e of neu) await env.DB.prepare('INSERT INTO netz_verlauf (at, hoehe, art, chain, de, en) VALUES (?, ?, ?, ?, ?, ?)').bind(z.at, z.hoehe, e.art, e.chain, e.de, e.en).run();
   await env.DB.prepare("INSERT INTO netz_stand (k, v) VALUES ('z', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(z)).run();
   if (neu.length) await env.DB.prepare('DELETE FROM netz_verlauf WHERE at < ?').bind(Date.now() - 60 * 864e5).run().catch(() => {});
@@ -8547,6 +8609,15 @@ async function netzVerlaufLesen(env) {
   return { ereignisse: ev, stand };
 }
 async function syncPushPersoenlich(env) {
+  // NICHT UEBERLAPPEN (gewuenscht 19.11.2026: zuverlaessig): Laufen zwei Durchgaenge gleichzeitig (6-s-Takt und
+  // Minuten-Takt), lesen beide denselben alten Zustand -- dieselbe Meldung kaeme doppelt. Eine Sperre mit Ablauf
+  // (25 s) verhindert das; bricht ein Lauf ab, gibt der Ablauf die Sperre wieder frei.
+  const sperre = Number(await pushState(env, 'persLauf').catch(() => 0)) || 0;
+  if (sperre && Date.now() - sperre < 25000) return;
+  await pushStateSet(env, 'persLauf', String(Date.now()));
+  try { await syncPushPersoenlichLauf(env); } finally { await pushStateSet(env, 'persLauf', '0').catch(() => {}); }
+}
+async function syncPushPersoenlichLauf(env) {
   const r = await env.DB.prepare("SELECT * FROM push_subs WHERE fails < 20 AND adressen IS NOT NULL AND adressen != '[]'").all();
   const subs = r.results || [];
   if (!subs.length) return;
@@ -8618,10 +8689,10 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
         // Nodes, bei denen die Wallet nur freigeschaltet ist (0 RUNE).
         const echterBond = v.b > 0.01 || a.b > 0.01;
         if (p.node && echterBond && a.s !== v.s) {
-          if (v.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist wieder aktiv` : `Your node ${kurzNode(na)} is active again`, tag: 'rw-node-' + na });
-          else if (a.s === 'Active') meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)} ist nicht mehr aktiv (${v.s})` : `Your node ${kurzNode(na)} is no longer active (${v.s})`, tag: 'rw-node-' + na });
+          if (v.s === 'Active') meldungen.push({ titel: (de ? 'Node ' : 'Node ') + kurzNode(na) + (de ? ' ist aktiv' : ' is active'), text: de ? 'Dein Bond verdient wieder Rewards.' : 'Your bond is earning rewards again.', tag: 'rw-node-' + na });
+          else if (a.s === 'Active') meldungen.push({ titel: 'Node ' + kurzNode(na) + (de ? ' nicht mehr aktiv' : ' no longer active'), text: de ? `Status: ${v.s} – solange keine Rewards.` : `Status: ${v.s} – no rewards meanwhile.`, tag: 'rw-node-' + na });
         }
-        if (p.node && echterBond && v.l && !a.l) meldungen.push({ titel: 'rune.watch', text: de ? `Deine Node ${kurzNode(na)}: Austritt angefragt` : `Your node ${kurzNode(na)}: leave requested`, tag: 'rw-leave-' + na });
+        if (p.node && echterBond && v.l && !a.l) meldungen.push({ titel: 'Node ' + kurzNode(na) + (de ? ' will austreten' : ' is leaving'), text: de ? 'Austritt angefragt – dein Bond kommt danach zurück.' : 'Leave requested – your bond is returned afterwards.', tag: 'rw-leave-' + na });
         // Nur gemeinsame Adressen vergleichen; alte Eintraege ohne Aufschluesselung -> kein Slash-Test.
         const gemeinsam = a.pa ? Object.keys(v.pa || {}).filter(k => k in a.pa) : [];
         const delta = a.pa ? gemeinsam.reduce((q, k) => q + (v.pa[k] - a.pa[k]), 0) : (churnNeu ? v.b - a.b : 0);
@@ -8649,7 +8720,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
           if (offen && Math.abs(offen.b - vGem) < 0.5) {
             // PERSOENLICH: a.b/v.b sind die Summe DEINER Bond-Provider-Eintraege bei dieser Node,
             // nicht der Bond der ganzen Node -- die Meldung nennt also deinen eigenen Verlust.
-            meldungen.push({ titel: de ? 'Slash bei deinem Bond' : 'Slash on your bond', text: (de ? 'Du hast ' : 'You lost ') + `${runeTxt(-delta)} RUNE` + (de ? ` verloren \u00b7 Node ${kurzNode(na)}` : ` \u00b7 node ${kurzNode(na)}`), tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
+            meldungen.push({ titel: `Slash: \u2212${runeTxt(-delta)} RUNE`, text: de ? `Dein Bond bei Node ${kurzNode(na)} wurde gek\u00fcrzt.` : `Your bond at node ${kurzNode(na)} was cut.`, tag: 'rw-slash-' + na + '-' + Math.round(v.b) });
             delete z.slashVerdacht[na];
           } else {
             z.slashVerdacht = { ...(z.slashVerdacht || {}), [na]: { b: vGem, t: Date.now() } };
@@ -8661,7 +8732,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
       }
       // Provider nicht mehr dabei (Bond zurueckgezahlt).
       // Nur melden, wenn die Adresse noch im Abo ist -- sonst wurde nur eine Wallet entfernt.
-      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1 && (!a.pa || Object.keys(a.pa).some(k => adr.includes(k)))) meldungen.push({ titel: 'rune.watch', text: de ? `Bond von Node ${kurzNode(na)} zur\u00fcckgezahlt (${runeTxt(a.b)} RUNE)` + vultisigHinweis(de, 'neu') : `Bond from node ${kurzNode(na)} returned (${runeTxt(a.b)} RUNE)` + vultisigHinweis(de, 'neu'), tag: 'rw-refund-' + na });
+      if (p.bond) for (const [na, a] of Object.entries(alt)) if (!neu[na] && a.b > 1 && (!a.pa || Object.keys(a.pa).some(k => adr.includes(k)))) meldungen.push({ titel: (de ? 'Bond zur\u00fcck: ' : 'Bond returned: ') + runeTxt(a.b) + ' RUNE', text: (de ? `Von Node ${kurzNode(na)} \u2013 liegt wieder in deiner Wallet` : `From node ${kurzNode(na)} \u2013 back in your wallet`) + vultisigHinweis(de, 'neu'), tag: 'rw-refund-' + na });
       // BETRAG AUS DER REWARD-HISTORIE (dieselbe Quelle wie die App): Fuer genau diesen Churn die Rewards
       // deiner Adressen nachladen und summieren. Gibt es dort Zeilen fuer den Churn, gilt deren Summe
       // (auch 0 -> keine Meldung); sonst bleibt der Bond-Zuwachs als Rueckfall.
@@ -8680,7 +8751,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
           }
         } catch (e) { console.warn('[push] Reward aus Historie:', e?.message || e); }
       }
-      if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: de ? 'Neue Bond-Rewards' : 'New bond rewards', text: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : '') + vultisigHinweis(de, 'bond'), tag: 'rw-churn-' + churnH });
+      if (p.churn && rewardSumme > 0.01) meldungen.push({ titel: '+' + runeTxt(rewardSumme) + ' RUNE' + (preis ? ' \u00b7 $' + (rewardSumme * preis).toFixed(2) : ''), text: (de ? 'Churn erfolgreich \u2013 deine neuen Bond-Rewards' : 'Churn done \u2013 your new bond rewards') + vultisigHinweis(de, 'bond'), tag: 'rw-churn-' + churnH });
     }
     // WOCHEN-REVIEW (gewuenscht): Rewards der Woche mitzaehlen und montags um 8:00 UTC eine
     // Zusammenfassung schicken -- Rewards in RUNE und $, Zahl der Churns, aktueller Bond, RUNE-Kurs
@@ -8735,7 +8806,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
                                  : (de ? 'Keine neuen Rewards (kein Churn)' : 'No new rewards (no churn)'));
           teile.push((de ? 'Bond ' : 'Bond ') + runeTxt(bondJetzt) + ' RUNE');
           if (preis) teile.push('RUNE $' + preis.toFixed(3) + (pr != null ? ` (${pr >= 0 ? '+' : ''}${pr.toFixed(1)} %)` : ''));
-          meldungen.push({ titel: de ? 'Deine Woche bei THORChain' : 'Your week on THORChain', text: teile.join(' \u00b7 ') + vultisigHinweis(de, 'bond'), tag: 'rw-woche-' + w.key });
+          meldungen.push({ titel: (de ? 'Deine Woche' : 'Your week') + (w.rune > 0.01 ? ': +' + runeTxt(w.rune) + ' RUNE' : ''), text: teile.join(' \u00b7 ') + vultisigHinweis(de, 'bond'), tag: 'rw-woche-' + w.key });
         }
         z.woche = { key: wocheKey, rune: 0, churns: 0, preis0: preis || null };
       }
@@ -8757,9 +8828,9 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
           offen.add(k);
           if (gemeldet[k]) continue;
           gemeldet[k] = Date.now();
-          meldungen.push({ titel: 'rune.watch', tag: 'rw-abst-' + a.key + '-' + na,
-            text: de ? `Deine Node ${kurzNode(na)} hat bei ${a.key} noch nicht abgestimmt (${a.stimmen}/${a.noetig}). Sprich deinen Betreiber an.`
-                     : `Your node ${kurzNode(na)} hasn't voted on ${a.key} yet (${a.stimmen}/${a.noetig}). Ask your operator to vote.` });
+          meldungen.push({ titel: (de ? 'Abstimmung offen: ' : 'Vote pending: ') + a.key, tag: 'rw-abst-' + a.key + '-' + na,
+            text: de ? `Deine Node ${kurzNode(na)} hat noch nicht abgestimmt (${a.stimmen}/${a.noetig}). Sprich deinen Betreiber an.`
+                     : `Your node ${kurzNode(na)} hasn't voted yet (${a.stimmen}/${a.noetig}). Ask your operator to vote.` });
         }
       }
       // Erledigte Abstimmungen vergessen (nach 30 Tagen auch alte Eintraege)
@@ -8774,7 +8845,7 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
         const k = st.key + ':' + na; offen.add(k);
         if (gemeldet[k]) continue;
         gemeldet[k] = Date.now();
-        meldungen.push({ titel: 'rune.watch', tag: 'rw-stau-' + st.chain + '-' + na,
+        meldungen.push({ titel: (de ? 'Deine Node bremst ' : 'Your node blocks ') + st.chain, tag: 'rw-stau-' + st.chain + '-' + na,
           text: de ? `Deine Node ${kurzNode(na)} beobachtet ${st.chain} nicht aktuell \u2013 ${st.count} ${st.chain}-Auszahlung${st.count === 1 ? '' : 'en'} h\u00e4ng${st.count === 1 ? 't' : 'en'} und blockier${st.count === 1 ? 't' : 'en'} den Churn. Bitte deinen Betreiber, den ${st.chain}-RPC zu pr\u00fcfen.`
                    : `Your node ${kurzNode(na)} isn't observing ${st.chain} properly \u2013 ${st.count} ${st.chain} outbound${st.count === 1 ? ' is' : 's are'} stuck and block${st.count === 1 ? 's' : ''} the churn. Ask your operator to check the ${st.chain} RPC.` });
       }
@@ -8798,8 +8869,8 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
           const rune = gestakt * Number(ref.rune_pro_tcy);
           if (!erste && gestakt > 0 && rune >= 0.01) {
             const usd = preis ? ` ($${(rune * preis).toFixed(rune * preis < 10 ? 2 : 0)})` : '';
-            meldungen.push({ titel: de ? 'TCY-Auszahlung' : 'TCY payout',
-              text: (de ? `+${runeTxt(rune)} RUNE${usd} f\u00fcr ${runeTxt(gestakt)} gestakte TCY` : `+${runeTxt(rune)} RUNE${usd} for ${runeTxt(gestakt)} staked TCY`) + vultisigHinweis(de, 'tcy'),
+            meldungen.push({ titel: `TCY: +${runeTxt(rune)} RUNE${usd}`,
+              text: (de ? `Auszahlung f\u00fcr deine ${runeTxt(gestakt)} gestakten TCY` : `Payout for your ${runeTxt(gestakt)} staked TCY`) + vultisigHinweis(de, 'tcy'),
               tag: 'rw-tcy-' + ref.tag });
           }
         }
@@ -8818,12 +8889,13 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
             const ex = Number(info && info.expire_block_height);
             if (!ex || !h) continue;
             const tage = (ex - h) * 6 / 86400;
-            if (tage > 0 && tage < 30) meldungen.push({ titel: 'THORName', text: (de ? `\u201e${nm}\u201c l\u00e4uft in etwa ${Math.ceil(tage)} Tagen ab` : `"${nm}" expires in about ${Math.ceil(tage)} days`) + vultisigHinweis(de, 'name'), tag: 'rw-tn-' + nm });
+            if (tage > 0 && tage < 30) meldungen.push({ titel: (de ? 'THORName \u201e' + nm + '\u201c l\u00e4uft ab' : 'THORName "' + nm + '" expiring'), text: (de ? `In etwa ${Math.ceil(tage)} Tagen` : `In about ${Math.ceil(tage)} days`) + vultisigHinweis(de, 'name'), tag: 'rw-tn-' + nm });
           }
         }
       } catch (e) {}
     }
-    for (const m of meldungen.slice(0, 5)) { try { await pushSenden(env, row, m); } catch (e) {} }
+    // Alle Meldungen senden (vorher hoechstens 5 -- der Rest ging still verloren), Obergrenze 12 gegen Fluten.
+    for (const m of meldungen.slice(0, 12)) { try { await pushSenden(env, row, m); } catch (e) {} }
     const zNeu = JSON.stringify(z);
     if (zNeu !== (row.zustand || '')) await env.DB.prepare('UPDATE push_subs SET zustand = ? WHERE id = ?').bind(zNeu, row.id).run();
   }
