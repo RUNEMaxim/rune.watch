@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1710'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1715'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5904,7 +5904,7 @@ export default {
         try { return await handlePush(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname.startsWith('/ki/')) {
-        try { return await handleKi(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+        try { return await handleKi(request, env, url, ctx); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname === '/donation-history') {
         try {
@@ -6011,11 +6011,29 @@ async function kiPlan(env) {
   try {
     await sicherePushTabellen(env);
     // Laeuft gerade eine News-Ausgabe: nur deren naechsten Schritt (ohne 4-Minuten-Sperre)
-    if ((await pushState(env, 'ki_news_aktiv')) === '1') { await rwDiagLauf(env, 'ki', () => kiNewsSchrittSicher(env)); return; }
+    if ((await pushState(env, 'ki_news_aktiv')) === '1') { await rwDiagLauf(env, 'ki', () => kiNewsDurchlauf(env, 5 * 60e3)); return; }
     const L = await rwLaufInfo(env, 'ki');
     if (!L || Date.now() - L.at > 4 * 60e3) await rwDiagLauf(env, 'ki', () => kiAgentLauf(env));
   } catch (e) { console.warn('[ki] plan', e && e.message); }
   finally { kiPlanSeit = 0; }
+}
+// NEWS AM STUECK (gemeldet 19.11.2026: "dauert mir immer noch viel zu lange"): Vorher EIN Schritt pro Minute,
+// dazwischen Leerlauf. Jetzt arbeitet ein Hintergrundlauf die Schritte direkt nacheinander ab (bis zu 5 Min.).
+// Sperre in D1, damit sich zwei Minuten-Laeufe nicht in die Quere kommen.
+async function kiNewsDurchlauf(env, maxMs) {
+  const t0 = Date.now();
+  const sperre = Number(await pushState(env, 'ki_news_sperre').catch(() => 0)) || 0;
+  if (sperre && t0 - sperre < 6 * 60e3) return { schritt: 'laeuft schon' };
+  await pushStateSet(env, 'ki_news_sperre', t0);
+  let erg = null;
+  try {
+    for (let i = 0; i < 12 && Date.now() - t0 < maxMs; i++) {
+      erg = await kiNewsSchrittSicher(env);
+      if (!erg || erg.fehler || (await pushState(env, 'ki_news_aktiv')) !== '1') break;
+      if (/erneut versuchen/.test(String(erg.schritt || ''))) await new Promise(r => setTimeout(r, 5000));
+    }
+  } finally { await pushStateSet(env, 'ki_news_sperre', 0).catch(() => {}); }
+  return erg;
 }
 async function kiNewsAktiv(env) { try { await sicherePushTabellen(env); return (await pushState(env, 'ki_news_aktiv')) === '1'; } catch (e) { return false; } }
 let rwPlanLaeuftGerade = false;
@@ -7293,7 +7311,7 @@ const KI_APP_HANDBUCH = 'APP-HANDBUCH rune.watch (THORChain-Dashboard; du bist "
   ' (6) NODES: alle Nodes mit Status, Bond, Slash-Punkten, Version, Churn-out-Kandidaten, haengende Vault-Migrationen und haengende Auszahlungen (z. B. ein Refund auf BASE, der den Churn blockiert, mit den Vault-Mitgliedern, die die Kette nicht aktuell beobachten -- meist RPC-Problem beim Betreiber; Push an Bonder, deren Node dabei ist) (Werkzeug node_info, thorchain_updates).' +
   ' MEHR-Menue: THORChain News (KI), News & Netzwerk-Status (devops.thorchain.org, Halts, Abstimmungen; Werkzeug thorchain_updates), Tutorials, direkte Links, Datenschutz, Nutzungsbedingungen, Telegram, X, GitHub, rune.watch unterstuetzen. Push-Benachrichtigungen: Churn, Rewards, Kaufsignal (KI), Tagesbericht (KI). KI-Fenster: Frag rune.watch und Tagesbericht.' +
   ' Erfinde keine Funktionen, die hier nicht stehen; wenn du nicht sicher bist, ob es etwas in der App gibt, sag das.';
-async function handleKi(request, env, url) {
+async function handleKi(request, env, url, ctx) {
   if (url.pathname === '/ki/status') return json({ an: !!env.ANTHROPIC_API_KEY, modell: env.KI_MODELL || KI_MODELL_STD }, env);
   if (url.pathname === '/ki/bericht') {
     await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
@@ -7309,6 +7327,10 @@ async function handleKi(request, env, url) {
     await pushStateSet(env, 'ki_news_at', 0); await pushStateSet(env, 'ki_news_fehler', ''); await pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s: 'vorgemerkt', t: new Date().toISOString().slice(11, 19) + ' UTC' }));
     await pushStateSet(env, 'ki_news_aktiv', '1');
     await env.DB.prepare('DELETE FROM bot_status WHERE k IN (?, ?)').bind('lauf:ki', 'ki:news_job').run().catch(() => {});
+    await pushStateSet(env, 'ki_news_sperre', 0);
+    // SOFORT LOS (statt bis zu 5 Min. "wartet auf den Start"): Quellen gleich hier sammeln (wenige Sekunden),
+    // die KI-Schritte uebernimmt der naechste Minutenlauf am Stueck.
+    if (ctx) ctx.waitUntil(kiNewsSchrittSicher(env).catch(() => {}));
     return json({ ok: true }, env);
   }
   if (url.pathname === '/ki/news') {
@@ -7463,7 +7485,7 @@ const KI_NEWS_ABSCHLUSS = { name: 'meldungen_speichern', description: 'Speichert
 // NEWSBLOG (gewuenscht 18.11.2026: "Es muessen wirklich News sein. Ein Newsblog. Nicht das suchen, was die ThorWatch-Funktion macht"):
 // nur echte Artikel ueber THORChain, recherchiert und verlinkt -- keine Netzwerkzustaende, Versionen, Halts, Abstimmungen.
 const kiNewsSystem = heute => `Du bist die Redaktion des Newsblogs von rune.watch. Heute ist ${heute}. Du recherchierst echte NACHRICHTENARTIKEL über THORChain (und sein Ökosystem: Rujira, TCY, RUNE, THORSwap, Vultisig, Integrationen) aus den letzten 7 Tagen und verlinkst sie.
-Recherche (Websuche, gründlich: bis zu 8 Suchen je Schritt, insgesamt bis zu 30, jede Suche mit anderem Blickwinkel): 1) "THORChain" News dieser Woche (CoinDesk, The Block, Decrypt, Cointelegraph, The Defiant, Blockworks, CryptoSlate, Bitcoin Magazine u. a.), 2) THORChain-, Rujira- und TCY-Blog- und Medium-Artikel, 3) Partnerschaften, Integrationen, Listings, Wallets (Vultisig, Ledger, Trust, Ctrl, THORSwap, Asgardex), 4) Rekorde bei Volumen, TVL, Swaps, 5) neue Funktionen und Upgrades (z. B. Lending, Secured Assets, neue Chains), 6) RUNE Analyse- und Research-Artikel (Messari, Delphi, Kaiko u. a.), 7) Interviews und Podcasts, 8) Artikel in anderen Sprachen. Die Rohquellen (JSON) sind nur Hintergrund, keine Meldungsquelle.
+Recherche (Websuche, gründlich: bis zu 12 Suchen je Schritt, insgesamt bis zu 24, alle Suchen möglichst gleich im ersten Schritt, jede Suche mit anderem Blickwinkel): 1) "THORChain" News dieser Woche (CoinDesk, The Block, Decrypt, Cointelegraph, The Defiant, Blockworks, CryptoSlate, Bitcoin Magazine u. a.), 2) THORChain-, Rujira- und TCY-Blog- und Medium-Artikel, 3) Partnerschaften, Integrationen, Listings, Wallets (Vultisig, Ledger, Trust, Ctrl, THORSwap, Asgardex), 4) Rekorde bei Volumen, TVL, Swaps, 5) neue Funktionen und Upgrades (z. B. Lending, Secured Assets, neue Chains), 6) RUNE Analyse- und Research-Artikel (Messari, Delphi, Kaiko u. a.), 7) Interviews und Podcasts, 8) Artikel in anderen Sprachen. Die Rohquellen (JSON) sind nur Hintergrund, keine Meldungsquelle.
 Stil: Schlagzeilen wie in einem guten Krypto-Newsblog: konkret, mit Name oder Zahl, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen).
 Links: Jede Meldung MUSS auf den Artikel verlinken (https-URL des Artikels selbst, keine Startseite). Ohne Artikel-Link keine Meldung. quelle = Name des Mediums.
 NUR POSITIVE ARTIKEL: Wachstum, Rekorde, neue Funktionen, Integrationen, Partnerschaften, Listings, Upgrades, gute Analysen. KEINE negativen Artikel: Hacks, Exploits, Diebstahl, Geldwäsche-Vorwürfe, Klagen, Ermittlungen, Kurseinbrüche, Kritik, Verluste, Pleiten, Streit.
@@ -7551,7 +7573,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   // jede Schlagzeile gegen Quelle und Live-Stand prueft und Unbestaetigtes streicht.
   const pruefen = job.phase === 'pruefen';
   job.runde = (job.runde || 0) + 1;
-  const maxR = pruefen ? 6 : 5; // Entwurf hoechstens 5 Runden (schneller fertig)
+  const maxR = pruefen ? 6 : 3; // Entwurf hoechstens 3 Runden (2 mit Websuche, dann speichern) -- schneller fertig
   if (job.runde > maxR + 1) {
     if (pruefen && Array.isArray(job.entwurf) && job.entwurf.length) { job.verlauf = null; job.runde = 99; } // Pruefung haengt: Entwurf nehmen
     else { await beenden(); throw new Error('NEWS_ZU_VIELE_RUNDEN'); }
@@ -7562,11 +7584,11 @@ async function kiNewsLauf(env, erzwingen = false) {
   if (job.runde !== 99) {
     const letzte = job.runde >= maxR;
     const wz = letzte ? { tools: [KI_NEWS_ABSCHLUSS], tool_choice: { type: 'tool', name: KI_NEWS_ABSCHLUSS.name } }
-      : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 8 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
+      : { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 12 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
       body: JSON.stringify({ model: env.KI_MODELL_NEWS || env.KI_MODELL_FRAGE || 'claude-sonnet-5-5', max_tokens: 16000, system: pruefen ? kiNewsPruefSystem(heute) : kiNewsSystem(heute), messages: job.verlauf, ...wz }),
-      signal: AbortSignal.timeout(170000) });
+      signal: AbortSignal.timeout(240000) });
     j = await r.json().catch(() => null);
     if (!r.ok && r.status === 400 && !job.ohneSuche && /web_search|server tool/i.test(String(j && j.error && j.error.message))) { job.ohneSuche = true; job.runde--; await kiNewsJobSchreiben(env, job); return { schritt: 'ohne Websuche' }; }
     if (!r.ok) { if (r.status >= 500 || r.status === 429) return { schritt: 'erneut versuchen ' + r.status }; await beenden(); throw new Error('KI_HTTP_' + r.status + (j && j.error && j.error.message ? ': ' + String(j.error.message).slice(0, 160) : '')); }
