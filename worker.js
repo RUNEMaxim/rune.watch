@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1600'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-19-1630'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -5971,7 +5971,8 @@ export default {
       const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
       // Entsteht gerade eine News-Ausgabe, bekommt die KI zusaetzlich jede gerade Minute (ein Schritt je Lauf).
       ctx.waitUntil((async () => {
-        const kiDran = minute % 5 === 2 || (minute % 2 === 0 && await kiNewsAktiv(env));
+        // Entsteht gerade eine Ausgabe: JEDE Minute ein Schritt (vorher jede zweite -- gemeldet: "dauert zu lange")
+        const kiDran = minute % 5 === 2 || await kiNewsAktiv(env);
         if (kiDran) await kiPlan(env); else await rwPlanLaeufe(env);
       })());
       // Netzwerk-Verlauf: jede Minute Zustand vergleichen und Wechsel speichern
@@ -7470,6 +7471,39 @@ const kiNewsPruefSystem = heute => `Du bist der Faktenprüfer des Newsblogs von 
 Prüfe JEDE Meldung: Gibt es den Artikel unter dem Link wirklich (seite_lesen)? Stimmt die Schlagzeile mit dem Artikel überein? Ist er höchstens 7 Tage alt? web_search nur wenn nötig.
 Dann: Meldungen ohne echten Artikel-Link, falsche, zu alte oder doppelte STREICHEN; ungenaue Schlagzeilen korrigieren (max. 70 Zeichen). Ebenfalls streichen: Netzwerkzustand, Halts, Churn, Node-Versionen, Mimir-Abstimmungen, GitLab. Nichts Neues erfinden.
 Ergebnis: Rufe meldungen_speichern mit der geprüften Liste auf (lieber 5 echte als 12 zweifelhafte). Kein Fließtext.`;
+// SCHNELLE LINK-PRUEFUNG statt KI-Pruefrunde (gemeldet 19.11.2026: "dauert zu lange, ueber 30 Minuten"): Jeder
+// Artikel-Link wird direkt abgerufen. Weg nur, was es sicher nicht gibt (404/410, Domain unerreichbar) oder was
+// nichts mit THORChain zu tun hat. Seiten, die Bots sperren (403/429), bleiben -- die KI hat sie per Websuche gefunden.
+async function kiNewsLinksPruefen(liste) {
+  const pruef = async m => {
+    if (!m || !/^https:\/\//.test(String(m.link || ''))) return null;
+    try {
+      const r = await fetch(m.link, { headers: { 'User-Agent': 'Mozilla/5.0 (rune.watch news check)' }, redirect: 'follow', signal: AbortSignal.timeout(8000) });
+      if (r.status === 404 || r.status === 410) return null;
+      if (!r.ok) return m;
+      const t = (await r.text()).slice(0, 400000).toLowerCase();
+      return /thorchain|\brune\b|rujira|thorswap|vultisig|\btcy\b/.test(t) ? m : null;
+    } catch (e) { return /TimeoutError|timed out/i.test(String(e && (e.name || e.message))) ? m : null; }
+  };
+  const erg = await Promise.all(liste.map(pruef));
+  return erg.filter(Boolean);
+}
+// Blog-Artikel (RSS) sofort in die gespeicherte Liste uebernehmen -- sie sind echt und brauchen keine KI.
+async function kiNewsBlogSofort(env, blog) {
+  try {
+    const grenze = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+    const roh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
+    const d = roh ? JSON.parse(roh.v) : { at: Date.now(), eintraege: [] };
+    const alt = Array.isArray(d.eintraege) ? d.eintraege : [];
+    const da = new Set(alt.map(e => String(e.link || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase()));
+    const neu = (blog || []).filter(b => b && b.link && b.titel && b.datum && b.datum >= grenze && !da.has(String(b.link).replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase()))
+      .map(b => ({ kategorie: 'oekosystem', wichtig: false, datum: b.datum, titelDe: String(b.titel).slice(0, 100), titelEn: String(b.titel).slice(0, 100),
+        textDe: String(b.auszug || '').slice(0, 160), textEn: String(b.auszug || '').slice(0, 160), quelle: 'THORChain Blog', link: String(b.link).slice(0, 300) }));
+    if (!neu.length) return;
+    d.eintraege = [...neu, ...alt].sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0)).slice(0, 80);
+    await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(d)).run();
+  } catch (e) {}
+}
 async function kiNewsJobLesen(env) { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news_job'").first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; } }
 async function kiNewsJobSchreiben(env, job) { await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify(job)).run(); }
 async function kiNewsLauf(env, erzwingen = false) {
@@ -7500,6 +7534,7 @@ async function kiNewsLauf(env, erzwingen = false) {
       live: { aktiveNodes: quellen.aktiveNodes || null, version: quellen.version || null, angehalten: Array.isArray(quellen.angehalten) ? quellen.angehalten : [], mimir: quellen.mimirAbstimmungen || null },
       verlauf: [{ role: 'user', content: 'ROHQUELLEN:\n' + JSON.stringify(quellen).slice(0, 22000) + (alt && alt.eintraege ? '\n\nBISHERIGE MELDUNGEN (zum Aktualisieren, nicht doppelt aufnehmen):\n' + JSON.stringify(alt.eintraege.slice(0, 12).map(e => ({ datum: e.datum, titel: e.titelDe }))) : '') }] };
     await kiNewsJobSchreiben(env, job); await schritt('KI schreibt (Websuche)');
+    await kiNewsBlogSofort(env, job.blog);
     return { schritt: 'quellen' };
   }
   // Phase KI (Entwurf) bzw. PRUEFEN: genau EINE Anfrage je Lauf. WIE DER CHAT-AGENT (gewuenscht: "News genauso genau
@@ -7507,7 +7542,7 @@ async function kiNewsLauf(env, erzwingen = false) {
   // jede Schlagzeile gegen Quelle und Live-Stand prueft und Unbestaetigtes streicht.
   const pruefen = job.phase === 'pruefen';
   job.runde = (job.runde || 0) + 1;
-  const maxR = pruefen ? 6 : 8;
+  const maxR = pruefen ? 6 : 5; // Entwurf hoechstens 5 Runden (schneller fertig)
   if (job.runde > maxR + 1) {
     if (pruefen && Array.isArray(job.entwurf) && job.entwurf.length) { job.verlauf = null; job.runde = 99; } // Pruefung haengt: Entwurf nehmen
     else { await beenden(); throw new Error('NEWS_ZU_VIELE_RUNDEN'); }
@@ -7531,14 +7566,13 @@ async function kiNewsLauf(env, erzwingen = false) {
   let fertig = inhalt.find(c => c.type === 'tool_use' && c.name === KI_NEWS_ABSCHLUSS.name);
   if (job.runde === 99) fertig = { input: { meldungen: job.entwurf } };
   // Entwurf fertig -> Pruefrunde starten
-  if (!pruefen && fertig && fertig.input && Array.isArray(fertig.input.meldungen) && fertig.input.meldungen.length) {
-    job.entwurf = fertig.input.meldungen.slice(0, 16);
-    job.phase = 'pruefen'; job.runde = 0;
-    job.verlauf = [{ role: 'user', content: 'ENTWURF (zu pruefen):\n' + JSON.stringify(job.entwurf) + '\n\nROHQUELLEN-KURZFASSUNG:\n' + JSON.stringify({ releases: job.releases, tags: (job.tags || []).slice(0, 6), live: job.live }).slice(0, 6000) }];
-    await kiNewsJobSchreiben(env, job); await schritt('KI prüft (Start)');
-    return { schritt: 'entwurf fertig, pruefung startet', n: job.entwurf.length };
+  // Entwurf fertig -> Links direkt pruefen und speichern (vorher eine KI-Pruefrunde mit bis zu 6 weiteren Schritten)
+  if (!pruefen && fertig && fertig.input && Array.isArray(fertig.input.meldungen)) {
+    await schritt('Links prüfen');
+    fertig = { input: { meldungen: await kiNewsLinksPruefen(fertig.input.meldungen.slice(0, 16)) } };
+    fertig.leerOk = true;
   }
-  if (fertig && fertig.input && Array.isArray(fertig.input.meldungen) && fertig.input.meldungen.length) {
+  if (fertig && fertig.input && Array.isArray(fertig.input.meldungen) && (fertig.input.meldungen.length || fertig.leerOk)) {
     const sauber = fertig.input.meldungen.filter(x => x && x.titelDe).slice(0, 16).map(x => ({
       kategorie: ['upgrade', 'netzwerk', 'abstimmung', 'oekosystem', 'sicherheit', 'markt'].includes(x.kategorie) ? x.kategorie : 'netzwerk', wichtig: !!x.wichtig,
       datum: /^\d{4}-\d{2}-\d{2}$/.test(String(x.datum)) ? x.datum : heute,
