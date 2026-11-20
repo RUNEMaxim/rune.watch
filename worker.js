@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-20-0835'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-20-1355'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -9613,17 +9613,25 @@ async function syncHaltVerlauf(env) {
 const PODCAST_FEEDS = ['https://media.rss.com/thorchain/feed.xml', 'https://rss.com/podcasts/thorchain/feed.xml'];
 async function podcastFolgen(env, frisch) {
   if (!frisch) {
-    try { const c = JSON.parse((await pushState(env, 'podcastCache')) || 'null'); if (c && Date.now() - c.t < 3600e3) return c; } catch (e) {}
+    // 20 Min. statt 1 Std.: neue Folgen erscheinen schneller (der 30-Min.-Lauf frischt ohnehin auf).
+    try { const c = JSON.parse((await pushState(env, 'podcastCache')) || 'null'); if (c && Date.now() - c.t < 20 * 60e3) return c; } catch (e) {}
   }
-  let xml = null;
+  // NEUE FOLGE FEHLTE (gemeldet 20.11.2026: #252 vom 19.11. erschien nicht). Moegliche Ursachen, alle
+  // abgefangen: (1) Cloudflare/CDN lieferte einen alten Feed aus dem Zwischenspeicher -> no-store +
+  // Cache-Buster; (2) ohne User-Agent blocken manche Feeds -> Browser-aehnlicher UA; (3) schlug der Abruf
+  // fehl, kam lautlos die alte Liste -> jetzt mit Fehlergrund und Zeitpunkt des letzten ECHTEN Abrufs.
+  let xml = null; const fehler = [];
   for (const u of PODCAST_FEEDS) {
     try {
-      const r = await fetch(u, { headers: { accept: 'application/rss+xml, application/xml, text/xml' }, signal: AbortSignal.timeout(12000) });
-      if (r.ok) { const t = await r.text(); if (/<item[\s>]/i.test(t)) { xml = t; break; } }
-    } catch (e) {}
+      const r = await fetch(u + (u.includes('?') ? '&' : '?') + '_=' + Math.floor(Date.now() / 60000), {
+        headers: { accept: 'application/rss+xml, application/xml, text/xml', 'user-agent': 'Mozilla/5.0 (compatible; rune.watch podcast reader; +https://rune.watch)', 'cache-control': 'no-cache' },
+        cache: 'no-store', signal: AbortSignal.timeout(12000) });
+      if (r.ok) { const t = await r.text(); if (/<item[\s>]/i.test(t)) { xml = t; break; } fehler.push(u + ': kein <item>'); }
+      else fehler.push(u + ': HTTP ' + r.status);
+    } catch (e) { fehler.push(u + ': ' + String(e && e.message || e).slice(0, 80)); }
   }
   if (!xml) {
-    try { const c = JSON.parse((await pushState(env, 'podcastCache')) || 'null'); if (c) return c; } catch (e) {}
+    try { const c = JSON.parse((await pushState(env, 'podcastCache')) || 'null'); if (c) return { ...c, veraltet: true, fehler }; } catch (e) {}
     return null;
   }
   const text = (blk, tag) => {
@@ -9644,7 +9652,9 @@ async function podcastFolgen(env, frisch) {
     bild: attr(b, 'itunes:image', 'href') || showBild,
     link: text(b, 'link'),
     beschreibung: text(b, 'itunes:summary') || text(b, 'description'),
-  })).filter(f => f.titel && f.audio).slice(0, 40);
+  })).filter(f => f.titel && f.audio)
+    // Neueste zuerst -- nicht auf die Reihenfolge im Feed verlassen.
+    .sort((a, b) => (b.datum || 0) - (a.datum || 0)).slice(0, 40);
   const erg = { t: Date.now(), show: text(kanal, 'title') || 'THORChain Livestream Podcast', bild: showBild, folgen: folgen.map(f => ({ ...f, beschreibung: f.beschreibung.slice(0, 600) })) };
   try { await pushStateSet(env, 'podcastCache', JSON.stringify(erg)); } catch (e) {}
   return erg;
@@ -9773,7 +9783,7 @@ async function runebondEmpfehlungenIntegrators(env, unsere) {
 async function syncPodcastMeldung(env) {
   await sicherePushTabellen(env);
   const zuletzt = Number(await pushState(env, 'podcastPruefT')) || 0;
-  if (Date.now() - zuletzt < 30 * 60e3) return;
+  if (Date.now() - zuletzt < 10 * 60e3) return; // alle 10 Min. (vorher 30)
   await pushStateSet(env, 'podcastPruefT', String(Date.now()));
   const d = await podcastFolgen(env, true).catch(() => null);
   const f = d && Array.isArray(d.folgen) ? d.folgen[0] : null;
@@ -10848,6 +10858,9 @@ async function runRefreshCycle(env) {
   // verbrauchten die Schritte davor (Dune, Swap-Paare, Node-Historie, TCY ...) viel davon,
   // scheiterten die Push-Abrufe und -Sendungen still -- mal kam eine Meldung, mal nicht.
   await schritt('Push', () => syncPush(env));
+  // PODCAST VORNE (gemeldet 20.11.2026: neue Folge erschien nicht): stand als letzter Schritt -- war das
+  // Budget an Unteranfragen aufgebraucht, scheiterte der Feed-Abruf still. Gedrosselt kostet er nur 1 D1-Abfrage.
+  await schritt('Podcast-Meldung', () => syncPodcastMeldung(env));
   await schritt('Dune NEAR', () => syncNearDune(env));
   await schritt('Churns', () => refreshChurnsCache(env));
   await schritt('Swap-Paare', () => collectSwapPairStats(env));
@@ -10861,7 +10874,6 @@ async function runRefreshCycle(env) {
   await schritt('Timeline', () => waermeTimeline(env));
   await schritt('Leave-Zeitpunkte', () => syncLeaveZeiten(env));
   await schritt('Halt-Verlauf', () => syncHaltVerlauf(env));
-  await schritt('Podcast-Meldung', () => syncPodcastMeldung(env));
 
   const now = Date.now();
 
