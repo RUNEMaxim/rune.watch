@@ -2457,7 +2457,7 @@ async function handleIsOwner(request, env) {
 //   CREATE INDEX IF NOT EXISTS idx_outbound_clicks_day ON outbound_clicks(day);
 // Stand dieser Datei -- steht unten auf der Statistikseite, damit man sieht, ob der Deploy
 // wirklich live ist.
-const WORKER_VERSION = '2026-11-19-1855'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
+const WORKER_VERSION = '2026-11-20-0835'; // bei jedem Worker-Update mitziehen (zeigt die Statistikseite unten an)
 const CLICK_TARGETS = new Set(['runebond']);
 const CLICK_QUELLEN = new Set(['banner', 'node', 'liste', 'karte', 'node-oben', 'frei', 'liste-fenster']);
 let klickSpalteGeprueft = false;
@@ -4632,7 +4632,7 @@ const GITLAB_API = 'https://gitlab.com/api/v4/projects/thorchain%2Fthornode';
 // weiter die ALTE Nutzlast ausgeliefert, der die neuen Felder schlicht fehlten. Die Version
 // wird mitgespeichert; passt sie nicht, gilt der Eintrag als ungueltig und wird neu geholt.
 // Bei jeder Aenderung an der Form von baueThornodeTimeline hochzaehlen.
-const TIMELINE_SCHEMA = 15;
+const TIMELINE_SCHEMA = 16;
 const TIMELINE_FRESH_MS = 15 * 60 * 1000;
 const TIMELINE_STALE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -4943,7 +4943,7 @@ function commitKompakt(c) {
 async function baueThornodeTimeline(env) {
   const [relR, tagR, mergedR, offenR, meilenR, versionR, commitsR, netzR, blockR, poolsR] = await Promise.allSettled([
     gitlabJson(env, '/releases?per_page=30'),
-    gitlabJson(env, '/repository/tags?per_page=40'),
+    gitlabJson(env, '/repository/tags?order_by=updated&sort=desc&per_page=40'),
     // 3 Seiten = bis zu 300 gemergte MRs. Das deckt mehrere Monate ab und reicht, um jedem
     // Release seinen Inhalt zuzuordnen.
     gitlabMrSeiten(env, 'merged', 3),
@@ -4969,25 +4969,45 @@ async function baueThornodeTimeline(env) {
 
   // Releases bevorzugt aus /releases; wenn dort nichts steht (THORChain taggt nicht immer
   // ueber die Release-Funktion), aus den Tags. Sonst bliebe die Hauptansicht leer.
+  // RELEASES UND TAGS ZUSAMMENFUEHREN (gemeldet 20.11.2026: "3.21.2 steht dort, obwohl wir schon bei
+  // 3.21.5 sind"). THORChain legt fuer Patch-Versionen oft nur einen Tag an, keine GitLab-Release --
+  // vorher zaehlten die Tags nur, wenn /releases GANZ leer war. Jetzt: jede Version aus beiden Quellen,
+  // die Release-Notiz gewinnt, wenn es eine gibt.
   let releases = [];
   const rel = w(relR, 'releases');
-  if (Array.isArray(rel) && rel.length) {
-    releases = rel.map((r) => ({
-      version: r.tag_name || r.name || null,
-      datumMs: alsMs(r.released_at || r.created_at),
-      notiz: String(r.description || '').trim().slice(0, 400) || null,
-    }));
-  } else {
-    const tags = w(tagR, 'tags');
-    if (Array.isArray(tags)) {
-      releases = tags.map((t) => ({
-        version: t.name || null,
+  const tags = w(tagR, 'tags');
+  const nachVersion = new Map();
+  if (Array.isArray(tags)) {
+    for (const t of tags) {
+      if (!t || !t.name) continue;
+      nachVersion.set(t.name, {
+        version: t.name,
         datumMs: alsMs(t.commit && (t.commit.created_at || t.commit.committed_date)),
         notiz: String((t.release && t.release.description) || '').trim().slice(0, 400) || null,
-      }));
+      });
     }
   }
-  releases = releases.filter((r) => r.version).sort((a, b) => (b.datumMs || 0) - (a.datumMs || 0));
+  if (Array.isArray(rel)) {
+    for (const r of rel) {
+      const v = r && (r.tag_name || r.name);
+      if (!v) continue;
+      const alt = nachVersion.get(v) || {};
+      nachVersion.set(v, {
+        version: v,
+        datumMs: alsMs(r.released_at || r.created_at) || alt.datumMs || null,
+        notiz: String(r.description || '').trim().slice(0, 400) || alt.notiz || null,
+      });
+    }
+  }
+  // Nur echte Versions-Tags (v3.21.5 / 3.21.5, auch -rc), keine Hilfs-Tags.
+  releases = [...nachVersion.values()].filter((r) => r.version && /^v?\d+\.\d+\.\d+/.test(r.version));
+  // Sortiert nach Version (nicht nur Datum): ein spaet nachgetaggter alter Patch rutscht sonst nach oben.
+  const verTeile = (v) => String(v).replace(/^v/, '').split(/[.-]/).slice(0, 3).map((x) => parseInt(x, 10) || 0);
+  releases.sort((a, b) => {
+    const x = verTeile(a.version), y = verTeile(b.version);
+    for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return y[i] - x[i];
+    return (istVorab(a.version) ? 1 : 0) - (istVorab(b.version) ? 1 : 0) || (b.datumMs || 0) - (a.datumMs || 0);
+  });
 
   const merged = (w(mergedR, 'merged') || []).map(mrKompakt)
     .filter((m) => m.datumMs)
@@ -7367,7 +7387,6 @@ async function handleKi(request, env, url, ctx) {
     // "aktiv" = es entsteht WIRKLICH gerade eine Ausgabe (Flag des Schritt-Ablaufs), nicht nur ein alter Schritt-Eintrag
     const aktiv = (await pushState(env, 'ki_news_aktiv').catch(() => null)) === '1';
     let gespeichert = {}; try { gespeichert = r ? JSON.parse(r.v) || {} : {}; } catch (e) {}
-    if (Array.isArray(gespeichert.eintraege)) gespeichert.eintraege = gespeichert.eintraege.filter(e => !kiNewsNegativ(e)); // nur gute News, sofort
     return json(r ? { diagnose: { aktiv, letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...gespeichert, letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, diagnose: { aktiv, schritt: schrittInfo }, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
@@ -7498,7 +7517,7 @@ const kiNewsSystem = heute => `Du bist die Redaktion des Newsblogs von rune.watc
 Recherche (Websuche, gründlich: bis zu 12 Suchen je Schritt, insgesamt bis zu 24, alle Suchen möglichst gleich im ersten Schritt, jede Suche mit anderem Blickwinkel): 1) "THORChain" News dieser Woche (CoinDesk, The Block, Decrypt, Cointelegraph, The Defiant, Blockworks, CryptoSlate, Bitcoin Magazine u. a.), 2) THORChain-, Rujira- und TCY-Blog- und Medium-Artikel, 3) Partnerschaften, Integrationen, Listings, Wallets (Vultisig, Ledger, Trust, Ctrl, THORSwap, Asgardex), 4) Rekorde bei Volumen, TVL, Swaps, 5) neue Funktionen und Upgrades (z. B. Lending, Secured Assets, neue Chains), 6) RUNE Analyse- und Research-Artikel (Messari, Delphi, Kaiko u. a.), 7) Interviews und Podcasts, 8) Artikel in anderen Sprachen. Die Rohquellen (JSON) sind nur Hintergrund, keine Meldungsquelle.
 Stil: Schlagzeilen wie in einem guten Krypto-Newsblog: konkret, mit Name oder Zahl, höchstens 70 Zeichen, kein Clickbait. Optional EINE Zeile Kontext (höchstens 110 Zeichen).
 Links: Jede Meldung MUSS auf den Artikel verlinken (https-URL des Artikels selbst, keine Startseite). Ohne Artikel-Link keine Meldung. quelle = Name des Mediums.
-NUR POSITIVE ARTIKEL: Wachstum, Rekorde, neue Funktionen, Integrationen, Partnerschaften, Listings, Upgrades, gute Analysen. KEINE negativen Artikel: Hacks, Exploits, Diebstahl, Geldwäsche-Vorwürfe, Klagen, Ermittlungen, Kurseinbrüche, Kritik, Verluste, Pleiten, Streit.
+ALLE ARTIKEL ÜBER THORCHAIN, egal ob gut oder kritisch (Rundumblick): Wachstum, Funktionen, Integrationen, Partnerschaften, Analysen, aber auch Sicherheitsvorfälle, Kritik, Klagen, Kursbewegungen. Nicht werten, sachlich und neutral zusammenfassen.
 VERBOTEN: Meldungen über Netzwerkzustand (angehaltene Chains, Churn, Halts, Vault-Migration), Node-Versionen/Upgrade-Stand, Mimir-Abstimmungen, GitLab-Commits/Tags – das zeigt rune.watch anderswo. Nichts erfinden, keine Kursprognosen. Datum = Erscheinungsdatum des Artikels. Neueste zuerst.
 Ergebnis: Rufe am Ende meldungen_speichern auf (so viele echte Meldungen wie gefunden, bis 30). Kein Fließtext, keine Zwischenberichte.`;
 // PRUEFRUNDE: zweiter Durchgang, der den Entwurf wie ein Redakteur gegencheckt
@@ -7523,6 +7542,7 @@ async function kiNewsLinksPruefen(liste) {
   const erg = await Promise.all(liste.map(pruef));
   return erg.filter(Boolean);
 }
+// NICHT MEHR BENUTZT (20.11.2026: "alle Artikel, damit man einen Rundumblick hat"). Frueher:
 // NUR GUTE NEWS (gewuenscht 19.11.2026: "nur positive, also gute Artikel"): Sicherheitsnetz zusaetzlich zur
 // KI-Anweisung -- Schlagzeilen mit negativen Stichworten fliegen raus, auch aus der bisherigen Liste.
 function kiNewsNegativ(e) {
@@ -7599,7 +7619,7 @@ async function kiNewsLauf(env, erzwingen = false) {
     const wz = { tools: [...(job.ohneSuche || kiWebsucheAus ? [] : [{ type: 'web_search_20250305', name: 'web_search', max_uses: pruefen ? 3 : 12 }]), ...KI_WERKZEUGE, KI_NEWS_ABSCHLUSS] };
     let nachrichten = job.verlauf;
     if (letzte) {
-      const hinweis = { type: 'text', text: 'Keine weitere Recherche. Rufe JETZT meldungen_speichern mit allen gefundenen positiven Artikeln auf.' };
+      const hinweis = { type: 'text', text: 'Keine weitere Recherche. Rufe JETZT meldungen_speichern mit allen gefundenen THORChain-Artikeln auf.' };
       nachrichten = job.verlauf.slice();
       const l = nachrichten[nachrichten.length - 1];
       if (l && l.role === 'user') nachrichten[nachrichten.length - 1] = { role: 'user', content: Array.isArray(l.content) ? [...l.content, hinweis] : [{ type: 'text', text: String(l.content || '') }, hinweis] };
@@ -7682,7 +7702,7 @@ async function kiNewsLauf(env, erzwingen = false) {
       const titelK = e => String(e.titelEn || e.titelDe || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 50);
       const gesehen = new Set(), gesehenT = new Set(), alle = [];
       for (const e of [...sauber, ...blogE, ...altE]) {
-        if (!e || !/^https:\/\//.test(e.link || '') || !(e.datum >= grenze14) || kiNewsNegativ(e)) continue;
+        if (!e || !/^https:\/\//.test(e.link || '') || !(e.datum >= grenze14)) continue;
         const k = schluessel(e), t = titelK(e);
         if (gesehen.has(k) || (t && gesehenT.has(t))) continue;
         gesehen.add(k); if (t) gesehenT.add(t); alle.push(e);
