@@ -8576,13 +8576,14 @@ function netzMimirAn(v, h) { v = Number(v) || 0; return v > 0 && (v === 1 || !h 
 const NETZ_LAG_MAX = { BTC: 2, BCH: 2, LTC: 3, ZEC: 3, XMR: 5, DOGE: 10, ETH: 20, GAIA: 30, XRP: 30, TRON: 60, BSC: 60, AVAX: 60, BASE: 100, SOL: 300 };
 async function netzZustand(env) {
   const B = getThornodeBases();
-  const [inb, mimir, vaults, lb, nodes, queue] = await Promise.all([
+  const [inb, mimir, vaults, lb, nodes, queue, netz] = await Promise.all([
     fetchFromBases(B, '/thorchain/inbound_addresses').catch(() => null),
     fetchFromBases(B, '/thorchain/mimir').catch(() => null),
     fetchFromBases(B, '/thorchain/vaults/asgard').catch(() => null),
     fetchFromBases(B, '/thorchain/lastblock').catch(() => null),
     fetchFromBases(B, '/thorchain/nodes').catch(() => null),
-    fetchFromBases(B, '/thorchain/queue/outbound').catch(() => null)]);
+    fetchFromBases(B, '/thorchain/queue/outbound').catch(() => null),
+    fetchFromBases(B, '/thorchain/network').catch(() => null)]);
   if (!Array.isArray(inb) || !mimir || typeof mimir !== 'object') return null;
   const H = Array.isArray(lb) ? Math.max(0, ...lb.map(x => Number(x && x.thorchain) || 0)) : 0;
   const M = k => netzMimirAn(mimir[k], H);
@@ -8639,7 +8640,9 @@ async function netzZustand(env) {
   const mimirWerte = {};
   for (const [k, w] of Object.entries(mimir)) if (!/^HALT|^SOLVENCYHALT|^PAUSE|SUPPLY/i.test(k)) mimirWerte[k] = w; // SUPPLY aendert sich laufend (Burn)
   // aktivIds: Kurzkennungen der aktiven Nodes -- fuer "Churn abgeschlossen: X rein, Y raus"
-  return { at: Date.now(), hoehe: H, churn, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, abstN, aktiv: aktiv.length, aktivIds: aktiv.map(n => String(n.node_address || '').slice(-8)), mimirWerte };
+  // ziel/letzte: fuer die Keygen-Meldungen (netzKeygenSchritt) -- ziel = naechster Churn-Versuch, letzte = letzter echter Churn
+  const ziel = Number(netz && netz.next_churn_height) || 0, letzte = Number(netz && netz.last_churn_height) || 0;
+  return { at: Date.now(), hoehe: H, churn, ziel, letzte, ketten, wasm, wasmSchluessel, warteschlange, jails, lag, abst, abstN, aktiv: aktiv.length, aktivIds: aktiv.map(n => String(n.node_address || '').slice(-8)), mimirWerte };
 }
 const NETZ_CHURN_TXT = {
   halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
@@ -8702,6 +8705,56 @@ function netzWechsel(alt, z) {
   }
   return neu;
 }
+// KEYGEN GEPLANT / OHNE ERGEBNIS (gemeldet 21.11.2026: ThorWatch meldete "Monero (XMR) vault keygen scheduled at
+// block 28,765,359 ... previous attempt at 28,721,551 with 102 nodes made no vault" -- bei uns fehlte das).
+// Warum es fehlte: Der Verlauf erkannte Keygen nur ueber einen Vault im Status "InitVault". Den gibt es aber erst,
+// wenn der Keygen GELINGT, und auch dann oft nur fuer wenige Bloecke -- ein gescheiterter Keygen war unsichtbar.
+// Jetzt: Sobald die Kette next_churn_height erreicht, die Bloecke ab dort nach dem Keygen-Block absuchen
+// (/thorchain/keygen/<hoehe>, liefert Mitglieder je Keygen). Gab es seit dem vorigen Keygen keinen Churn
+// (last_churn_height unveraendert), hat der vorige keinen Vault ergeben.
+// Achtung Wortwahl: Die App blendet Meldungen mit "gesperrt"/"jailed" aus -- hier also nicht verwenden.
+const KEYGEN_SUCH_FENSTER = 100, KEYGEN_JE_SCHRITT = 15;
+async function netzKeygenSchritt(alt, z) {
+  const neu = [];
+  const H = z.hoehe;
+  if (!H || z.churn === 'halt') { z.kg = alt && alt.kg || null; z.kgLetzter = alt && alt.kgLetzter || null; return neu; }
+  let kg = alt && alt.kg || null;
+  // Churn-Hoehe gerade erreicht: next_churn_height ist schon weitergesprungen, der Versuch lag beim alten Ziel
+  if (alt && alt.ziel && z.ziel && z.ziel !== alt.ziel && alt.ziel <= H && (!kg || kg.t !== alt.ziel)) kg = { t: alt.ziel, bis: alt.ziel - 1, ok: false };
+  else if (z.ziel && H >= z.ziel && (!kg || kg.t !== z.ziel)) kg = { t: z.ziel, bis: z.ziel - 1, ok: false };
+  let letzter = alt && alt.kgLetzter || null;
+  if (kg && !kg.ok) {
+    const ende = Math.min(H, kg.t + KEYGEN_SUCH_FENSTER, kg.bis + KEYGEN_JE_SCHRITT);
+    for (let h = kg.bis + 1; h <= ende; h++) {
+      let r = null;
+      try { r = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/thorchain/keygen/${h}`); }
+      catch (e) { console.warn('[netz-verlauf] keygen', h, e && e.message || e); }
+      kg.bis = h;
+      const block = r && (r.keygen_block || r);
+      const liste = (block && Array.isArray(block.keygens) ? block.keygens : []).filter(k => k && Array.isArray(k.members) && k.members.length);
+      if (!liste.length) continue;
+      kg.ok = true;
+      const mitglieder = new Set(); const chains = new Set();
+      for (const k of liste) { k.members.forEach(m => mitglieder.add(String(m))); (Array.isArray(k.chains) ? k.chains : []).forEach(c => chains.add(String(c).toUpperCase())); }
+      const n = mitglieder.size, de = x => Number(x).toLocaleString('de-DE'), en = x => Number(x).toLocaleString('en-US');
+      const ch = chains.size ? [...chains].join(', ') : '';
+      const mehr = liste.length > 1 ? ` · ${liste.length} Keygens` : '';
+      // Voriger Keygen ohne Ergebnis? (kein Churn seit ihm)
+      if (letzter && letzter.h < h && z.letzte && letzter.letzte === z.letzte) {
+        neu.push({ art: 'warn', chain: null,
+          de: `Voriger Keygen bei Block ${de(letzter.h)} (${letzter.n} Nodes) ohne neuen Vault – Churn wird erneut versucht`,
+          en: `Previous keygen at block ${en(letzter.h)} (${letzter.n} nodes) made no vault – churn is being retried` });
+      }
+      neu.push({ art: 'info', chain: null,
+        de: `Keygen bei Block ${de(h)}: alle ${n} Nodes des neuen Sets müssen gemeinsam signieren${ch ? ' (Chains ' + ch + ')' : ''}${mehr}`,
+        en: `Keygen at block ${en(h)}: all ${n} nodes of the new set must sign together${ch ? ' (chains ' + ch + ')' : ''}${mehr}` });
+      letzter = { h, n, letzte: z.letzte };
+      break;
+    }
+  }
+  z.kg = kg; z.kgLetzter = letzter;
+  return neu;
+}
 async function netzVerlaufSchritt(env) {
   if (!env.DB) return;
   const z = await netzZustand(env); if (!z) return;
@@ -8709,6 +8762,7 @@ async function netzVerlaufSchritt(env) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
   const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
   const neu = alt ? netzWechsel(alt, z) : [];
+  try { neu.push(...await netzKeygenSchritt(alt, z)); } catch (e) { console.warn('[netz-verlauf] keygen:', e && e.message || e); }
   // CHURN ABGESCHLOSSEN ALS PUSH (gewuenscht 19.11.2026, Nutzer-Wunsch auf X): Basis = aktive Nodes vor dem Churn
   // (im Normalbetrieb laufend aktualisiert, waehrend Keygen/Migration festgehalten). Erfolgreich = Migration -> Normal.
   z.basis = z.churn === 'normal' ? (z.aktivIds || []) : ((alt && (alt.basis || alt.aktivIds)) || []);
