@@ -225,13 +225,33 @@ async function handleRwApy(request, env) {
     const adr = String(b.address || '').trim().toLowerCase();
     const apy = Number(b.apy);
     if (!adr || !getStatsExcludedAddresses(env).has(adr)) return json({ error: 'FORBIDDEN' }, env, 403);
+    // WOCHEN-APY fuer den Wochenbericht (gewuenscht: "APY fuer die letzte Woche"): die App des Betreibers
+    // schickt den Schnitt ihrer Churn-APYs je Woche (Start = Montag 00:00 UTC); jeder Besucher liest ihn.
+    if (b.woche && typeof b.woche === 'object') {
+      const ws = Number(b.woche.start), wa = Number(b.woche.apy), wc = Math.max(0, Math.min(20, Math.round(Number(b.woche.churns) || 0)));
+      if (!(ws > 1.6e12 && ws % 864e5 === 0) || !(wa >= 0.005 && wa <= 1.5)) return json({ error: 'IMPLAUSIBLE' }, env, 400);
+      const alt = await env.DB.prepare('SELECT v FROM rw_einstellungen WHERE k = ?').bind('wochen_apy').first().catch(() => null);
+      let liste = []; try { liste = JSON.parse(alt && alt.v || '[]'); } catch (e) {}
+      liste = (Array.isArray(liste) ? liste : []).filter((x) => x && x.start !== ws);
+      liste.push({ start: ws, apy: wa, churns: wc, at: Date.now() });
+      liste = liste.sort((x, y) => y.start - x.start).slice(0, 12);
+      await env.DB.prepare('INSERT INTO rw_einstellungen (k, v, at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+        .bind('wochen_apy', JSON.stringify(liste), Date.now()).run();
+      return json({ ok: true }, env);
+    }
     if (!(apy >= 0.01 && apy <= 0.6)) return json({ error: 'IMPLAUSIBLE' }, env, 400);
     await env.DB.prepare('INSERT INTO rw_einstellungen (k, v, at) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
       .bind('jahres_apy', String(apy), Date.now()).run();
     return json({ ok: true }, env);
   }
   const row = await env.DB.prepare('SELECT v, at FROM rw_einstellungen WHERE k = ?').bind('jahres_apy').first().catch(() => null);
-  return json({ apy: row ? Number(row.v) : null, at: row ? row.at : null }, env);
+  const wr = await env.DB.prepare('SELECT v FROM rw_einstellungen WHERE k = ?').bind('wochen_apy').first().catch(() => null);
+  let wochen = []; try { wochen = JSON.parse(wr && wr.v || '[]'); } catch (e) {}
+  if (!Array.isArray(wochen)) wochen = [];
+  // "woche" = letzte volle Woche (Mo-So UTC), passend zum Wochenbericht
+  const d = new Date(), mo = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - (d.getUTCDay() + 6) % 7);
+  const woche = wochen.find((x) => x && x.start === mo - 7 * 864e5) || null;
+  return json({ apy: row ? Number(row.v) : null, at: row ? row.at : null, woche, wochen }, env);
 }
 
 // MIDGARD UEBER DEN WORKER (gewuenscht, Option 1): Die App fragte Midgard bisher direkt aus dem Browser
