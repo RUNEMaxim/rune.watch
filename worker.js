@@ -5701,13 +5701,13 @@ export default {
       if (url.pathname === '/bot-signale') {
         const [g4, g1] = await Promise.all([botGegen(env, '4h'), botGegen(env, '1d')]);
         const gk = G => G && G.tabelle ? { at: G.at, bestanden: G.bestanden, getestet: G.getestet, zufallErwartet: G.zufallErwartet, tabelle: G.tabelle, buendel: G.buendel || null } : null;
-        const [a, b, live, tb4, tb1, ewRoh, muRoh] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
+        const [a, b, live, tb4, tb1, ewRoh, muRoh, w1, tbw] = await Promise.all([botSignale(env, '4h'), botSignale(env, '1d'), botSignalLiveBilanz(env), botTrendbruch(env, '4h'), botTrendbruch(env, '1d'),
           env.DB.prepare("SELECT v FROM bot_status WHERE k = 'elliott:tabelle'").first().catch(() => null),
-          env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first().catch(() => null)]);
+          env.DB.prepare("SELECT v FROM bot_status WHERE k = 'muster:tabelle'").first().catch(() => null), botSignale(env, '1w'), botTrendbruch(env, '1w')]);
         const kurz = x => x ? { at: x.at, horizont: x.horizont, n: x.n, signale: x.signale, abgelehnt: x.abgelehnt || [], aenderung: x.aenderung } : null;
-        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), gegen: { '4h': gk(g4), '1d': gk(g1) }, live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, muster: muRoh ? JSON.parse(muRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null },
+        return new Response(JSON.stringify({ '4h': kurz(a), '1d': kurz(b), '1w': kurz(w1), gegen: { '4h': gk(g4), '1d': gk(g1) }, live, elliott: ewRoh ? JSON.parse(ewRoh.v) : null, muster: muRoh ? JSON.parse(muRoh.v) : null, trendbruch: { '4h': tb4 ? tb4.gewaehlt : null, '1d': tb1 ? tb1.gewaehlt : null, '1w': tbw ? tbw.gewaehlt : null },
           // Status auch ohne bestandene Linie, damit die App erklaeren kann, warum nichts angezeigt wird
-          trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
+          trendbruchTest: { '4h': tb4 ? { at: tb4.at, bestanden: !!tb4.gewaehlt, varianten: tb4.varianten } : null, '1d': tb1 ? { at: tb1.at, bestanden: !!tb1.gewaehlt, varianten: tb1.varianten } : null, '1w': tbw ? { at: tbw.at, bestanden: !!tbw.gewaehlt, varianten: tbw.varianten } : null } }), { headers: { ...corsHeaders(env), 'content-type': 'application/json', 'cache-control': 'public, max-age=120' } });
       }
       if (url.pathname === '/gebuehren') return json(await gebuehrenUsd().catch(() => null) || {}, env);
       if (url.pathname === '/netz-verlauf') return json(await netzVerlaufLesen(env).catch(() => ({ ereignisse: [], stand: null })), env);
@@ -5723,7 +5723,7 @@ export default {
         // ?neu=1&key=... rechnet sofort neu (eine Ebene je Aufruf: &ebene=4h|1d)
         if (url.searchParams.get('neu') === '1') {
           if (!env.STATS_ACCESS_KEY || url.searchParams.get('key') !== env.STATS_ACCESS_KEY) return json({ error: 'UNAUTHORIZED' }, env, 401);
-          const iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
+          const iv = (['1d', '1w'].includes(url.searchParams.get('ebene')) ? url.searchParams.get('ebene') : '4h');
           if (url.searchParams.get('gegen') === '1') return json(await botGegenpruefung(env, iv).catch(e => ({ fehler: String(e && e.message || e) })), env);
           return json(await botSignalCheck(env, iv).catch(e => ({ fehler: String(e && e.message || e) })), env);
         }
@@ -5731,7 +5731,7 @@ export default {
         return json({ '4h': c4, '1d': c1 }, env);
       }
       if (url.pathname === '/bot-prognose') {
-        const coin = String(url.searchParams.get('coin') || 'RUNE').toUpperCase(), iv = url.searchParams.get('ebene') === '1d' ? '1d' : '4h';
+        const coin = String(url.searchParams.get('coin') || 'RUNE').toUpperCase(), iv = (['1d', '1w'].includes(url.searchParams.get('ebene')) ? url.searchParams.get('ebene') : '4h');
         if (!RW_BOT_COINS.includes(coin)) return json({ error: 'UNKNOWN_COIN' }, env, 400);
         const [pr, live] = await Promise.all([botPrognose(env, coin, iv), botLiveBilanz(env)]);
         return json({ ...pr, live }, env);
@@ -5805,12 +5805,38 @@ export default {
           const e1 = await rwDiagLauf(env, 'elliott', () => botElliottSchritt(env));
           return json({ elliott: e1 }, env);
         }
+        // WOCHE SOFORT (gefragt 23.11.2026: "Kann ich es nicht sofort einspielen?"): Wochen-Historie aller Coins jetzt
+        // laden (je Coin 1 Abruf, max. 600 Kerzen) und direkt lernen, statt ~3 h auf die Minutenlaeufe zu warten.
+        // /bot-pruefung?woche=1&key=STATISTIK_SCHLUESSEL
+        if (url.searchParams.get('woche') === '1') {
+          await botSammlerTabellen(env);
+          const geladen = {};
+          for (const coin of RW_BOT_COINS) {
+            try {
+              rwLetzteQuelle = null;
+              const k = await rwBotKerzen(coin, '1w', RW_BOT_EBENEN['1w'].hist);
+              const rows = rwBotMerkmale(k, RW_BOT_EBENEN['1w'].h, 0);
+              await rwBotSchreiben(env, coin, '1w', rows);
+              await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('hist:' + coin + ':1w', 'fertig:' + RW_BOT_EBENEN['1w'].hist).run();
+              geladen[coin] = { kerzen: k.length, faelle: rows.length, quelle: rwLetzteQuelle };
+            } catch (e) { geladen[coin] = { fehler: String(e && e.message || e) }; }
+          }
+          const s7 = await rwDiagLauf(env, 'signale1w', () => botSignaleLernen(env, '1w'));
+          const t7 = await rwDiagLauf(env, 'trendbruch1w', () => botTrendbruchLernen(env, '1w'));
+          const S = await botSignale(env, '1w').catch(() => null);
+          return json({ geladen, signale1w: s7, trendbruch1w: t7, ergebnis: S ? { faelle: S.n, signale: (S.signale || []).length, abgelehnt: (S.abgelehnt || []).length } : null }, env);
+        }
         if (url.searchParams.get('lernen') === '1') {
           const s4 = await rwDiagLauf(env, 'signale4h', () => botSignaleLernen(env, '4h'));
           const s1 = await rwDiagLauf(env, 'signale1d', () => botSignaleLernen(env, '1d'));
           const t1 = await rwDiagLauf(env, 'trendbruch1d', () => botTrendbruchLernen(env, '1d'));
           const t4 = await rwDiagLauf(env, 'trendbruch4h', () => botTrendbruchLernen(env, '4h'));
-          return json({ trendbruch1d: t1, trendbruch4h: t4, signale4h: s4, signale1d: s1 }, env);
+          // Woche mitlernen (Backtest-Seite "Historie hochladen" ruft das direkt nach dem Hochladen auf)
+          const s7 = await rwDiagLauf(env, 'signale1w', () => botSignaleLernen(env, '1w'));
+          const t7 = await rwDiagLauf(env, 'trendbruch1w', () => botTrendbruchLernen(env, '1w'));
+          const W = await botSignale(env, '1w').catch(() => null);
+          return json({ trendbruch1d: t1, trendbruch4h: t4, signale4h: s4, signale1d: s1, signale1w: s7, trendbruch1w: t7,
+            woche: W ? { faelle: W.n || 0, signale: (W.signale || []).length } : null }, env);
         }
         const live = await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
         const bot = await rwDiagLauf(env, 'bot', () => botSammler(env));
@@ -6073,7 +6099,7 @@ async function rwPlanLaeufe(env) {
     const alter = async n => { const L = await rwLaufInfo(env, n); return L ? Date.now() - L.at : Infinity; };
     if (await alter('live') > 55 * 60e3) await rwDiagLauf(env, 'live', () => liveMitschreiber(env));
     if (await alter('bot') > 14 * 60e3) await rwDiagLauf(env, 'bot', () => botSammler(env));
-    for (const iv of ['4h', '1d']) {
+    for (const iv of Object.keys(RW_BOT_EBENEN)) {
       const M = await botModell(env, iv), a = await alter('lernen' + iv);
       // woechentlich neu lernen; ohne Modell taeglich ein neuer Versuch
       // (Gesamt-Modell je Kerze stillgelegt: bestand den Probelauf nicht -- ersetzt durch die Signal-Tabelle)
@@ -6087,7 +6113,7 @@ async function rwPlanLaeufe(env) {
       if (await alter('trendbruch' + iv) > 7 * 864e5) await rwDiagLauf(env, 'trendbruch' + iv, () => botTrendbruchLernen(env, iv));
     }
     // SIGNAL-CHECK: hoechstens einer je Lauf, taeglich bzw. nach jedem Neulernen der Tabelle
-    for (const iv of ['4h', '1d']) {
+    for (const iv of Object.keys(RW_BOT_EBENEN)) {
       const S = await botSignale(env, iv).catch(() => null); if (!S || S.methode !== 'zeitpunkte-hz3') continue;
       const C = await botCheck(env, iv);
       if ((!C || C.tabelleVom !== S.at || Date.now() - C.at > 864e5) && await alter('check' + iv) > 20 * 60e3) { await rwDiagLauf(env, 'check' + iv, () => botSignalCheck(env, iv)); break; }
@@ -10045,7 +10071,7 @@ let rwKrakenZuletzt = 0;
 const RW_KRAKEN_PAAR = { BTC: 'XBTUSD', ETH: 'ETHUSD', SOL: 'SOLUSD', XRP: 'XRPUSD', DOGE: 'XDGUSD', AVAX: 'AVAXUSD', RUNE: 'RUNEUSD', BNB: 'BNBUSD', BCH: 'BCHUSD', LTC: 'LTCUSD', ATOM: 'ATOMUSD', ZEC: 'ZECUSD', NEAR: 'NEARUSD' };
 async function rwKlinesHolen(sym, iv, limit, endTime) {
   const fehler = [];
-  const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  const ivMs = rwBotIv(iv).ms;
   if (!rwBinanceGesperrt) {
     for (const h of RW_KLINES_HOSTS) {
       try {
@@ -10058,8 +10084,8 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
   }
   // CryptoCompare: 4H = Stundenkerzen zu je 4 zusammengefasst, Tag = Tageskerzen
   try {
-    const basis = iv === '1d' ? 'histoday' : 'histohour';
-    const url = `https://min-api.cryptocompare.com/data/v2/${basis}?fsym=${sym}&tsym=USD&limit=${Math.min(2000, limit)}` + (iv === '1d' ? '' : '&aggregate=4') + (endTime ? `&toTs=${Math.floor(endTime / 1000)}` : '');
+    const basis = iv === '4h' ? 'histohour' : 'histoday';
+    const url = `https://min-api.cryptocompare.com/data/v2/${basis}?fsym=${sym}&tsym=USD&limit=${Math.min(2000, limit)}` + (iv === '4h' ? '&aggregate=4' : iv === '1w' ? '&aggregate=7' : '') + (endTime ? `&toTs=${Math.floor(endTime / 1000)}` : '');
     // Optionaler kostenloser Schluessel (Secret CRYPTOCOMPARE_API_KEY) -- ohne Schluessel blockt CryptoCompare oft.
     const ccKey = currentEnv && currentEnv.CRYPTOCOMPARE_API_KEY;
     const r = await fetchWithTimeout(url, { timeoutMs: 12000, headers: ccKey ? { authorization: 'Apikey ' + ccKey } : {} });
@@ -10083,7 +10109,7 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
       for (let versuch = 0; versuch < 2; versuch++) {
         const warte = rwKrakenZuletzt + (versuch ? 4000 : 2000) - Date.now(); if (warte > 0) await new Promise(res => setTimeout(res, warte));
         rwKrakenZuletzt = Date.now();
-        r = await fetchWithTimeout(`https://api.kraken.com/0/public/OHLC?pair=${paar}&interval=${iv === '1d' ? 1440 : 240}`, { timeoutMs: 12000 });
+        r = await fetchWithTimeout(`https://api.kraken.com/0/public/OHLC?pair=${paar}&interval=${rwBotIv(iv).kraken}`, { timeoutMs: 12000 });
         j = r.ok ? await r.json() : null;
         if (!(j && Array.isArray(j.error) && j.error.some(e => /Too many requests|Rate limit/i.test(String(e))))) break;
       }
@@ -10106,7 +10132,16 @@ const RW_BOT_COINS = ['RUNE', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'AVAX',
 // 4H-HISTORIE VERLAENGERT (gemeldet 16.11.2026: "kein einziges 4H-Signal bestaetigt"): 3000 Kerzen waren nur ~16 Monate,
 // fast nur Baerenmarkt -- zu wenig, um einen kleinen Vorsprung zu belegen. 8000 Kerzen = ~3,6 Jahre (Daily: ~4 Jahre).
 // Daily ebenso verlaengert: 3000 Tage (~8 Jahre, soweit es den Coin so lange gibt; Binance ab 2017).
-const RW_BOT_EBENEN = { '4h': { h: 18, hist: 8000 }, '1d': { h: 7, hist: 3000 } };
+const RW_BOT_EBENEN = { '4h': { h: 18, hist: 8000 }, '1d': { h: 7, hist: 3000 }, '1w': { h: 4, hist: 600 } };
+// WOCHENCHART (gewuenscht 23.11.2026: "dass der Bot im Weekly-Chart analysiert wie im Daily und 4h"): alle
+// Zeitebenen-Unterschiede an EINER Stelle statt verstreuter "iv === '1d' ? … : …" (die '1w' als 4h behandelt haetten).
+// hk = Haltedauer in Kerzen (4h: 18 = 3 Tage, 1d: 7 Tage, 1w: 4 Wochen), HZ = Pruef-Zeitraeume, tb = Trendbruch-Fenster.
+const RW_BOT_IV = {
+  '4h': { ms: 4 * 36e5, hk: 18, hzt: '3d', HZ: [[18, '3d'], [42, '7d'], [84, '14d']], kraken: 240, tbL: 42, tbS: 4 },
+  '1d': { ms: 864e5, hk: 7, hzt: '7d', HZ: [[7, '7d'], [14, '14d'], [30, '30d']], kraken: 1440, tbL: 30, tbS: 2 },
+  '1w': { ms: 7 * 864e5, hk: 4, hzt: '4w', HZ: [[4, '4w'], [8, '8w'], [13, '13w']], kraken: 10080, tbL: 26, tbS: 1 },
+};
+const rwBotIv = iv => RW_BOT_IV[iv] || RW_BOT_IV['4h'];
 async function rwBotKerzen(sym, iv, anzahl) {
   let ende = Date.now(), alle = [], runden = 0;
   while (alle.length < anzahl && runden++ < 40) {
@@ -10269,7 +10304,7 @@ function rwBotTrainieren(X, y, g, iter = 300, lr = 0.15, l2 = 1e-3) {
 }
 const rwBotP = (m, x) => { let z = m.b; for (let j = 0; j < m.w.length; j++) z += m.w[j] * x[j]; return rwSig(z); };
 async function botLernen(env, iv) {
-  const H = RW_BOT_EBENEN[iv].h, ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  const H = RW_BOT_EBENEN[iv].h, ivMs = rwBotIv(iv).ms;
   const rows = ((await env.DB.prepare('SELECT * FROM bot_faelle WHERE ebene = ? AND ret IS NOT NULL ORDER BY at').bind(iv).all()).results) || [];
   if (rows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: rows.length };
   const ats = rows.map(r => r.at).sort((a, b) => a - b), testAb = ats[Math.floor(ats.length * 0.8)], tMax = ats[ats.length - 1];
@@ -10319,7 +10354,7 @@ async function botPrognose(env, coin, iv) {
   const x = rwBotVektor(r), p = rwBotP(M.modell, x);
   const gruende = M.modell.w.map((w, j) => ({ j, c: w * x[j] })).filter(g => Math.abs(g.c) > 0.02).sort((a, b) => Math.abs(b.c) - Math.abs(a.c)).slice(0, 2)
     .map(g => ({ merkmal: RW_BOT_MERKMALE[g.j], richtung: g.c > 0 ? 'up' : 'down' }));
-  return { coin, ebene: iv, at: r.at, phase: r.phase, p: +p.toFixed(3), basis: M.basis, horizont: iv === '1d' ? '7d' : '3d', gruende,
+  return { coin, ebene: iv, at: r.at, phase: r.phase, p: +p.toFixed(3), basis: M.basis, horizont: rwBotIv(iv).hzt, gruende,
     modell: { at: M.at, n: M.n, testTreffer: M.test.treffer, testBrier: M.test.brier, testBrierBasis: M.test.brierBasis, klarTreffer: M.test.klarTreffer, gelernt: M.gelernt || [] } };
 }
 async function botLiveBilanz(env) {
@@ -10378,7 +10413,7 @@ async function botSignaleLernen(env, iv) {
   // MEHRERE ZEITRAEUME (gewuenscht: "den Zeitraum nach einem Signal verlaengern"): fest vorgegeben, nicht
   // nachtraeglich ausgesucht -- 4H: 3/7/14 Tage, Tag: 7/14/30 Tage. Weil mehrere Zeitraeume getestet werden,
   // ist die Huerde hoeher (z >= 2,5; gegen den Trend 3,3). Rendite je Zeitraum aus den gespeicherten Schlusskursen.
-  const HZ = iv === '1d' ? [[7, '7d'], [14, '14d'], [30, '30d']] : [[18, '3d'], [42, '7d'], [84, '14d']];
+  const HZ = rwBotIv(iv).HZ;
   for (const c in proCoinReihe) { const R = proCoinReihe[c]; for (let i = 0; i < R.length; i++) { R[i].rh = {}; for (const [hk] of HZ) R[i].rh[hk] = i + hk < R.length && R[i].close > 0 ? R[i + hk].close / R[i].close - 1 : null; } }
   const zielStopp = (r, dir, hk) => { // 1 = Ziel zuerst, 0 = Stopp zuerst, null = keins von beiden in der Frist
     const reihe = proCoinReihe[r.coin], a = r.atrp; if (!a || !reihe) return null;
@@ -10449,7 +10484,7 @@ async function botSignaleLernen(env, iv) {
   const abgelehnt = [...abgMap.values()].sort((a, b) => b.z - a.z).slice(0, 30).map(e => ({ phase: e.phase, key: e.key, dir: e.dir, horizont: e.horizont, hk: e.hk, treffer: e.treffer, basis: e.basis, z: e.z, grund: e.grund, gegenTrend: e.gegenTrend,
     // fuer die Bilanz beim Antippen im Chart
     n: e.n, zeitpunkte: e.zeitpunkte, coins: e.coins, coinsMitDaten: e.coinsMitDaten, h1: e.h1, h2: e.h2 }));
-  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz3', horizont: iv === '1d' ? '7d' : '3d', zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, abgelehnt, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
+  const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz3', horizont: rwBotIv(iv).hzt, zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, abgelehnt, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
   return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
 }
@@ -10461,11 +10496,11 @@ async function botSignaleLernen(env, iv) {
 //   kurzer Anstieg > 3 ATR. Richtung: hoeher. Zeitraum: 4H 3 Tage (18 Kerzen), Daily 7 Tage. Nur Beginn einer Serie.
 //   Vergleich: alle Kerzen im Aufwaertstrend im selben Zeitraum (wie oft war es dort ohne Ausloeser hoeher?).
 const RW_EXP_STAERKE = r => r.phase === 'auf' && ['rsiHoch', 'volSpitze', 'atrSprung', 'neuHoch30', 'steigKurz'].some(k => RW_SITUATIONEN[k](r));
-const RW_EXP_HK = { '4h': 18, '1d': 7 };
+const RW_EXP_HK = { '4h': 18, '1d': 7, '1w': 4 };
 async function botExperimentMitschreiben(env, coin, iv, neue) {
   if (!neue.length) return;
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_exp (coin TEXT, ebene TEXT, at INTEGER, close REAL, folge INTEGER DEFAULT 0, PRIMARY KEY (coin, ebene, at))').run();
-  const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  const ivMs = rwBotIv(iv).ms;
   for (const r of neue) {
     if (!RW_EXP_STAERKE(r)) continue;
     const vorher = await env.DB.prepare('SELECT at FROM bot_exp WHERE coin = ? AND ebene = ? AND at < ? AND at >= ? LIMIT 1').bind(coin, iv, r.at, r.at - 3 * ivMs).first().catch(() => null);
@@ -10492,7 +10527,7 @@ async function botExperimentBilanz(env) {
       const nEff = L.length / Math.max(1, hk / 3);
       const z = q != null && b != null && b > 0 && b < 1 && nEff > 0 ? (q - b) / Math.sqrt(b * (1 - b) / nEff) : null;
       out[iv] = { seit, signale: E.length, offen, ausgewertet: sN, richtig: sOk, ereignisse: L.length, quote: q == null ? null : Math.round(100 * q), normal: b == null ? null : Math.round(100 * b),
-        z: z == null ? null : +z.toFixed(2), horizont: iv === '1d' ? '7d' : '3d' };
+        z: z == null ? null : +z.toFixed(2), horizont: rwBotIv(iv).hzt };
     }
     return out;
   } catch (e) { return { fehler: String(e && e.message || e) }; }
@@ -10503,7 +10538,7 @@ async function botSignalLiveMitschreiben(env, coin, iv, neue) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bot_sig_live (coin TEXT, ebene TEXT, at INTEGER, key TEXT, phase TEXT, dir TEXT, treffer INTEGER, basis INTEGER, close REAL,
     folge INTEGER DEFAULT 0, PRIMARY KEY (coin, ebene, at, key))`).run();
   await botSigLiveSpalten(env);
-  const ivMs = iv === '1d' ? 864e5 : 4 * 36e5;
+  const ivMs = rwBotIv(iv).ms;
   for (const r of neue) {
     const t = S.signale.filter(x => x.phase === r.phase && RW_SITUATIONEN[x.key] && RW_SITUATIONEN[x.key](r)).sort((a, b) => (b.treffer - b.basis) - (a.treffer - a.basis))[0];
     if (!t) continue;
@@ -10511,7 +10546,7 @@ async function botSignalLiveMitschreiben(env, coin, iv, neue) {
     const vorher = await env.DB.prepare('SELECT at FROM bot_sig_live WHERE coin = ? AND ebene = ? AND key = ? AND dir = ? AND at < ? AND at >= ? LIMIT 1')
       .bind(coin, iv, t.key, t.dir, r.at, r.at - 3 * ivMs).first().catch(() => null);
     await env.DB.prepare('INSERT OR IGNORE INTO bot_sig_live (coin, ebene, at, key, phase, dir, treffer, basis, close, folge, hk) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(coin, iv, r.at, t.key, r.phase, t.dir, t.treffer, t.basis, r.close, vorher ? 1 : 0, Number(t.hk) > 0 ? Number(t.hk) : (iv === '1d' ? 7 : 18)).run();
+      .bind(coin, iv, r.at, t.key, r.phase, t.dir, t.treffer, t.basis, r.close, vorher ? 1 : 0, Number(t.hk) > 0 ? Number(t.hk) : rwBotIv(iv).hk).run();
   }
 }
 let botSigHkOk = false;
@@ -10533,7 +10568,7 @@ async function botSignalLiveBilanz(env) {
       reihen[k] = { R, idx: new Map(R.map((x, i) => [x.at, i])) }; }
     for (const r of rows) {
       const S = reihen[r.coin + '|' + r.ebene]; const i = S ? S.idx.get(r.at) : undefined;
-      const hk = Number(r.hk) > 0 ? Number(r.hk) : (r.ebene === '1d' ? 7 : 18); r._hk = hk;
+      const hk = Number(r.hk) > 0 ? Number(r.hk) : rwBotIv(r.ebene).hk; r._hk = hk;
       r.ret = i != null && i + hk < S.R.length && S.R[i].close > 0 ? S.R[i + hk].close / S.R[i].close - 1 : null;
       r._pfad = i != null ? S.R.slice(i + 1, i + 1 + hk) : [];
     }
@@ -10586,7 +10621,7 @@ async function botSignalCheck(env, iv) {
   const alle = ((await env.DB.prepare('SELECT coin, at, close, phase, rsi, bbpos, mom6, mom30, dist200, volr, atrp, tief30, hoch30, serie, dochtu, dochto, bbwpct, divbull, divbear, atrv FROM bot_faelle WHERE ebene = ?').bind(iv).all()).results) || [];
   if (alle.length < 2000) return { ebene: iv, status: 'zu wenig Daten' };
   const KEYS = Object.keys(RW_SITUATIONEN), BIT = {}; KEYS.forEach((k, j) => { BIT[k] = 2 ** j; });
-  const HZ = iv === '1d' ? [[7, '7d'], [14, '14d'], [30, '30d']] : [[18, '3d'], [42, '7d'], [84, '14d']];
+  const HZ = rwBotIv(iv).HZ;
   const reihe = {}; for (const r of alle) (reihe[r.coin] = reihe[r.coin] || []).push(r);
   for (const c in reihe) { const R = reihe[c]; R.sort((a, b) => a.at - b.at);
     for (let i = 0; i < R.length; i++) { const r = R[i]; r.m = 0; for (const k of KEYS) if (RW_SITUATIONEN[k](r)) r.m += BIT[k];
@@ -10743,7 +10778,7 @@ async function botGegenpruefung(env, iv) {
   const ergebnis = [], tabelle = {};
   let getestet = 0;
   for (const e of AB) {
-    const hk = Number(e.hk) > 0 ? Number(e.hk) : (iv === '1d' ? 7 : 18), dir = e.dir;
+    const hk = Number(e.hk) > 0 ? Number(e.hk) : rwBotIv(iv).hk, dir = e.dir;
     const g = flach.filter(r => r.phase === e.phase && RW_SITUATIONEN[e.key](r));
     const gegenTrend = (e.phase === 'ab' && dir === 'up') || (e.phase === 'auf' && dir === 'down');
     const minV = gegenTrend ? 0.08 : 0.05, minZ = gegenTrend ? 3.3 : 2.5;
@@ -10779,7 +10814,7 @@ async function botGegenpruefung(env, iv) {
   let buendel = null;
   { const keys = [...new Set(AB.filter(e => e.phase === 'ab' && e.dir === 'up').map(e => e.key))];
     if (keys.length) {
-      const hk = iv === '1d' ? 7 : 18, btcOk = r => { const B = btc.get(r.at); return !!B && B.phase != null && B.phase !== 'ab'; };
+      const hk = rwBotIv(iv).hk, btcOk = r => { const B = btc.get(r.at); return !!B && B.phase != null && B.phase !== 'ab'; };
       const sig = [];
       for (const c in reihe) { const R = reihe[c]; let letzte = -99;
         for (let i = 0; i < R.length; i++) { const r = R[i]; if (r.phase !== 'ab' || !keys.some(k => RW_SITUATIONEN[k](r))) continue;
@@ -10797,7 +10832,7 @@ async function botGegenpruefung(env, iv) {
       const pc = {}; for (const r of teil(sig.filter(btcOk), 'train')) { const c = (pc[r.coin] = pc[r.coin] || { n: 0, ok: 0 }); c.n++; if (ret(r, hk) > 0) c.ok++; }
       const cm = Object.values(pc).filter(c => c.n >= 10), cOk = cm.filter(c => L.normal != null && 100 * c.ok / c.n - L.normal >= 2).length;
       const lernOk = L.vor >= 8 && L.z >= 3.3 && cOk >= Math.max(3, Math.ceil(cm.length * 0.5)), testOk = T.n >= 15 && T.vor >= 3 && T.z >= 2;
-      buendel = { keys, hk, horizont: iv === '1d' ? '7d' : '3d', lernen: { ...L, coins: cOk, coinsMitDaten: cm.length }, test: T, alle: A,
+      buendel = { keys, hk, horizont: rwBotIv(iv).hzt, lernen: { ...L, coins: cOk, coinsMitDaten: cm.length }, test: T, alle: A,
         status: lernOk && testOk ? 'bestanden' : lernOk ? 'test-durchgefallen' : 'lernen-durchgefallen',
         // bringt das Signal etwas ueber die BTC-Lage hinaus? (auf neuen Daten)
         mehrAlsBtc: T.vorBtc != null && T.vorBtc >= 3 && T.zBtc >= 2 };
@@ -10853,7 +10888,7 @@ async function botTrendbruchLernen(env, iv) {
   const proCoin = {}; for (const r of alle) (proCoin[r.coin] = proCoin[r.coin] || []).push(r.close);
   const med = a => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : null; };
   const varianten = RW_TB_VARIANTEN.map(v => {
-    const coins = Object.entries(proCoin).filter(([, c]) => c.length >= 400).map(([coin, c]) => ({ coin, ...rwTrendbruchSim(c, v) }));
+    const coins = Object.entries(proCoin).filter(([, c]) => c.length >= (iv === '1w' ? 120 : 400)).map(([coin, c]) => ({ coin, ...rwTrendbruchSim(c, v) })); // Woche: weniger Kerzen je Coin
     const besser = coins.filter(x => (x.dd - x.bhDd) >= 0.10).length; // dd negativ: weniger negativ = besser
     const faktor = med(coins.map(x => (1 + x.ertrag) / (1 + x.bhErtrag)));
     const ddMit = med(coins.map(x => x.dd)), ddOhne = med(coins.map(x => x.bhDd));
@@ -10915,7 +10950,7 @@ async function botElliottSchritt(env) {
     const [coin, iv] = job.paare[job.idx];
     const rows = ((await env.DB.prepare('SELECT at, open, high, low, close, volume FROM bot_faelle WHERE coin = ? AND ebene = ? AND high IS NOT NULL ORDER BY at').bind(coin, iv).all()).results) || [];
     const k = rows.map(r => ({ date: r.at, open: r.open != null ? r.open : r.close, high: r.high, low: r.low, close: r.close, value: r.close, volume: r.volume || 0 }));
-    const L = iv === '1d' ? 30 : 42, SCHRITT = iv === '1d' ? 2 : 4, c = k.map(x => x.close);
+    const L = rwBotIv(iv).tbL, SCHRITT = rwBotIv(iv).tbS, c = k.map(x => x.close);
     if (k.length < 400) { job.idx++; job.pos = null; continue; }
     let i = job.pos == null ? 300 : job.pos; const stmts = [];
     for (; i < k.length - L && rest > 0; i += SCHRITT, rest--) {
