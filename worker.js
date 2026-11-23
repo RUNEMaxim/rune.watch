@@ -7075,7 +7075,8 @@ const KI_SITUATION_DE = { rsiTief: 'RSI unter 30', rsiHoch: 'RSI über 70', bbUn
   volVersiegt: 'Volumen versiegt nach starker Bewegung', atrSprung: 'Schwankung springt an', tiefHammerVol: '30-Tage-Tief mit Hammer und hohem Volumen', hochSternVol: '30-Tage-Hoch mit langem oberem Docht und hohem Volumen' };
 const KI_PHASE_DE = { auf: 'Aufwärtstrend', ab: 'Abwärtstrend', seit: 'Seitwärtsphase' };
 async function kiText(env, { system, nachrichten, maxTokens = 600 }) {
-  if (!env.ANTHROPIC_API_KEY) throw new Error('NO_KEY');
+  // KI AUS (gewuenscht 23.11.2026: "keine Credits verbrauchen"): Claude nur, wenn die Worker-Variable KI_AN = "1" ist.
+  if (!env.ANTHROPIC_API_KEY || env.KI_AN !== '1') throw new Error('NO_KEY');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -7261,7 +7262,7 @@ let kiWebsucheAus = false;
 async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, maxRunden = 5, abschluss = null, webSuchen = 3 }) {
   // abschluss: optionales Werkzeug { name, description, input_schema } -- ruft das Modell es auf, ist dessen
   // Eingabe das Ergebnis (strukturiert, ohne Text-Parsen). In der letzten Runde wird es erzwungen.
-  if (!env.ANTHROPIC_API_KEY) throw new Error('NO_KEY');
+  if (!env.ANTHROPIC_API_KEY || env.KI_AN !== '1') throw new Error('NO_KEY');
   const verlauf = nachrichten.slice(); const genutzt = [];
   for (let runde = 0; runde < maxRunden; runde++) {
     const letzte = runde === maxRunden - 1;
@@ -7567,7 +7568,82 @@ async function kiNewsBlogSofort(env, blog) {
 }
 async function kiNewsJobLesen(env) { try { const r = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news_job'").first(); return r ? JSON.parse(r.v) : null; } catch (e) { return null; } }
 async function kiNewsJobSchreiben(env, job) { await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify(job)).run(); }
+// NEWS OHNE KI (gewuenscht 23.11.2026: "Kann man das auch ohne die Claude API machen? Ich will keine Credits verbrauchen"):
+// Stuendlich echte Artikel aus kostenlosen RSS-Feeds (Google News, Krypto-Medien, THORChain-Blog). Nur Meldungen, die
+// THORChain/Rujira/TCY/Vultisig im Titel oder Anriss nennen; keine "Price prediction"-Seiten. Kategorie per Stichwort.
+// Titel bleiben in der Originalsprache (ohne KI keine Uebersetzung). Liste wie bisher in bot_status 'ki:news'.
+const RSS_NEWS_FEEDS = [
+  { url: 'https://news.google.com/rss/search?q=THORChain+when:14d&hl=en-US&gl=US&ceid=US:en', google: true },
+  { url: 'https://news.google.com/rss/search?q=Rujira+OR+%22THORChain+Yield%22+when:14d&hl=en-US&gl=US&ceid=US:en', google: true },
+  { url: 'https://news.google.com/rss/search?q=THORChain+when:14d&hl=de&gl=DE&ceid=DE:de', google: true },
+  { url: 'https://blog.thorchain.org/rss/', quelle: 'THORChain Blog', alle: true },
+  { url: 'https://cointelegraph.com/rss/tag/thorchain', quelle: 'Cointelegraph', alle: true },
+  { url: 'https://www.coindesk.com/arc/outboundfeeds/rss/', quelle: 'CoinDesk' },
+  { url: 'https://decrypt.co/feed', quelle: 'Decrypt' },
+  { url: 'https://www.theblock.co/rss.xml', quelle: 'The Block' },
+  { url: 'https://thedefiant.io/api/feed', quelle: 'The Defiant' },
+];
+const RSS_THEMA = /thorchain|\brune\b|rujira|\btcy\b|vultisig|thorswap|asgardex|\bruji\b/i;
+const rssEnt = t => String(t || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ' ')
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n)).replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+  .replace(/&quot;/g, '"').replace(/&apos;|&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+function rssKategorie(t) {
+  if (/hack|exploit|vulnerab|security|attack|stolen|drain|breach|scam|lazarus|launder|sicherheit|angriff/i.test(t)) return 'sicherheit';
+  if (/upgrade|launch|release|mainnet|v\d+\.\d+|new feature|introduc|rolls? out|goes live|startet|neu:/i.test(t)) return 'upgrade';
+  if (/price|rall(y|ies)|surge|soar|jump|plunge|drop|slump|market|analys|volume|record|tvl|whale|kurs|preis|markt/i.test(t)) return 'markt';
+  return 'oekosystem';
+}
+async function rssNewsLauf(env, erzwingen = false) {
+  const jetzt = Date.now();
+  const zuletzt = Number(await pushState(env, 'ki_news_at')) || 0;
+  if (!erzwingen && jetzt - zuletzt < 36e5) { await pushStateSet(env, 'ki_news_aktiv', '0').catch(() => {}); return null; }
+  await pushStateSet(env, 'ki_news_at', jetzt); await pushStateSet(env, 'ki_news_aktiv', '0').catch(() => {});
+  await pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s: 'RSS-Feeds lesen', t: new Date().toISOString().slice(11, 19) + ' UTC' })).catch(() => {});
+  const grenzeNeu = jetzt - 14 * 864e5, tag = ms => new Date(ms).toISOString().slice(0, 10);
+  const status = {};
+  const listen = await Promise.all(RSS_NEWS_FEEDS.map(async f => {
+    try {
+      const r = await fetch(f.url, { headers: { 'User-Agent': 'Mozilla/5.0 (rune.watch news)', Accept: 'application/rss+xml, application/xml, text/xml' }, signal: AbortSignal.timeout(12000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const xml = await r.text();
+      const items = [...xml.matchAll(/<item[\s>]([\s\S]*?)<\/item>/g)].map(m => {
+        const g = k => { const x = m[1].match(new RegExp('<' + k + '(?:\\s[^>]*)?>([\\s\\S]*?)</' + k + '>')); return x ? x[1] : ''; };
+        let titel = rssEnt(g('title')), quelle = f.quelle || rssEnt(g('source')) || '';
+        if (f.google && quelle && titel.endsWith(' - ' + quelle)) titel = titel.slice(0, -(quelle.length + 3)).trim();
+        const link = rssEnt(g('link')) || (m[1].match(/<guid[^>]*>(https?:[^<]+)<\/guid>/) || [])[1] || '';
+        const ms = Date.parse(rssEnt(g('pubDate')) || rssEnt(g('dc:date')));
+        const anriss = f.google ? '' : rssEnt(g('description')).slice(0, 300);
+        return { titel, quelle, link, ms, anriss, alle: !!f.alle };
+      });
+      status[f.quelle || 'Google News'] = (status[f.quelle || 'Google News'] || 0) + items.length;
+      return items;
+    } catch (e) { status[f.quelle || 'Google News'] = 'Fehler ' + (e && e.message || e); return []; }
+  }));
+  const kandidaten = listen.flat().filter(x => x.titel && /^https:\/\//.test(x.link) && x.ms > grenzeNeu && x.ms <= jetzt + 36e5
+    && (x.alle || RSS_THEMA.test(x.titel + ' ' + x.anriss)) && !/price prediction|preisprognose|kursprognose|prognose \d{4}/i.test(x.titel));
+  const schluessel = t => String(t).toLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ').trim().slice(0, 60);
+  const normLink = l => String(l || '').replace(/[?#].*$/, '').replace(/\/+$/, '').toLowerCase();
+  const roh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
+  const d = roh ? JSON.parse(roh.v) : { eintraege: [] };
+  const grenzeAlt = tag(jetzt - 90 * 864e5);
+  const alt = (Array.isArray(d.eintraege) ? d.eintraege : []).filter(e => e && e.datum >= grenzeAlt);
+  const daT = new Set(alt.map(e => schluessel(e.titelEn || e.titelDe))), daL = new Set(alt.map(e => normLink(e.link)));
+  const neu = [];
+  for (const x of kandidaten.sort((a, b) => b.ms - a.ms)) {
+    const k = schluessel(x.titel), l = normLink(x.link);
+    if (daT.has(k) || daL.has(l)) continue; daT.add(k); daL.add(l);
+    const t = String(x.titel).slice(0, 140), a = x.anriss.slice(0, 160);
+    neu.push({ kategorie: rssKategorie(x.titel + ' ' + x.anriss), wichtig: false, datum: tag(x.ms), titelDe: t, titelEn: t, textDe: a, textEn: a, quelle: String(x.quelle || '').slice(0, 40), link: String(x.link).slice(0, 500) });
+  }
+  d.eintraege = [...neu, ...alt].sort((a, b) => (a.datum < b.datum ? 1 : a.datum > b.datum ? -1 : 0)).slice(0, 80);
+  d.at = jetzt; d.quellen = status; d.ohneKi = true;
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news', JSON.stringify(d)).run();
+  await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('ki:news_job', JSON.stringify({ fertig: true, at: jetzt })).run().catch(() => {});
+  await pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s: 'fertig (RSS, ' + neu.length + ' neu)', t: new Date().toISOString().slice(11, 19) + ' UTC' })).catch(() => {});
+  return { n: d.eintraege.length, neu: neu.length };
+}
 async function kiNewsLauf(env, erzwingen = false) {
+  if (env.KI_AN !== '1') return rssNewsLauf(env, erzwingen); // ohne KI: RSS (alter KI-Weg nur mit KI_AN=1)
   const schritt = s => pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s, t: new Date().toISOString().slice(11, 19) + ' UTC' })).catch(() => {});
   const jetzt = Date.now(), heute = new Date().toISOString().slice(0, 10);
   let job = await kiNewsJobLesen(env);
@@ -7744,8 +7820,10 @@ async function kiNewsLauf(env, erzwingen = false) {
 async function kiAgentLauf(env) {
   await sicherePushTabellen(env);
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS bot_status (k TEXT PRIMARY KEY, v TEXT)').run();
-  try { await kiKaufsignale(env); } catch (e) { RW_DIAG.push('ki kauf: ' + (e && e.message || e)); }
-  try { await kiTagesbericht(env); } catch (e) { RW_DIAG.push('ki bericht: ' + (e && e.message || e)); }
+  if (env.KI_AN === '1') {
+    try { await kiKaufsignale(env); } catch (e) { RW_DIAG.push('ki kauf: ' + (e && e.message || e)); }
+    try { await kiTagesbericht(env); } catch (e) { RW_DIAG.push('ki bericht: ' + (e && e.message || e)); }
+  }
   await kiNewsSchrittSicher(env);
 }
 async function kiNewsSchrittSicher(env) {
@@ -8409,9 +8487,8 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     if (/^(HALT|PAUSE|SOLVENCYHALT|STOPSOLVENCYCHECK|NODEPAUSE)/i.test(key)) {
       const zweiter = sortiert[1] ? sortiert[1][1] : 0;
       if (topAnzahl >= 3 && topAnzahl > zweiter) continue;
-      if (topWert == null || topWert === 'undefined' || topWert === '') continue;
-      liste.push({ key, wert: topWert, stimmen: topAnzahl, noetig: 3, operativ: true, abgestimmt: m.size, neu30: null, werte: sortiert.slice(0, 4).map(([w, n]) => ({ w, n })),
-        fehlen: aktiv.filter(a => !m.has(a)) });
+      // Halts/Pausen sind keine 2/3-Abstimmungen (gemeldet 23.11.2026: "Das ist eine andere Art von Abstimmung") ->
+      // nie in der Abstimmungsliste; einzelne Halt-Stimmen gehoeren in die Chain-Ansicht / den Netzwerk-Verlauf.
       continue;
     }
     // SCHON EINMAL ANGENOMMEN (Dune: set_mimir-Ereignis mit genau diesem Wert) -> in "Angenommen" statt offen
