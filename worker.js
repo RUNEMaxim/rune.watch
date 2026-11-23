@@ -8357,8 +8357,12 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   // Vorhandene als alt (0) -- danach zaehlt jede neue Stimme ab ihrem ersten Auftauchen. Unabhaengig vom Archiv-Knoten.
   let gesehen = null, gesehenNeu = false;
   try { gesehen = JSON.parse((await pushState(env, 'abstGesehen')) || 'null'); } catch (e) { gesehen = null; }
-  const ersterLauf = !gesehen || typeof gesehen !== 'object';
-  if (ersterLauf) gesehen = {};
+  // v2 (gemeldet 23.11.2026: "Diese Umfragen sind bereits veraltet. Erscheinen jetzt nur wieder, weil seit dem letzten
+  // Churn weniger Nodes aktiv sind"): Die Mitschrift erfasste nur Stimmen AKTIVER Nodes. Kam eine Node per Churn ins aktive
+  // Set, galt ihre uralte Stimme als "neu gesehen" -> tote Abstimmungen tauchten wieder auf. Jetzt werden Stimmen ALLER
+  // Nodes erfasst (auch Standby). Alte Mitschrift (ohne v2) wird einmal verworfen: alles Vorhandene gilt als alt.
+  const ersterLauf = !gesehen || typeof gesehen !== 'object' || gesehen.__v !== 2;
+  if (ersterLauf) gesehen = { __v: 2 };
   const jetztMs = Date.now();
   const angenommen = [];
   if (!Array.isArray(nodes) || !roh) return null;
@@ -8370,6 +8374,18 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
   const aktiv = nodes.filter(n => String(n && n.status) === 'Active').map(n => String(n.node_address).toLowerCase());
   const aktivSet = new Set(aktiv);
   const noetig = Math.ceil(aktiv.length * 2 / 3);
+  // Erstes Auftauchen JEDER Stimme merken, egal ob die Node gerade aktiv ist; Verschwundene aufraeumen.
+  {
+    const da = new Set(['__v']);
+    for (const v of stimmen) {
+      const key = String(v && v.key || '').toUpperCase(), sig = String(v && v.signer || '').toLowerCase();
+      if (!key || !sig) continue;
+      const gk = key + '|' + String(v.value) + '|' + sig.slice(-8);
+      da.add(gk);
+      if (gesehen[gk] == null) { gesehen[gk] = ersterLauf ? 0 : jetztMs; gesehenNeu = true; }
+    }
+    for (const gk of Object.keys(gesehen)) if (!da.has(gk)) { delete gesehen[gk]; gesehenNeu = true; }
+  }
   const jeSchluessel = new Map();
   for (const v of stimmen) {
     const key = String(v && v.key || '').toUpperCase(), sig = String(v && v.signer || '').toLowerCase();
@@ -8414,7 +8430,6 @@ async function offeneAbstimmungen(env, nodesVorab, frisch) {
     for (const [sig, w] of m) {
       if (w !== topWert) continue;
       const gk = key + '|' + w + '|' + sig.slice(-8);
-      if (gesehen[gk] == null) { gesehen[gk] = ersterLauf ? 0 : jetztMs; gesehenNeu = true; }
       if (gesehen[gk] > 0 && jetztMs - gesehen[gk] < 90 * 864e5) neuEigen++;
     }
     if (alt && alt.sets) {
