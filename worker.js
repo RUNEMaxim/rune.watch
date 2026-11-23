@@ -8598,7 +8598,9 @@ async function netzZustand(env) {
     };
   }
   const v = Array.isArray(vaults) ? vaults : [];
-  const churn = M('HALTCHURNING') ? 'halt' : v.some(x => /init/i.test(String(x && x.status || ''))) ? 'keygen' : v.some(x => /retiring/i.test(String(x && x.status || ''))) ? 'migration' : 'normal';
+  // Vault-Abfrage fehlgeschlagen: Zustand UNBEKANNT (null) -- netzVerlaufSchritt uebernimmt dann den alten Stand.
+  // Vorher wurde daraus 'normal': ein Aussetzer mitten in der Migration gab ein falsches "Churn abgeschlossen".
+  const churn = M('HALTCHURNING') ? 'halt' : !Array.isArray(vaults) ? null : v.some(x => /init/i.test(String(x && x.status || ''))) ? 'keygen' : v.some(x => /retiring/i.test(String(x && x.status || ''))) ? 'migration' : 'normal';
   // Nur der GLOBALE Halt zaehlt (einzelne Contracts haben eigene HALTWASM...-Schluessel -- das ist kein Netzwerk-Halt)
   const wasm = Object.keys(mimir).some(k => /^HALTWASM(GLOBAL)?$/i.test(k) && M(k));
   // Zum Nachpruefen in der App: welche HALTWASM-Schluessel gesetzt sind (Name = Wert)
@@ -8647,8 +8649,8 @@ async function netzZustand(env) {
 const NETZ_CHURN_TXT = {
   halt: ['Churn angehalten (HALTCHURNING)', 'Churn halted (HALTCHURNING)'],
   keygen: ['Churn: neue Vault-Schlüssel werden erzeugt (Keygen)', 'Churn: making new vault keys (keygen)'],
-  migration: ['Churn: Mittel ziehen in die neuen Vaults um', 'Churn: funds migrating to the new vaults'],
-  normal: ['Churn abgeschlossen – Netzwerk im Normalbetrieb', 'Churn done – network back to normal'],
+  migration: ['Vault-Migration gestartet – Mittel ziehen in die neuen Vaults um', 'Vault fund migration started – funds moving to the new vaults'],
+  normal: ['Vault-Migration abgeschlossen – Churn fertig, Netzwerk im Normalbetrieb', 'Vault fund migration finished – churn done, network back to normal'],
 };
 function netzKettenText(c, k) {
   if (k.solv === false) return { art: 'halt', de: `${c}: Solvency-Halt (Vault-Bestand stimmt nicht)`, en: `${c}: solvency halt (vault balance mismatch)` };
@@ -8665,6 +8667,7 @@ function netzWechsel(alt, z) {
   if (alt.churn !== z.churn) {
     if (alt.churn === 'keygen' && z.churn === 'migration') add('gut', null, 'Keygen erfolgreich – neue Vaults stehen, Migration beginnt', 'Keygen succeeded – new vaults ready, migration starting');
     else if (alt.churn === 'keygen' && z.churn === 'normal') add('warn', null, 'Keygen ohne Ergebnis – kein neuer Vault, nächster Versuch folgt', 'Keygen without result – no new vault, next attempt follows');
+    else if (alt.churn === 'halt' && z.churn === 'normal') add('ok', null, 'Churn wieder freigegeben (HALTCHURNING aufgehoben)', 'Churning allowed again (HALTCHURNING lifted)');
     else { const t = NETZ_CHURN_TXT[z.churn]; add('churn-' + z.churn, null, t[0], t[1]); }
   }
   for (const c of Object.keys(z.ketten)) {
@@ -8761,6 +8764,7 @@ async function netzVerlaufSchritt(env) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_verlauf (at INTEGER, hoehe INTEGER, art TEXT, chain TEXT, de TEXT, en TEXT)').run();
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS netz_stand (k TEXT PRIMARY KEY, v TEXT)').run();
   const alt = await env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null);
+  if (z.churn == null) z.churn = alt && alt.churn || 'normal';
   const neu = alt ? netzWechsel(alt, z) : [];
   try { neu.push(...await netzKeygenSchritt(alt, z)); } catch (e) { console.warn('[netz-verlauf] keygen:', e && e.message || e); }
   // CHURN ABGESCHLOSSEN ALS PUSH (gewuenscht 19.11.2026, Nutzer-Wunsch auf X): Basis = aktive Nodes vor dem Churn
@@ -8865,7 +8869,12 @@ async function netzVerlaufLesen(env) {
     if (!alt || !(Date.now() - Number(alt.at) < 120000)) await netzVerlaufSchritt(env);
   } catch (e) {}
   const [ev, st] = await Promise.all([
-    env.DB.prepare('SELECT at, hoehe, art, chain, de, en FROM netz_verlauf ORDER BY at DESC LIMIT 60').all().then(r => r.results || []).catch(() => []),
+    // Neueste 60 PLUS die letzten Churn-/Keygen-Meldungen der letzten 14 Tage (gemeldet 23.11.2026: "Vault fund migration
+    // FINISHED" fehlte -- die Meldung kann von haeufigen Scanner-/Mimir-Wechseln aus den 60 neuesten geschoben werden)
+    Promise.all([
+      env.DB.prepare('SELECT at, hoehe, art, chain, de, en FROM netz_verlauf ORDER BY at DESC LIMIT 60').all().then(r => r.results || []).catch(() => []),
+      env.DB.prepare("SELECT at, hoehe, art, chain, de, en FROM netz_verlauf WHERE at > ? AND (art LIKE 'churn-%' OR art = 'gut' OR de LIKE 'Keygen%' OR de LIKE 'Voriger Keygen%') ORDER BY at DESC LIMIT 12").bind(Date.now() - 14 * 864e5).all().then(r => r.results || []).catch(() => [])])
+      .then(([a, b]) => { const s = new Set(a.map(x => x.at + '|' + x.art + '|' + x.de)); return a.concat(b.filter(x => !s.has(x.at + '|' + x.art + '|' + x.de))).sort((x, y) => y.at - x.at); }),
     env.DB.prepare("SELECT v FROM netz_stand WHERE k = 'z'").first().then(r => r ? JSON.parse(r.v) : null).catch(() => null)]);
   // Noch kein gespeicherter Stand (Cron lief noch nicht): Zustand direkt live lesen, damit die Karte sofort erscheint
   const stand = st || await netzZustand(env).catch(() => null);
