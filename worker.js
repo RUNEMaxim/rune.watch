@@ -2756,7 +2756,15 @@ async function handleStats(request, env, ctx) {
   const alleAdressen = totalRow?.n || 0;
   const pctOf = (n) => alleAdressen > 0 ? Math.round((n / alleAdressen) * 1000) / 10 : null;
 
+  // Ø AKTIVE ADRESSEN PRO TAG im letzten Monat (gewuenscht: "durchschnittliche aktive Adressen in einem
+  // Monat"): Adress-Tage der letzten 30 vollen Tage geteilt durch die Zahl der Tage mit Aufzeichnung.
+  const tag30Row = await env.DB.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT day) AS t FROM sync_activity_days WHERE day >= ? AND day < ?${exclSql}`)
+    .bind(day30, day1, ...excl).first().catch(() => null);
+  const avgActiveDay30 = tag30Row && tag30Row.t > 0 ? Math.round(tag30Row.n / tag30Row.t * 10) / 10 : null;
+
   const stats = {
+    avgActiveDay30,
+    stickiness30: avgActiveDay30 != null && active30 > 0 ? Math.round(avgActiveDay30 / active30 * 1000) / 10 : null,
     totalUniqueAddressesEver: totalRow?.n || 0,
     activeLast1d: active1,
     activeLast7d: active7,
@@ -3067,6 +3075,9 @@ async function handleStats(request, env, ctx) {
           <div class="tile-hint">all sync calls in the last 24h, not deduplicated per day</div>
         </div>
         ${tile('avgreq', 'Ø requests per active address', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'last 24h, per address active in those 24h')}
+        <div class="sec">Last 30 days</div>
+        ${tile('avgday30', 'Ø active per day', stats.avgActiveDay30 == null ? '—' : stats.avgActiveDay30, 'average daily active addresses, last 30 full days')}
+        ${tile('active30', 'Monthly active', stats.activeLast30d, 'different addresses that synced in the last 30 days' + (stats.stickiness30 != null ? ' · ' + stats.stickiness30 + '% use it on an average day' : ''))}
         <div class="sec">All time</div>
         ${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint)}
         ${tile('returning', 'Returning – all time', stats.returningAllTime, 'synced on ≥2 separate days since recording began')}
