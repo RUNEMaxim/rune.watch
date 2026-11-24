@@ -8138,7 +8138,7 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
-      churn: !!p.churn, churnNetz: !!p.churnNetz, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false, gesund: p.gesund !== false,
+      churn: !!p.churn, churnNetz: !!p.churnNetz, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false, gesund: p.gesund !== false, swaps: p.swaps !== false && !!besitzer,
       kauf: !!p.kauf, bericht: !!p.bericht, podcast: p.podcast !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
     // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
@@ -8184,7 +8184,8 @@ async function pushAnThema(env, thema, baue) {
   for (const row of r.results || []) {
     let p = {}; try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
     // Neue Podcast-Folge: AUTOMATISCH fuer alle (gewuenscht) -- nur wer es ausdruecklich abgeschaltet hat, nicht
-    if (thema === 'podcast' ? p.podcast === false : !p[thema]) continue;
+    // Swaps ueber rune.watch (nur Betreiber) ebenfalls standardmaessig an
+    if (thema === 'podcast' || thema === 'swaps' ? p[thema] === false : !p[thema]) continue;
     const nachricht = baue(row.lang === 'de', p, row);
     if (nachricht) jobs.push([row, nachricht]);
   }
@@ -8371,6 +8372,26 @@ async function syncPush(env) {
     if (!bis) { const m = await env.DB.prepare('SELECT MAX(ms) AS m FROM donation_history').first(); await pushStateSet(env, 'spende_ms', Number(m && m.m) || 1); }
     else if (max > bis) await pushStateSet(env, 'spende_ms', max);
   } catch (e) { console.warn('[push] spende', e?.message || e); }
+  // 5b) SWAPS UEBER RUNE.WATCH (gewuenscht 24.11.2026: "Bitte nur mich informieren wenn jemand ueber runewatch
+  // swapt"): NUR Betreiber-Abos (row.besitzer), Schalter "swaps" (Standard an). Quelle = /rw-swaps (Midgard,
+  // affiliate=runewatch, 3 Min. Zwischenspeicher). Nur abgeschlossene Swaps, jeder einmal (pushState swap_ms).
+  try {
+    const res = await handleRwSwaps(null, env);
+    const d = res && res.ok ? await res.json() : null;
+    const liste = d && Array.isArray(d.swaps) ? d.swaps.filter(x => x && x.zeit && x.status === 'success') : [];
+    const bis = Number(await pushState(env, 'swap_ms')) || 0;
+    const max = liste.length ? Math.max(...liste.map(x => x.zeit)) : 0;
+    if (!bis) { if (max) await pushStateSet(env, 'swap_ms', max); }
+    else {
+      const kurz = a => { const s = String(a || ''), t = s.split('.')[1] || s; return t.split('-')[0]; };
+      const zahl = n => n == null ? '' : Number(n).toLocaleString('en-US', { maximumFractionDigits: n >= 1000 ? 0 : n >= 1 ? 2 : 6 }) + ' ';
+      for (const x of liste.filter(x => x.zeit > bis).sort((a, b) => a.zeit - b.zeit).slice(0, 10)) {
+        await pushAnThema(env, 'swaps', (de, p, row) => row.besitzer ? ({ titel: de ? 'Neuer Swap über rune.watch' : 'New swap via rune.watch',
+          text: zahl(x.menge) + kurz(x.von) + ' → ' + zahl(x.erhalten) + kurz(x.nach), tag: 'rw-swap-' + String(x.tx).slice(0, 16) }) : null);
+      }
+      if (max > bis) await pushStateSet(env, 'swap_ms', max);
+    }
+  } catch (e) { console.warn('[push] swaps', e?.message || e); }
   // 6) PERSOENLICH (Etappe 2): Nodes, Bond, Rewards, THORName je Abo mit Adressen.
   try { await syncPushPersoenlich(env); } catch (e) { console.warn('[push] persoenlich', e?.message || e); }
 }
