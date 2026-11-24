@@ -4562,23 +4562,27 @@ async function handleDexVolume(request, env, ctx) {
 
 const COINGECKO_BASES = ['https://api.coingecko.com/api/v3'];
 
-const CRYPTOCOMPARE_BASES = ['https://min-api.cryptocompare.com'];
-
+const CRYPTOCOMPARE_BASES = []; // nur Platzhalter, falls noch irgendwo referenziert -- wird nicht mehr abgefragt
+// CryptoCompare entfernt (24.11.2026, gewuenscht; verlangte einen API-Schluessel). Gesamte RUNE-Tageshistorie
+// jetzt von KuCoin (frei, je Abruf bis 1500 Tage, rueckwaerts geblaettert), sonst CoinGecko wie bisher.
 async function fetchRuneOhlcMax() {
-  
   try {
-    const j = await fetchFromBases(CRYPTOCOMPARE_BASES, '/data/v2/histoday?fsym=RUNE&tsym=USD&allData=true', { timeoutMs: 15000 });
-    const reihe = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
-    if (reihe && reihe.length) {
-      const kerzen = reihe
-        .filter((k) => k && Number(k.close) > 0 && Number(k.open) > 0)
-        .map((k) => [Number(k.time) * 1000, Number(k.open), Number(k.high), Number(k.low), Number(k.close)])
-        .filter((k) => k.every(Number.isFinite))
-        .sort((a, b) => a[0] - b[0]);
-      if (kerzen.length > 100) return kerzen;
+    const tag = 86400, alle = new Map();
+    let bis = Math.floor(Date.now() / 1000);
+    for (let seite = 0; seite < 4; seite++) {
+      const r = await fetchWithTimeout(`https://api.kucoin.com/api/v1/market/candles?type=1day&symbol=RUNE-USDT&startAt=${bis - 1500 * tag}&endAt=${bis}`, { timeoutMs: 15000 });
+      const j = r.ok ? await r.json() : null;
+      const d = j && j.code === '200000' && Array.isArray(j.data) ? j.data : [];
+      if (!d.length) break;
+      for (const x of d) { const ms = +x[0] * 1000; if (+x[2] > 0 && +x[1] > 0) alle.set(ms, [ms, +x[1], +x[3], +x[4], +x[2]]); }
+      const aeltest = Math.min(...d.map(x => +x[0]));
+      if (d.length < 1400) break;
+      bis = aeltest - 1;
     }
+    const kerzen = [...alle.values()].filter(k => k.every(Number.isFinite)).sort((a, b) => a[0] - b[0]);
+    if (kerzen.length > 100) return kerzen;
   } catch (e) {
-    console.warn('[rune-rewards-backend] /rune-history: CryptoCompare nicht erreichbar:', e?.message || String(e));
+    console.warn('[rune-rewards-backend] /rune-history: KuCoin nicht erreichbar:', e?.message || String(e));
   }
 
   try {
@@ -4622,7 +4626,7 @@ async function handleRuneHistory(request, env, ctx) {
     }
     const candles = await runeHistoryCache.promise;
     if (!candles.length) throw new Error('COINGECKO_EMPTY');
-    const payload = { source: candles.length > 100 ? 'cryptocompare' : 'coingecko', candles, firstMs: candles[0][0], lastMs: candles[candles.length - 1][0] };
+    const payload = { source: candles.length > 100 ? 'kucoin' : 'coingecko', candles, firstMs: candles[0][0], lastMs: candles[candles.length - 1][0] };
     const schreiben = env.DB.prepare(
       `INSERT INTO rune_history_cache (id, payload, updated_at) VALUES (1, ?, ?)
        ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`
@@ -9450,7 +9454,7 @@ function anaRss(y, X) {
 // BINANCE-TAGESKURSE (wie die App): Schlusskurs je UTC-Tag. Erst die oeffentliche Markt-Daten-
 // Spiegelung (data-api.binance.vision, ohne Laendersperre), dann api.binance.com. Max. 1000 je Abfrage.
 // Liefert { tage: Map(tag -> Schlusskurs), quelle, fehler[] }. Reihenfolge: Binance direkt (wie die
-// App) -> CryptoCompare mit Kursen von Binance (e=Binance, USDT) -> CryptoCompare-Durchschnitt.
+// App) -> KuCoin-Tageskerzen (CryptoCompare am 24.11.2026 entfernt).
 // Grund (gemeldet: "keine Binance-Daten"): Binance lehnt Anfragen von Cloudflare-Servern oft ab.
 async function anaBinanceTage(symbol, vonMs) {
   const fehler = [];
@@ -9471,25 +9475,24 @@ async function anaBinanceTage(symbol, vonMs) {
       if (tage.size) return { tage, quelle: 'Binance', fehler };
     } catch (e) { fehler.push(host.replace('https://', '') + ': ' + (e?.message || e)); tage.clear(); }
   }
+  // CryptoCompare entfernt (24.11.2026, gewuenscht) -> KuCoin-Tageskerzen, rueckwaerts geblaettert (je 1500 Tage)
   const fsym = symbol.replace(/USDT$/, '');
-  for (const variante of [{ e: 'Binance', tsym: 'USDT', name: 'Binance via CryptoCompare' }, { e: null, tsym: 'USD', name: 'CryptoCompare (Durchschnitt)' }]) {
-    try {
-      let bisTs = Math.floor(Date.now() / 1000);
-      for (let runde = 0; runde < 6; runde++) {
-        const q = `/data/v2/histoday?fsym=${fsym}&tsym=${variante.tsym}&limit=2000&toTs=${bisTs}` + (variante.e ? `&e=${variante.e}` : '');
-        const r = await fetchWithTimeout('https://min-api.cryptocompare.com' + q, { timeoutMs: 12000 });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const j = await r.json();
-        const liste = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
-        if (!liste) throw new Error((j && j.Message) || 'leer');
-        let aelteste = Infinity;
-        for (const c of liste) { if (Number(c.close) > 0) tage.set(new Date(Number(c.time) * 1000).toISOString().slice(0, 10), Number(c.close)); aelteste = Math.min(aelteste, Number(c.time)); }
-        if (!Number.isFinite(aelteste) || aelteste * 1000 <= vonMs) break;
-        bisTs = aelteste - 86400;
-      }
-      if (tage.size) return { tage, quelle: variante.name, fehler };
-    } catch (e) { fehler.push(variante.name + ': ' + (e?.message || e)); tage.clear(); }
-  }
+  try {
+    let bis = Math.floor(Date.now() / 1000);
+    for (let runde = 0; runde < 6; runde++) {
+      const r = await fetchWithTimeout(`https://api.kucoin.com/api/v1/market/candles?type=1day&symbol=${fsym}-USDT&startAt=${bis - 1500 * 86400}&endAt=${bis}`, { timeoutMs: 12000 });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      const liste = j && j.code === '200000' && Array.isArray(j.data) ? j.data : null;
+      if (!liste) throw new Error((j && j.msg) || 'leer');
+      if (!liste.length) break;
+      let aelteste = Infinity;
+      for (const c of liste) { if (Number(c[2]) > 0) tage.set(new Date(Number(c[0]) * 1000).toISOString().slice(0, 10), Number(c[2])); aelteste = Math.min(aelteste, Number(c[0])); }
+      if (!Number.isFinite(aelteste) || aelteste * 1000 <= vonMs || liste.length < 1400) break;
+      bis = aelteste - 1;
+    }
+    if (tage.size) return { tage, quelle: 'KuCoin', fehler };
+  } catch (e) { fehler.push('KuCoin: ' + (e?.message || e)); tage.clear(); }
   return { tage, quelle: null, fehler };
 }
 // CSV-EXPORT der THORChain-Swaps je Tag (Midgard), fuer die Auswertung ausserhalb des Workers.
@@ -10195,23 +10198,37 @@ async function rwKlinesHolen(sym, iv, limit, endTime) {
       } catch (e) { fehler.push(h.replace('https://', '') + ' ' + (e && e.message || e)); }
     }
   }
-  // CryptoCompare: 4H = Stundenkerzen zu je 4 zusammengefasst, Tag = Tageskerzen
+  // CryptoCompare entfernt (24.11.2026, gewuenscht): verlangt inzwischen einen API-Schluessel (401).
+  // KuCoin (24.11.2026, gemeldet: "bot ZEC 4h: keine Kursquelle erreichbar: cryptocompare 401 | kraken Too many
+  // requests"): frei ohne Schluessel, bis 1500 Kerzen, kann blaettern (endAt). Antwort neueste zuerst:
+  // [zeit_s, open, close, high, low, volumen, umsatz] -> Binance-Format, aufsteigend.
   try {
-    const basis = iv === '4h' ? 'histohour' : 'histoday';
-    const url = `https://min-api.cryptocompare.com/data/v2/${basis}?fsym=${sym}&tsym=USD&limit=${Math.min(2000, limit)}` + (iv === '4h' ? '&aggregate=4' : iv === '1w' ? '&aggregate=7' : '') + (endTime ? `&toTs=${Math.floor(endTime / 1000)}` : '');
-    // Optionaler kostenloser Schluessel (Secret CRYPTOCOMPARE_API_KEY) -- ohne Schluessel blockt CryptoCompare oft.
-    const ccKey = currentEnv && currentEnv.CRYPTOCOMPARE_API_KEY;
-    const r = await fetchWithTimeout(url, { timeoutMs: 12000, headers: ccKey ? { authorization: 'Apikey ' + ccKey } : {} });
-    if (r.ok) {
-      const j = await r.json();
-      const d = j && j.Data && Array.isArray(j.Data.Data) ? j.Data.Data : null;
-      if (j && j.Response !== 'Error' && d && d.length) {
-        const rows = d.filter(x => x && x.close > 0).map(x => [x.time * 1000, x.open, x.high, x.low, x.close, x.volumefrom, x.time * 1000 + ivMs - 1]);
-        if (rows.length) { rwLetzteQuelle = 'cryptocompare'; return { rows, quelle: 'cryptocompare' }; }
+    const typ = { '4h': '4hour', '1d': '1day', '1w': '1week' }[iv];
+    if (typ) {
+      const ivS = Math.round(ivMs / 1000), bis = endTime ? Math.floor(endTime / 1000) : Math.floor(Date.now() / 1000);
+      const von = bis - Math.min(1500, limit) * ivS;
+      const r = await fetchWithTimeout(`https://api.kucoin.com/api/v1/market/candles?type=${typ}&symbol=${sym}-USDT&startAt=${von}&endAt=${bis}`, { timeoutMs: 12000 });
+      const j = r.ok ? await r.json() : null;
+      if (j && j.code === '200000' && Array.isArray(j.data) && j.data.length) {
+        const rows = j.data.map(x => [+x[0] * 1000, +x[1], +x[3], +x[4], +x[2], +x[5], +x[0] * 1000 + ivMs - 1]).filter(x => x[4] > 0).sort((a, b) => a[0] - b[0]).slice(-limit);
+        if (rows.length) { rwLetzteQuelle = 'kucoin'; return { rows, quelle: 'kucoin' }; }
       }
-      fehler.push('cryptocompare ' + (j && j.Message ? String(j.Message).slice(0, 60) : 'leer'));
-    } else fehler.push('cryptocompare ' + r.status);
-  } catch (e) { fehler.push('cryptocompare ' + (e && e.message || e)); }
+      fehler.push('kucoin ' + (j && j.msg ? String(j.msg).slice(0, 60) : r.status));
+    }
+  } catch (e) { fehler.push('kucoin ' + (e && e.message || e)); }
+  // OKX: frei, bis 300 Kerzen je Abruf (fuer laufende Signale genug). Neueste zuerst: [ts, o, h, l, c, vol, ...]
+  try {
+    const bar = { '4h': '4H', '1d': '1Dutc', '1w': '1Wutc' }[iv];
+    if (bar && !endTime) {
+      const r = await fetchWithTimeout(`https://www.okx.com/api/v5/market/candles?instId=${sym}-USDT&bar=${bar}&limit=300`, { timeoutMs: 12000 });
+      const j = r.ok ? await r.json() : null;
+      if (j && j.code === '0' && Array.isArray(j.data) && j.data.length) {
+        const rows = j.data.map(x => [+x[0], +x[1], +x[2], +x[3], +x[4], +x[5], +x[0] + ivMs - 1]).filter(x => x[4] > 0).sort((a, b) => a[0] - b[0]).slice(-limit);
+        if (rows.length) { rwLetzteQuelle = 'okx'; return { rows, quelle: 'okx' }; }
+      }
+      fehler.push('okx ' + (j && j.msg ? String(j.msg).slice(0, 60) : r.status));
+    }
+  } catch (e) { fehler.push('okx ' + (e && e.message || e)); }
   // Kraken: nur die letzten 720 Kerzen, ohne Blaettern
   try {
     const paar = RW_KRAKEN_PAAR[sym];
