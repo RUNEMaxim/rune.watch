@@ -8134,7 +8134,7 @@ async function handlePush(request, env, url) {
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
     const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
-      churn: !!p.churn, churnNetz: !!p.churnNetz, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false,
+      churn: !!p.churn, churnNetz: !!p.churnNetz, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false, gesund: p.gesund !== false,
       kauf: !!p.kauf, bericht: !!p.bericht, podcast: p.podcast !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
     // Nur THORChain-Adressen, nur wenn persoenliche Themen an sind, hoechstens 20.
@@ -8157,7 +8157,7 @@ async function handlePush(request, env, url) {
     if (!da) {
       if (!keys.p256dh || !keys.auth) return json({ error: 'NO_KEYS' }, env, 400);
       await env.DB.prepare('INSERT INTO push_subs (id, endpoint, p256dh, auth, prefs, lang, besitzer, at, fails, zustand, adressen) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, NULL, ?)')
-        .bind(id, sub.endpoint, keys.p256dh, keys.auth, JSON.stringify({ podcast: false, woche: false, tcy: false, abst: false }), body.lang === 'de' ? 'de' : 'en', Date.now(), '[]').run();
+        .bind(id, sub.endpoint, keys.p256dh, keys.auth, JSON.stringify({ podcast: false, woche: false, tcy: false, abst: false, gesund: false }), body.lang === 'de' ? 'de' : 'en', Date.now(), '[]').run();
     }
     await env.DB.prepare('INSERT INTO push_gebuehr (id, chain, usd, lang, unter, at) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(id) DO UPDATE SET chain = excluded.chain, usd = excluded.usd, lang = excluded.lang, unter = 0, at = excluded.at')
       .bind(id, chain, usd, body.lang === 'de' ? 'de' : 'en', Date.now()).run();
