@@ -7445,6 +7445,7 @@ async function handleKi(request, env, url, ctx) {
     // "aktiv" = es entsteht WIRKLICH gerade eine Ausgabe (Flag des Schritt-Ablaufs), nicht nur ein alter Schritt-Eintrag
     const aktiv = (await pushState(env, 'ki_news_aktiv').catch(() => null)) === '1';
     let gespeichert = {}; try { gespeichert = r ? JSON.parse(r.v) || {} : {}; } catch (e) {}
+    if (Array.isArray(gespeichert.eintraege)) gespeichert.eintraege = gespeichert.eintraege.filter(e => e && !rssFremd([e.titelEn, e.titelDe, e.textEn, e.textDe].join(' ')));
     return json(r ? { diagnose: { aktiv, letzterFehler: fehler || null, letzterVersuchUTC: zuletzt ? new Date(zuletzt).toISOString().slice(0, 16) : zuletzt, schritt: schrittInfo, kiLauf: laufKurz }, ...gespeichert, letzterFehler: fehler || null, letzterVersuch: zuletzt } : { leer: true, diagnose: { aktiv, schritt: schrittInfo }, letzterFehler: fehler || null, letzterVersuch: zuletzt, schluessel: !!env.ANTHROPIC_API_KEY, kiLauf: laufKurz }, env);
   }
   if (url.pathname === '/ki/feedback' && request.method === 'GET') {
@@ -7640,7 +7641,11 @@ const RSS_NEWS_FEEDS = [
   { url: 'https://www.theblock.co/rss.xml', quelle: 'The Block' },
   { url: 'https://thedefiant.io/api/feed', quelle: 'The Defiant' },
 ];
-const RSS_THEMA = /thorchain|\brune\b|rujira|\btcy\b|vultisig|thorswap|asgardex|\bruji\b/i;
+// "Rune" allein reicht NICHT (24.11.2026): Rune Christensen (Sky/MakerDAO) taucht staendig in Krypto-Feeds auf.
+// RUNE zaehlt nur in Grossbuchstaben bzw. als $RUNE; sonst muss THORChain & Co. drinstehen.
+const RSS_THEMA_I = /thorchain|rujira|\btcy\b|vultisig|thorswap|asgardex|\bruji\b|runepool/i;
+const RSS_THEMA = { test: t => RSS_THEMA_I.test(t) || /\$RUNE\b|\bRUNE\b/.test(String(t || '')) };
+const rssFremd = t => !RSS_THEMA.test(t) && /\brune\b|christensen|makerdao|\busds\b|\bsky\b/i.test(String(t || ''));
 const rssEnt = t => String(t || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ' ')
   .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n)).replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
   .replace(/&quot;/g, '"').replace(/&apos;|&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
@@ -7683,7 +7688,7 @@ async function rssNewsLauf(env, erzwingen = false) {
   const roh = await env.DB.prepare("SELECT v FROM bot_status WHERE k = 'ki:news'").first().catch(() => null);
   const d = roh ? JSON.parse(roh.v) : { eintraege: [] };
   const grenzeAlt = tag(jetzt - 90 * 864e5);
-  const alt = (Array.isArray(d.eintraege) ? d.eintraege : []).filter(e => e && e.datum >= grenzeAlt);
+  const alt = (Array.isArray(d.eintraege) ? d.eintraege : []).filter(e => e && e.datum >= grenzeAlt && !rssFremd([e.titelEn, e.titelDe, e.textEn, e.textDe].join(' ')));
   const daT = new Set(alt.map(e => schluessel(e.titelEn || e.titelDe))), daL = new Set(alt.map(e => normLink(e.link)));
   const neu = [];
   for (const x of kandidaten.sort((a, b) => b.ms - a.ms)) {
