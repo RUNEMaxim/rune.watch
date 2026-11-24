@@ -9035,6 +9035,58 @@ async function netzVerlaufLesen(env) {
   if (stand) delete stand.mimirWerte;
   return { ereignisse: ev, stand };
 }
+// NODE-GESUNDHEIT FUER BOND-PROVIDER (gewuenscht 24.11.2026: "Thorchain muss in der Kommunikation schneller
+// funktionieren ... die Bond Provider warnen, damit die das dem Operator sagen koennen ... alles automatisch").
+// Einmal je Lauf fuer das ganze Netz berechnet; pushEinAbo prueft damit die Nodes, bei denen das Abo Bond hat.
+// Warnungen (nur aktive Nodes): Chain-Scanner haengt hinterher (bestaetigt nach 10 Minuten) und verpasstes Update
+// (ab 2/3 Verbreitung der neuen Version).
+function rwVersionTeile(v) { return String(v || '').replace(/^v/i, '').split('.').map(x => parseInt(x, 10) || 0); }
+function rwVersionVgl(a, b) { const x = rwVersionTeile(a), y = rwVersionTeile(b); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; }
+function nodeGesundheitLage(nodes, hoehe) {
+  const N = Array.isArray(nodes) ? nodes : [];
+  const aktiv = N.filter(n => n && n.status === 'Active');
+  // Neueste Version, die sich gerade durchsetzt: hoechste Version, die mind. 10 % der aktiven Nodes (mind. 3) fahren.
+  const zaehl = {};
+  for (const n of aktiv) if (n.version) zaehl[n.version] = (zaehl[n.version] || 0) + 1;
+  const versionen = Object.keys(zaehl).sort((a, b) => rwVersionVgl(b, a));
+  const neueste = versionen.find(v => zaehl[v] >= Math.max(3, aktiv.length * 0.1)) || null;
+  const neuAnteil = neueste && aktiv.length ? Math.round(aktiv.filter(n => rwVersionVgl(n.version, neueste) >= 0).length / aktiv.length * 100) : null;
+  // Bezug je Chain = Median der aktiven Nodes (wie die Netzwerk-Lage), nicht der Hoechstwert.
+  const hoehen = {};
+  for (const n of aktiv) for (const o of (n.observe_chains || [])) { const c = String(o.chain).toUpperCase(); const h = Number(o.height) || 0; if (h > 0) (hoehen[c] = hoehen[c] || []).push(h); }
+  const median = {};
+  for (const [c, l] of Object.entries(hoehen)) { l.sort((x, y) => x - y); median[c] = l[Math.floor(l.length / 2)]; }
+  const slash = aktiv.map(n => Number(n.slash_points) || 0).sort((x, y) => x - y);
+  const slashMedian = slash.length ? slash[Math.floor(slash.length / 2)] : 0;
+  return { neueste, neuAnteil, median, slashMedian, hoehe: Number(hoehe) || 0, nodes: Object.fromEntries(N.map(n => [n.node_address, n])) };
+}
+// Liefert fuer EINE Node die aktuell zutreffenden Befunde: [{ k: stabiler Schluessel, titel, text, warten: ms bis Meldung }]
+function nodeBefunde(n, lage, de, lagMax) {
+  const out = [];
+  if (!n) return out;
+  const kurz = String(n.node_address).slice(-4);
+  const sag = de ? ' Sag deinem Betreiber Bescheid.' : ' Let your operator know.';
+  // NUR AKTIVE NODES, NUR GRAVIERENDES (gewuenscht 24.11.2026: "Nur aktive nodes betrachten. Bei echt gravierenden
+  // Sachen Nachrichten verschicken. Jails nicht. Wenn chains hinter hängen ist wichtig.") -> Chain-Rueckstand und
+  // verpasstes Update (erst ab 2/3 Verbreitung, dann droht der Rauswurf). Jail, Slash, Preflight: keine Meldung.
+  if (n.status !== 'Active') return out;
+  if (lage.neueste && n.version && rwVersionVgl(n.version, lage.neueste) < 0 && lage.neuAnteil != null && lage.neuAnteil >= 67) {
+    out.push({ k: 'ver:' + lage.neueste, warten: 0,
+      titel: de ? `Node …${kurz}: Update fehlt` : `Node …${kurz}: update missing`,
+      text: (de ? `Läuft auf ${n.version}, ${lage.neuAnteil} % der Nodes haben schon ${lage.neueste}.` : `Runs ${n.version}, ${lage.neuAnteil}% of nodes already run ${lage.neueste}.`) + sag });
+  }
+  {
+    for (const o of (n.observe_chains || [])) {
+      const c = String(o.chain).toUpperCase(), m = lage.median[c];
+      if (!m) continue;
+      const d = m - (Number(o.height) || 0), grenze = (lagMax && lagMax[c]) || 30;
+      if (d > grenze) out.push({ k: 'lag:' + c, warten: 10 * 60e3,
+        titel: de ? `Node …${kurz}: ${c} hängt hinterher` : `Node …${kurz}: ${c} is lagging`,
+        text: (de ? `${d} Blöcke hinter dem Netz, seit über 10 Minuten.` : `${d} blocks behind the network for over 10 minutes.`) + sag });
+    }
+  }
+  return out;
+}
 async function syncPushPersoenlich(env) {
   // NICHT UEBERLAPPEN (gewuenscht 19.11.2026: zuverlaessig): Laufen zwei Durchgaenge gleichzeitig (6-s-Takt und
   // Minuten-Takt), lesen beide denselben alten Zustand -- dieselbe Meldung kaeme doppelt. Eine Sperre mit Ablauf
@@ -9071,11 +9123,17 @@ async function syncPushPersoenlichLauf(env) {
   let stau = [];
   // HAENGENDE AUSZAHLUNGEN AUSGESCHALTET (gewuenscht 17.11.2026: "lass das Ganze raus")
   // try { stau = await churnStauLage(env, nodes); } catch (e) { stau = []; }
-  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
+  let gesundLage = null;
+  try {
+    const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock').catch(() => null);
+    const h = Array.isArray(lb) && lb[0] ? Number(lb[0].thorchain) || 0 : 0;
+    gesundLage = nodeGesundheitLage(nodes, h);
+  } catch (e) { gesundLage = null; }
+  for (const row of subs) { try { await pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau, gesundLage); } catch (e) { console.warn('[push] Abo', row.id, e?.message || e); } }
 }
 // EIN ABO (eigene Funktion, damit ein Fehler bei einem Abo nicht alle folgenden stoppt -- vorher
 // brach die ganze Schleife ab, und alle spaeteren Abos bekamen in diesem Durchgang nichts).
-async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
+async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau, gesundLage) {
   {
     let p = {}, z = {}, adr = [];
     try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
@@ -9278,6 +9336,25 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau) {
       }
       for (const k of Object.keys(gemeldet)) if (!offen.has(k) && Date.now() - gemeldet[k] > 3600e3) delete gemeldet[k];
       z.stau = gemeldet;
+    }
+    // NODE-GESUNDHEIT (24.11.2026): Bond-Provider erfahren sofort, wenn ihre Node ein Update verpasst, bei einer
+    // Chain hinterherhaengt, im Jail sitzt, viele Slash-Punkte sammelt oder nicht churn-bereit ist -- damit sie den
+    // Betreiber ansprechen. Je Befund EINE Meldung; erst nach "warten" (bestaetigt) und erst wieder, wenn er weg war.
+    if (p.gesund !== false && gesundLage) {
+      const g = z.gesund || {}, jetzt = Date.now(), offen = new Set();
+      for (const na of Object.keys(neu)) {
+        if (!(neu[na].b > 0.01)) continue;
+        for (const f of nodeBefunde(gesundLage.nodes[na], gesundLage, de, NETZ_LAG_MAX)) {
+          const k = na + '|' + f.k; offen.add(k);
+          const e = g[k] || (g[k] = { seit: jetzt, gemeldet: 0 });
+          if (e.gemeldet || jetzt - e.seit < f.warten) continue;
+          e.gemeldet = jetzt;
+          meldungen.push({ titel: f.titel, text: f.text, tag: 'rw-gesund-' + na + '-' + f.k });
+        }
+      }
+      // Erledigte Befunde vergessen (kommt das Problem wieder, gibt es eine neue Meldung)
+      for (const k of Object.keys(g)) if (!offen.has(k)) delete g[k];
+      z.gesund = g;
     }
     // TCY-AUSZAHLUNG (gewuenscht): Einmal je neuem Auszahlungstag. Betrag = gestakte TCY aller
     // Adressen x RUNE je TCY dieses Tages (dieselbe Referenz wie die TCY-Karte: tcy_native_ref,
