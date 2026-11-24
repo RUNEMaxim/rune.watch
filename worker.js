@@ -8137,7 +8137,7 @@ async function handlePush(request, env, url) {
     const aus = getStatsExcludedAddresses(env);
     const besitzer = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase())) ? 1 : 0;
     const p = body.prefs || {};
-    const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: !!p.spende && !!besitzer,
+    const prefs = JSON.stringify({ halt: !!p.halt, ops: !!p.ops, preis: !!p.preis, spende: p.spende !== false && !!besitzer,
       churn: !!p.churn, churnNetz: !!p.churnNetz, node: !!p.node, bond: !!p.bond, thorname: !!p.thorname, woche: p.woche !== false, tcy: p.tcy !== false, abst: p.abst !== false, gesund: p.gesund !== false, swaps: p.swaps !== false && !!besitzer,
       kauf: !!p.kauf, bericht: !!p.bericht, podcast: p.podcast !== false,
       preisOben: Number(p.preisOben) > 0 ? Number(p.preisOben) : null, preisUnten: Number(p.preisUnten) > 0 ? Number(p.preisUnten) : null });
@@ -8185,7 +8185,8 @@ async function pushAnThema(env, thema, baue) {
     let p = {}; try { p = JSON.parse(row.prefs || '{}'); } catch (e) {}
     // Neue Podcast-Folge: AUTOMATISCH fuer alle (gewuenscht) -- nur wer es ausdruecklich abgeschaltet hat, nicht
     // Swaps ueber rune.watch (nur Betreiber) ebenfalls standardmaessig an
-    if (thema === 'podcast' || thema === 'swaps' ? p[thema] === false : !p[thema]) continue;
+    // (24.11.2026) Spenden ebenso: Betreiber bekommt sie, ausser er hat sie ausdruecklich abgeschaltet
+    if (thema === 'podcast' || thema === 'swaps' || thema === 'spende' ? p[thema] === false : !p[thema]) continue;
     const nachricht = baue(row.lang === 'de', p, row);
     if (nachricht) jobs.push([row, nachricht]);
   }
