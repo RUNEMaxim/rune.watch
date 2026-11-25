@@ -5598,6 +5598,8 @@ function rwTagAnteile(nodes) {
     const fee = (parseInt(n.bond_providers && n.bond_providers.node_operator_fee || '0', 10) || 0) / 1e4;
     let summe = 0;
     for (const p of bp) summe += parseInt(p.bond, 10) || 0;
+    // Betreiber bekommt zusaetzlich die Operator-Gebuehr
+    if (n.node_operator_address && fee > 0) out[n.node_operator_address] = (out[n.node_operator_address] || 0) + award * fee / 1e8;
     if (summe <= 0) continue;
     for (const p of bp) {
       const b = parseInt(p.bond, 10) || 0;
