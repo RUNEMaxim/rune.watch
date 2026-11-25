@@ -9423,7 +9423,9 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau, ges
                                  : (de ? 'Keine neuen Rewards (kein Churn)' : 'No new rewards (no churn)'));
           teile.push((de ? 'Bond ' : 'Bond ') + runeTxt(bondJetzt) + ' RUNE');
           if (preis) teile.push('RUNE $' + preis.toFixed(3) + (pr != null ? ` (${pr >= 0 ? '+' : ''}${pr.toFixed(1)} %)` : ''));
-          meldungen.push({ titel: (de ? 'Deine Woche' : 'Your week') + (w.rune > 0.01 ? ': +' + runeTxt(w.rune) + ' RUNE' : ''), text: teile.join(' \u00b7 ') + vultisigHinweis(de, 'bond'), tag: 'rw-woche-' + w.key });
+          // 26.11.2026 (gewuenscht): im Wochen-Review dezent auf Spenden hinweisen; Antippen oeffnet das Spenden-Fenster (#donate).
+          const spendeTxt = de ? '\n\u2665\ufe0e Hilft dir rune.watch? \u00dcber eine kleine Spende freue ich mich.' : '\n\u2665\ufe0e Does rune.watch help you? A small tip is always appreciated.';
+          meldungen.push({ titel: (de ? 'Deine Woche' : 'Your week') + (w.rune > 0.01 ? ': +' + runeTxt(w.rune) + ' RUNE' : ''), text: teile.join(' \u00b7 ') + vultisigHinweis(de, 'bond') + spendeTxt, tag: 'rw-woche-' + w.key, url: '/#donate' });
         }
         z.woche = { key: wocheKey, rune: 0, churns: 0, preis0: preis || null };
       }
