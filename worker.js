@@ -5637,28 +5637,36 @@ async function rwTagAwardSchritt(env) {
       }
     } else rwTagAwardLetzt = heute;
   }
-  // Nachholen: hoechstens ein fehlender Tag (letzte 14 Tage) je Aufruf, Stand bei 00:00 UTC aus dem Archiv.
-  const minute = new Date(jetzt).getUTCMinutes();
-  if (minute % 5 !== 4) return;
+  // Nachholen (schneller, 25.11.2026): jede Minute bis zu 4 fehlende Tage (letzte 14 Tage), Stand bei 00:00 UTC aus dem Archiv.
+  // 14 Tage sind damit nach wenigen Minuten komplett. Nichts mehr offen -> nur eine kleine DB-Abfrage je Minute.
+  if (rwTagNachholFertig === heute) return;
   const res = await env.DB.prepare('SELECT tag FROM rw_tag_grenze WHERE tag >= ?').bind(new Date(jetzt - 14 * 864e5).toISOString().slice(0, 10)).all().catch(() => null);
   const vorhanden = new Set(((res && res.results) || []).map(r => r.tag));
   const fehlschlag = Number(await pushState(env, 'tag_award_fehl').catch(() => 0)) || 0;
+  let z = 0, tz = null, erledigt = 0, offen = 0;
   for (let k = 0; k <= 14; k++) {
     const ms0 = Math.floor(jetzt / 864e5) * 864e5 - k * 864e5, tag = new Date(ms0).toISOString().slice(0, 10);
     if (vorhanden.has(tag) || (k === 0 && new Date(jetzt).getUTCHours() === 0)) continue;
+    // Tage, die das Archiv nicht (mehr) hat: 6 h Pause fuer diesen und aeltere Tage
     if (fehlschlag && fehlschlag >= ms0 && Date.now() - fehlschlag < 6 * 3600e3) continue;
-    const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
-    const z = Math.max(0, ...(Array.isArray(lb) ? lb : []).map(x => Number(x && x.thorchain) || 0));
-    const tz = await rwTagBlockZeit(z) || jetzt;
+    offen++;
+    if (erledigt >= 4) break;
+    if (!z) {
+      const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+      z = Math.max(0, ...(Array.isArray(lb) ? lb : []).map(x => Number(x && x.thorchain) || 0));
+      tz = await rwTagBlockZeit(z) || jetzt;
+    }
     let h = Math.round(z - (tz - ms0) / 6000), t = null;
     for (let i = 0; i < 4; i++) { t = await rwTagBlockZeit(h); if (t == null) break; const d = Math.round((ms0 - t) / 6000); if (Math.abs(d) <= 1) { if (t < ms0) { h++; t += 6000; } break; } h += d; }
     try {
       const nodes = await fetchNodesAtHeight(h);
       await rwTagSpeichern(env, tag, h, t || ms0, nodes);
-    } catch (e) { await pushStateSet(env, 'tag_award_fehl', ms0).catch(() => {}); }
-    return;
+      erledigt++;
+    } catch (e) { await pushStateSet(env, 'tag_award_fehl', ms0).catch(() => {}); break; }
   }
+  if (!offen) rwTagNachholFertig = heute;
 }
+let rwTagNachholFertig = '';
 async function rwTagRewardsLesen(env, url) {
   await rwTagAwardTabellen(env);
   const adr = String(url.searchParams.get('adr') || '').split(',').map(s => s.trim()).filter(a => /^thor1[0-9a-z]{20,80}$/i.test(a)).slice(0, 20);
