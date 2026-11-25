@@ -9373,13 +9373,22 @@ async function pushEinAbo(env, row, nodes, churnH, preis, heute, abst, stau, ges
         for (const f of nodeBefunde(gesundLage.nodes[na], gesundLage, de, NETZ_LAG_MAX)) {
           const k = na + '|' + f.k; offen.add(k);
           const e = g[k] || (g[k] = { seit: jetzt, gemeldet: 0 });
+          delete e.weg; // wieder da -> kein erneuter Push, solange er nicht 2 Std. am Stueck weg war
           if (e.gemeldet || jetzt - e.seit < f.warten) continue;
           e.gemeldet = jetzt;
           meldungen.push({ titel: f.titel, text: f.text, tag: 'rw-gesund-' + na + '-' + f.k });
         }
       }
-      // Erledigte Befunde vergessen (kommt das Problem wieder, gibt es eine neue Meldung)
-      for (const k of Object.keys(g)) if (!offen.has(k)) delete g[k];
+      // Erledigte Befunde vergessen -- aber mit Puffer (25.11.2026, gemeldet: LTC-Rueckstand kam DOPPELT, weil der
+      // Rueckstand um die Grenze pendelte: kurz weg -> vergessen -> wieder da -> neuer Push). Gemeldete Befunde erst
+      // nach 2 Std. ohne Problem loeschen; nicht gemeldete (noch in der Wartezeit) sofort.
+      for (const k of Object.keys(g)) {
+        if (offen.has(k)) continue;
+        const e = g[k];
+        if (!e.gemeldet) { delete g[k]; continue; }
+        if (!e.weg) e.weg = jetzt;
+        else if (jetzt - e.weg > 2 * 3600e3) delete g[k];
+      }
       z.gesund = g;
     }
     // TCY-AUSZAHLUNG (gewuenscht): Einmal je neuem Auszahlungstag. Betrag = gestakte TCY aller
