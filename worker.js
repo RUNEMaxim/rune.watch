@@ -5576,6 +5576,99 @@ async function handleSlashCheck(request, env) {
   }
 }
 
+// TAGES-REWARDS SERVERSEITIG (25.11.2026, gewuenscht: "es muss auch ohne Oeffnen der App funktionieren").
+// Einmal pro Tag kurz nach 00:00 UTC: Stand aller Nodes (angesammelter Reward, Bond-Provider, Operator-Gebuehr)
+// -> je Bond-Provider-Adresse der eigene Anteil am angesammelten Reward (nach Gebuehr, in RUNE).
+// Die App rechnet daraus: Tag = Anteil(naechste Grenze) - Anteil(diese Grenze) + Auszahlungen dazwischen.
+// Zusaetzlich werden fehlende Tage der letzten 14 Tage aus dem Archiv-Node nachgeholt (ein Tag je Minute).
+let rwTagAwardOk = false, rwTagAwardLetzt = '';
+async function rwTagAwardTabellen(env) {
+  if (rwTagAwardOk) return;
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS rw_tag_grenze (tag TEXT PRIMARY KEY, h INTEGER, ms INTEGER)').run();
+  await env.DB.prepare('CREATE TABLE IF NOT EXISTS rw_tag_bp (tag TEXT NOT NULL, adr TEXT NOT NULL, v REAL NOT NULL, PRIMARY KEY (tag, adr))').run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS rw_tag_bp_adr ON rw_tag_bp (adr, tag)').run();
+  rwTagAwardOk = true;
+}
+function rwTagAnteile(nodes) {
+  const out = {};
+  for (const n of Array.isArray(nodes) ? nodes : []) {
+    const award = parseInt(n && n.current_award, 10) || 0;
+    if (award <= 0) continue;
+    const bp = (n.bond_providers && n.bond_providers.providers) || [];
+    const fee = (parseInt(n.bond_providers && n.bond_providers.node_operator_fee || '0', 10) || 0) / 1e4;
+    let summe = 0;
+    for (const p of bp) summe += parseInt(p.bond, 10) || 0;
+    if (summe <= 0) continue;
+    for (const p of bp) {
+      const b = parseInt(p.bond, 10) || 0;
+      if (b <= 0 || !p.bond_address) continue;
+      out[p.bond_address] = (out[p.bond_address] || 0) + b / summe * award * (1 - fee) / 1e8;
+    }
+  }
+  return out;
+}
+async function rwTagBlockZeit(h) {
+  try {
+    const j = await fetchFromBases(getThornodeBases({ needsHeight: true }), `/cosmos/base/tendermint/v1beta1/blocks/${h}`);
+    const t = Date.parse(j && j.block && j.block.header && j.block.header.time);
+    return Number.isFinite(t) ? t : null;
+  } catch (e) { return null; }
+}
+async function rwTagSpeichern(env, tag, h, ms, nodes) {
+  const anteile = rwTagAnteile(nodes);
+  const stmts = [env.DB.prepare('INSERT OR REPLACE INTO rw_tag_grenze (tag, h, ms) VALUES (?, ?, ?)').bind(tag, h, ms)];
+  for (const [adr, v] of Object.entries(anteile)) stmts.push(env.DB.prepare('INSERT OR REPLACE INTO rw_tag_bp (tag, adr, v) VALUES (?, ?, ?)').bind(tag, adr, v));
+  for (let i = 0; i < stmts.length; i += 400) await env.DB.batch(stmts.slice(i, i + 400));
+}
+async function rwTagAwardSchritt(env) {
+  const jetzt = Date.now(), heute = new Date(jetzt).toISOString().slice(0, 10);
+  await rwTagAwardTabellen(env);
+  if (rwTagAwardLetzt !== heute) {
+    const da = await env.DB.prepare('SELECT tag FROM rw_tag_grenze WHERE tag = ?').bind(heute).first().catch(() => null);
+    if (!da) {
+      // Live-Stand gilt nur in der ersten Stunde nach Mitternacht als Tagesgrenze, sonst Archiv (unten).
+      if (new Date(jetzt).getUTCHours() === 0) {
+        const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+        const h = Math.max(0, ...(Array.isArray(lb) ? lb : []).map(x => Number(x && x.thorchain) || 0));
+        const nodes = await fetchNodes();
+        if (h > 0 && Array.isArray(nodes) && nodes.length) { await rwTagSpeichern(env, heute, h, jetzt, nodes); rwTagAwardLetzt = heute; return; }
+      }
+    } else rwTagAwardLetzt = heute;
+  }
+  // Nachholen: hoechstens ein fehlender Tag (letzte 14 Tage) je Aufruf, Stand bei 00:00 UTC aus dem Archiv.
+  const minute = new Date(jetzt).getUTCMinutes();
+  if (minute % 5 !== 4) return;
+  const res = await env.DB.prepare('SELECT tag FROM rw_tag_grenze WHERE tag >= ?').bind(new Date(jetzt - 14 * 864e5).toISOString().slice(0, 10)).all().catch(() => null);
+  const vorhanden = new Set(((res && res.results) || []).map(r => r.tag));
+  const fehlschlag = Number(await pushState(env, 'tag_award_fehl').catch(() => 0)) || 0;
+  for (let k = 0; k <= 14; k++) {
+    const ms0 = Math.floor(jetzt / 864e5) * 864e5 - k * 864e5, tag = new Date(ms0).toISOString().slice(0, 10);
+    if (vorhanden.has(tag) || (k === 0 && new Date(jetzt).getUTCHours() === 0)) continue;
+    if (fehlschlag && fehlschlag >= ms0 && Date.now() - fehlschlag < 6 * 3600e3) continue;
+    const lb = await fetchFromBases(getThornodeBases(), '/thorchain/lastblock');
+    const z = Math.max(0, ...(Array.isArray(lb) ? lb : []).map(x => Number(x && x.thorchain) || 0));
+    const tz = await rwTagBlockZeit(z) || jetzt;
+    let h = Math.round(z - (tz - ms0) / 6000), t = null;
+    for (let i = 0; i < 4; i++) { t = await rwTagBlockZeit(h); if (t == null) break; const d = Math.round((ms0 - t) / 6000); if (Math.abs(d) <= 1) { if (t < ms0) { h++; t += 6000; } break; } h += d; }
+    try {
+      const nodes = await fetchNodesAtHeight(h);
+      await rwTagSpeichern(env, tag, h, t || ms0, nodes);
+    } catch (e) { await pushStateSet(env, 'tag_award_fehl', ms0).catch(() => {}); }
+    return;
+  }
+}
+async function rwTagRewardsLesen(env, url) {
+  await rwTagAwardTabellen(env);
+  const adr = String(url.searchParams.get('adr') || '').split(',').map(s => s.trim()).filter(a => /^thor1[0-9a-z]{20,80}$/i.test(a)).slice(0, 20);
+  if (!adr.length) return { tage: [] };
+  const ph = adr.map(() => '?').join(',');
+  const g = await env.DB.prepare('SELECT tag, h, ms FROM rw_tag_grenze ORDER BY tag').all();
+  const v = await env.DB.prepare(`SELECT tag, SUM(v) AS v FROM rw_tag_bp WHERE adr IN (${ph}) GROUP BY tag`).bind(...adr).all();
+  const vm = {};
+  for (const r of (v && v.results) || []) vm[r.tag] = r.v;
+  return { tage: ((g && g.results) || []).map(r => ({ tag: r.tag, h: r.h, ms: r.ms, v: vm[r.tag] || 0 })) };
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
@@ -5746,6 +5839,7 @@ export default {
       }
       if (url.pathname === '/gebuehren') return json(await gebuehrenUsd().catch(() => null) || {}, env);
       if (url.pathname === '/netz-verlauf') return json(await netzVerlaufLesen(env).catch(() => ({ ereignisse: [], stand: null })), env);
+      if (url.pathname === '/tag-rewards') return json(await rwTagRewardsLesen(env, url).catch(e => ({ tage: [], fehler: String(e && e.message || e).slice(0, 120) })), env);
       if (url.pathname === '/node-geo') {
         // SOFORT ANTWORTEN (gemeldet 19.11.2026: "Karte muss sofort erscheinen"): gespeicherten Stand sofort liefern,
         // ist er aelter als 6 h, im Hintergrund erneuern. Nur ganz ohne Stand wird gewartet.
@@ -6058,6 +6152,8 @@ export default {
       })());
       // Netzwerk-Verlauf: jede Minute Zustand vergleichen und Wechsel speichern
       ctx.waitUntil(netzVerlaufSchritt(env).catch(e => console.warn('[netz-verlauf]', e && e.message || e)));
+      // Tages-Rewards: Stand aller Bond-Provider je Tagesgrenze speichern (auch ohne geoeffnete App)
+      ctx.waitUntil(rwTagAwardSchritt(env).catch(e => console.warn('[tag-award]', e && e.message || e)));
       ctx.waitUntil(syncMimirDune(env).catch(e => console.warn('[mimir-dune]', e && e.message || e)));
       // Node-Weltkarte vorwaermen (Minute 17 jeder Stunde): so liegt immer ein frischer Stand bereit.
       if (minute === 17) ctx.waitUntil(nodeGeo(env).catch(e => console.warn('[node-geo]', e && e.message || e)));
