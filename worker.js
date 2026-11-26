@@ -6089,7 +6089,8 @@ export default {
         try { return await handlePush(request, env, url); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
       }
       if (url.pathname.startsWith('/ki/')) {
-        try { return await handleKi(request, env, url, ctx); } catch (e) { return json({ error: e?.message || String(e) }, env, 500); }
+        // KI komplett entfernt (26.11.2026): keine Anfragen an Anthropic mehr moeglich
+        return json({ error: 'KI_AUS' }, env, 410);
       }
       if (url.pathname === '/donation-history') {
         try {
@@ -6155,11 +6156,8 @@ export default {
       // bevor sie etwas speichern konnte. Jetzt: Minuten 2, 7, 12 ... nur KI (+ Push), sonst Bot & Co.
       const minute = new Date(event.scheduledTime || Date.now()).getUTCMinutes();
       // Entsteht gerade eine News-Ausgabe, bekommt die KI zusaetzlich jede gerade Minute (ein Schritt je Lauf).
-      ctx.waitUntil((async () => {
-        // Entsteht gerade eine Ausgabe: JEDE Minute ein Schritt (vorher jede zweite -- gemeldet: "dauert zu lange")
-        const kiDran = minute % 5 === 2 || await kiNewsAktiv(env);
-        if (kiDran) await kiPlan(env); else await rwPlanLaeufe(env);
-      })());
+      // KI KOMPLETT ENTFERNT (26.11.2026, gewuenscht): keine KI-Laeufe mehr, nur noch Bot & Co.
+      ctx.waitUntil(rwPlanLaeufe(env));
       // Netzwerk-Verlauf: jede Minute Zustand vergleichen und Wechsel speichern
       ctx.waitUntil(netzVerlaufSchritt(env).catch(e => console.warn('[netz-verlauf]', e && e.message || e)));
       // Tages-Rewards: Stand aller Bond-Provider je Tagesgrenze speichern (auch ohne geoeffnete App)
@@ -6182,7 +6180,6 @@ export default {
       })());
       return;
     }
-    ctx.waitUntil(kiPlan(env));
     ctx.waitUntil(runRefreshCycle(env));
     // FIX (gemeldet: "Run status" blieb stehen): falls kein Minuten-Takt eingerichtet ist, laufen die Bot-Teile
     // hier mit -- sie pruefen selbst, ob sie faellig sind.
@@ -7241,7 +7238,8 @@ const KI_SITUATION_DE = { rsiTief: 'RSI unter 30', rsiHoch: 'RSI über 70', bbUn
   squeezeAusbruchAuf: 'Ausbruch nach oben aus enger Phase', squeezeAusbruchAb: 'Ausbruch nach unten aus enger Phase', divBull: 'bullische RSI-Divergenz', divBear: 'bärische RSI-Divergenz',
   volVersiegt: 'Volumen versiegt nach starker Bewegung', atrSprung: 'Schwankung springt an', tiefHammerVol: '30-Tage-Tief mit Hammer und hohem Volumen', hochSternVol: '30-Tage-Hoch mit langem oberem Docht und hohem Volumen' };
 const KI_PHASE_DE = { auf: 'Aufwärtstrend', ab: 'Abwärtstrend', seit: 'Seitwärtsphase' };
-async function kiText(env, { system, nachrichten, maxTokens = 600 }) {
+async function kiText(env, ...rwKiRest) { throw new Error('KI_AUS'); }
+async function kiTextAlt(env,{ system, nachrichten, maxTokens = 600 }) {
   // KI AUS (gewuenscht 23.11.2026: "keine Credits verbrauchen"): Claude nur, wenn die Worker-Variable KI_AN = "1" ist.
   if (!env.ANTHROPIC_API_KEY || env.KI_AN !== '1') throw new Error('NO_KEY');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -7426,7 +7424,8 @@ async function kiWerkzeugAusfuehren(env, name, input) {
   return { fehler: 'unbekanntes Werkzeug' };
 }
 let kiWebsucheAus = false;
-async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, maxRunden = 5, abschluss = null, webSuchen = 3 }) {
+async function kiAgent(env, ...rwKiRest) { throw new Error('KI_AUS'); }
+async function kiAgentAlt(env,{ system, nachrichten, maxTokens = 1200, modell, maxRunden = 5, abschluss = null, webSuchen = 3 }) {
   // abschluss: optionales Werkzeug { name, description, input_schema } -- ruft das Modell es auf, ist dessen
   // Eingabe das Ergebnis (strukturiert, ohne Text-Parsen). In der letzten Runde wird es erzwungen.
   if (!env.ANTHROPIC_API_KEY || env.KI_AN !== '1') throw new Error('NO_KEY');
@@ -7477,6 +7476,17 @@ async function kiAgent(env, { system, nachrichten, maxTokens = 1200, modell, max
   throw new Error('KI_ZU_VIELE_RUNDEN');
 }
 // Tageslimit je Anschluss (IP nur als Tages-Hash gespeichert)
+// BETREIBER-PRUEFUNG (26.11.2026): geheimer Schluessel OWNER_KEY (Worker-Secret, mind. 16 Zeichen).
+// Die App schickt ihn im JSON-Body als ownerKey mit; er wird einmal per rune.watch/#owner=<SCHLUESSEL>
+// auf dem Geraet hinterlegt. Vergleich in konstanter Zeit. Ohne gesetztes Secret: niemand ist Betreiber.
+function istBetreiber(env, body) {
+  const soll = env && env.OWNER_KEY ? String(env.OWNER_KEY).trim() : '';
+  const ist = body && typeof body.ownerKey === 'string' ? body.ownerKey.trim() : '';
+  if (soll.length < 16 || ist.length !== soll.length) return false;
+  let d = 0;
+  for (let i = 0; i < soll.length; i++) d |= soll.charCodeAt(i) ^ ist.charCodeAt(i);
+  return d === 0;
+}
 async function kiLimit(env, request, art, max) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS ki_nutzung (tag TEXT, wer TEXT, art TEXT, n INTEGER, PRIMARY KEY (tag, wer, art))').run();
   const tag = new Date().toISOString().slice(0, 10);
@@ -7519,8 +7529,8 @@ async function handleKi(request, env, url, ctx) {
   if (url.pathname === '/ki/news-neu' && request.method === 'POST') {
     // "Jetzt aktualisieren" aus der App (nur Betreiber-Adressen): neue Ausgabe vormerken
     const b = await request.json().catch(() => ({}));
-    const aus = getStatsExcludedAddresses(env);
-    if (!(Array.isArray(b.adressen) ? b.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase()))) return json({ error: 'NUR_TEST' }, env, 403);
+    // SICHERHEIT (26.11.2026): nicht mehr ueber die (oeffentliche) Adresse, sondern nur mit dem geheimen OWNER_KEY
+    if (!istBetreiber(env, b)) return json({ error: 'NUR_TEST' }, env, 403);
     await sicherePushTabellen(env);
     await pushStateSet(env, 'ki_news_at', 0); await pushStateSet(env, 'ki_news_fehler', ''); await pushStateSet(env, 'ki_news_schritt', JSON.stringify({ s: 'vorgemerkt', t: new Date().toISOString().slice(11, 19) + ' UTC' }));
     await pushStateSet(env, 'ki_news_aktiv', '1');
@@ -7571,11 +7581,9 @@ async function handleKi(request, env, url, ctx) {
   if (!body || typeof body !== 'object') return json({ error: 'BAD_REQUEST' }, env, 400);
   const de = body.lang === 'de';
   // TESTPHASE: nur fuer die eigenen Adressen (STATS_EXCLUDED_ADDRESSES), bis KI_FUER_ALLE = "1" gesetzt ist
-  if (!kiFuerAlle(env)) {
-    const aus = getStatsExcludedAddresses(env);
-    const frei = (Array.isArray(body.adressen) ? body.adressen : []).some(a => aus.has(String(a || '').trim().toLowerCase()));
-    if (!frei) return json({ error: 'NUR_TEST' }, env, 403);
-  }
+  // SICHERHEIT (26.11.2026): Freischaltung nur noch mit dem geheimen OWNER_KEY. Vorher reichte es, eine
+  // Betreiber-Adresse mitzuschicken -- die ist oeffentlich, jeder haette so KI-Guthaben verbrauchen koennen.
+  if (!kiFuerAlle(env) && !istBetreiber(env, body)) return json({ error: 'NUR_TEST' }, env, 403);
   const kurz = (x, n) => { const s = JSON.stringify(x == null ? null : x); return s.length > n ? s.slice(0, n) + '…' : s; };
   if (url.pathname === '/ki/frage') {
     if (!(await kiLimit(env, request, 'frage', 40))) return json({ error: 'LIMIT' }, env, 429);
