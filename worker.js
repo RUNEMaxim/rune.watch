@@ -5725,7 +5725,11 @@ export default {
           gespeichert = await env.DB.prepare('SELECT at, v FROM ledger_cache WHERE adr = ?').bind(adrL).first();
         } catch (e) {}
         const ausSpeicher = (extra) => new Response(JSON.stringify({ ...JSON.parse(gespeichert.v), ...extra }), { headers: { 'Content-Type': 'application/json', ...corsHeaders(env) } });
-        if (gespeichert && Date.now() - gespeichert.at < 10 * 60e3 && url.searchParams.get('fresh') !== '1') return ausSpeicher({ zwischengespeichert: true });
+        // Nach einem Churn sofort neu laden (gewuenscht: "nur sofort aktualisieren wenn gechurnt wird"): liegt der
+        // letzte bekannte Churn nach dem Speicherzeitpunkt, gilt der Zwischenspeicher nicht.
+        let letzterChurn = 0;
+        try { const c = await env.DB.prepare('SELECT MAX(date_ms) AS t FROM churns_cache').first(); letzterChurn = Number(c && c.t) || 0; } catch (e) {}
+        if (gespeichert && Date.now() - gespeichert.at < 6 * 3600e3 && !(letzterChurn > gespeichert.at) && url.searchParams.get('fresh') !== '1') return ausSpeicher({ zwischengespeichert: true });
         let frisch = null, antwort = null;
         try { antwort = await handleBondLedger(request, env); frisch = await antwort.clone().json(); } catch (e) { frisch = null; }
         if (frisch && frisch.success) {
@@ -11390,7 +11394,20 @@ async function runRefreshCycle(env) {
   // Budget an Unteranfragen aufgebraucht, scheiterte der Feed-Abruf still. Gedrosselt kostet er nur 1 D1-Abfrage.
   await schritt('Podcast-Meldung', () => syncPodcastMeldung(env));
   await schritt('Dune NEAR', () => syncNearDune(env));
+  // NACH EINEM CHURN SOFORT (26.11.2026, gewuenscht): Kommt ein neuer Churn hinzu, werden alle Adressen sofort fuer die
+  // Neuberechnung der Bond-Historie vorgemerkt und der Ledger-Zwischenspeicher geleert -- nicht erst nach dem normalen Intervall.
+  let rwChurnVor = 0;
+  try { const c = await env.DB.prepare('SELECT MAX(height) AS h FROM churns_cache').first(); rwChurnVor = Number(c && c.h) || 0; } catch (e) {}
   await schritt('Churns', () => refreshChurnsCache(env));
+  await schritt('Churn -> Historie neu', async () => {
+    const c = await env.DB.prepare('SELECT MAX(height) AS h FROM churns_cache').first();
+    const nach = Number(c && c.h) || 0;
+    if (rwChurnVor && nach > rwChurnVor) {
+      await env.DB.prepare("UPDATE tracked_addresses SET last_refreshed_at = NULL WHERE status = 'done'").run();
+      await env.DB.prepare('DELETE FROM ledger_cache').run().catch(() => {});
+      console.log('[rune-rewards-backend] Neuer Churn', nach, '-> Bond-Historie aller Adressen wird sofort neu berechnet');
+    }
+  });
   await schritt('Swap-Paare', () => collectSwapPairStats(env));
   await schritt('Node-Historie', () => syncNodeHistory(env));
   await schritt('Node-Epochen', () => syncNodeEpochs(env));
