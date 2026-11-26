@@ -1,5 +1,26 @@
 // rune-rewards-backend — kompakte Fassung ohne Kommentare (Code identisch zu worker.js)
 // VORHER: migration.sql in der D1-Console ausführen.
+
+// AUSWEICHEN BEI 429 (26.11.2026, gemeldet: "Could not load reward history · HTTP_429 (gateway.liquify.com/.../thorchain_midgard/v2)"):
+// Drosselt Liquify den Worker, fragt jede Midgard-/THORNode-Anfrage automatisch beim offiziellen Endpunkt nach
+// (nur GET), danach einmal mit kurzer Pause erneut beim Original. Gilt fuer den ganzen Worker, ohne jede Stelle anzufassen.
+const RW_AUSWEICH = [
+  ['https://gateway.liquify.com/chain/thorchain_midgard/v2', 'https://midgard.thorchain.network/v2'],
+  ['https://gateway.liquify.com/chain/thorchain_api', 'https://public-thornode.nativeswap.io'],
+];
+const rwFetchOriginal = globalThis.fetch.bind(globalThis);
+globalThis.fetch = async (input, init) => {
+  const url = typeof input === 'string' ? input : (input instanceof URL ? input.href : (input && input.url) || '');
+  const methode = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase();
+  const r = await rwFetchOriginal(input, init);
+  if (r.status !== 429 || methode !== 'GET' || !url) return r;
+  const paar = RW_AUSWEICH.find(([von]) => url.startsWith(von));
+  if (!paar) return r;
+  const opt = init ? { ...init } : (typeof input === 'object' && input.headers ? { headers: input.headers } : undefined);
+  try { const r2 = await rwFetchOriginal(paar[1] + url.slice(paar[0].length), opt); if (r2.ok) return r2; } catch (e) {}
+  try { await new Promise(res => setTimeout(res, 900)); const r3 = await rwFetchOriginal(url, opt); if (r3.ok) return r3; } catch (e) {}
+  return r;
+};
 //
 // NEU in dieser Fassung: /thornode-timeline (vierte Seite "Entwicklung").
 // VORHER AUSSERDEM einmalig in der D1-Console ausführen:
