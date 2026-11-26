@@ -17,7 +17,9 @@ globalThis.fetch = async (input, init) => {
   const paar = RW_AUSWEICH.find(([von]) => url.startsWith(von));
   if (!paar) return r;
   const opt = init ? { ...init } : (typeof input === 'object' && input.headers ? { headers: input.headers } : undefined);
-  try { const r2 = await rwFetchOriginal(paar[1] + url.slice(paar[0].length), opt); if (r2.ok) return r2; } catch (e) {}
+  for (const alt of paar.slice(1)) {
+    try { const r2 = await rwFetchOriginal(alt + url.slice(paar[0].length), opt); if (r2.ok) return r2; } catch (e) {}
+  }
   try { await new Promise(res => setTimeout(res, 900)); const r3 = await rwFetchOriginal(url, opt); if (r3.ok) return r3; } catch (e) {}
   return r;
 };
@@ -11524,7 +11526,21 @@ async function refreshOneAddress(env, addressRow, now) {
     }
   }
 
-  const ledger = await fetchBondLedger(address);
+  // WENIGER MIDGARD-ANFRAGEN (26.11.2026, HTTP 429): Der Hintergrundlauf fragte den Ledger jeder Adresse bei jedem
+  // Durchgang neu ab. Jetzt: gespeicherten Ledger nutzen, solange er juenger als 6 h ist und seitdem kein Churn war.
+  let ledger = null;
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS ledger_cache (adr TEXT PRIMARY KEY, at INTEGER, v TEXT)').run();
+    const lc = await env.DB.prepare('SELECT at, v FROM ledger_cache WHERE adr = ?').bind(String(address).toLowerCase()).first();
+    const ch = await env.DB.prepare('SELECT MAX(date_ms) AS t FROM churns_cache').first();
+    if (lc && now - lc.at < 6 * 3600e3 && !((Number(ch && ch.t) || 0) > lc.at)) ledger = JSON.parse(lc.v);
+  } catch (e) { ledger = null; }
+  if (!ledger) {
+    ledger = await fetchBondLedger(address);
+    if (ledger && ledger.success) {
+      try { await env.DB.prepare('INSERT OR REPLACE INTO ledger_cache (adr, at, v) VALUES (?, ?, ?)').bind(String(address).toLowerCase(), now, JSON.stringify(ledger)).run(); } catch (e) {}
+    }
+  }
   const nodeAddresses = [...new Set([...currentNodeAddresses, ...(ledger.nodeAddresses || [])])];
 
   await env.DB
