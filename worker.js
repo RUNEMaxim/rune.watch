@@ -5715,7 +5715,25 @@ export default {
         return await handleSlashCheck(request, env);
       }
       if (url.pathname === '/bond-ledger') {
-        return await handleBondLedger(request, env);
+        // ZWISCHENSPEICHER (26.11.2026, gegen HTTP 429 bei Liquify): Ergebnis je Adresse 10 Minuten aus D1 liefern
+        // statt bei jedem Oeffnen der App neu bei Midgard zu fragen. Scheitert ein frischer Abruf, gilt der letzte gute Stand.
+        const adrL = String(url.searchParams.get('address') || '').trim().toLowerCase();
+        if (!adrL) return await handleBondLedger(request, env);
+        let gespeichert = null;
+        try {
+          await env.DB.prepare('CREATE TABLE IF NOT EXISTS ledger_cache (adr TEXT PRIMARY KEY, at INTEGER, v TEXT)').run();
+          gespeichert = await env.DB.prepare('SELECT at, v FROM ledger_cache WHERE adr = ?').bind(adrL).first();
+        } catch (e) {}
+        const ausSpeicher = (extra) => new Response(JSON.stringify({ ...JSON.parse(gespeichert.v), ...extra }), { headers: { 'Content-Type': 'application/json', ...corsHeaders(env) } });
+        if (gespeichert && Date.now() - gespeichert.at < 10 * 60e3 && url.searchParams.get('fresh') !== '1') return ausSpeicher({ zwischengespeichert: true });
+        let frisch = null, antwort = null;
+        try { antwort = await handleBondLedger(request, env); frisch = await antwort.clone().json(); } catch (e) { frisch = null; }
+        if (frisch && frisch.success) {
+          try { await env.DB.prepare('INSERT OR REPLACE INTO ledger_cache (adr, at, v) VALUES (?, ?, ?)').bind(adrL, Date.now(), JSON.stringify(frisch)).run(); } catch (e) {}
+          return antwort;
+        }
+        if (gespeichert) return ausSpeicher({ zwischengespeichert: true, veraltet: true, letzterFehler: frisch && frisch.errorDetail || null });
+        return antwort || json({ success: false, errorDetail: 'LEDGER_FAILED' }, env);
       }
       if (url.pathname === '/balance') {
         return await handleBalance(request, env, ctx);
