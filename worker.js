@@ -10680,6 +10680,7 @@ const RW_SITUATIONEN = {
   tiefHammerVol: r => r.tief30 === 1 && r.dochtu > 0.5 && r.volr > 1.5,
   hochSternVol: r => r.hoch30 === 1 && r.dochto > 0.5 && r.volr > 1.5,
 };
+const RW_KERZE_MS = { '4h': 4 * 3600e3, '1d': 864e5, '1w': 7 * 864e5 };
 async function botSignaleLernen(env, iv) {
   const H = RW_BOT_EBENEN[iv].h;
   await botSammlerTabellen(env);
@@ -10704,7 +10705,7 @@ async function botSignaleLernen(env, iv) {
   if (basisRows.length < 2000) return { ebene: iv, status: 'zu wenig Daten', n: basisRows.length };
   const ats = basisRows.map(r => r.at).sort((a, b) => a - b), mitte = ats[Math.floor(ats.length / 2)];
   const kandidaten = [], geprueft = [];
-  const vglCache = {};
+  const vglCache = {}, bewBasisCache = {};
   for (const [hk, hName] of HZ) {
     const rows = alle.filter(r => r.rh && r.rh[hk] != null);
     const ret = r => r.rh[hk];
@@ -10725,22 +10726,39 @@ async function botSignaleLernen(env, iv) {
         if (evL.length < 40) continue;
         const evQ = sel => { const h = evL.filter(([at]) => sel(at)); return h.length ? h.reduce((a, [, e]) => a + e.ok / e.n, 0) / h.length : null; };
         const treffer = evQ(() => true), b = dir === 'up' ? bq : 1 - bq, vorsprung = treffer - b;
-        const nEff = evL.length / Math.max(1, hk / 3);
+        // UEBERLAPPUNG (26.11.2026): vorher pauschal Zeitpunkte / (hk/3). Jetzt echt gezaehlt: nur Zeitpunkte, deren
+        // Haltedauer sich NICHT mit dem vorigen gezaehlten ueberschneidet (mind. hk Kerzen Abstand). Ein Signal, das
+        // 10 Kerzen am Stueck anliegt, zaehlt so als 1 unabhaengiger Fall statt als 10.
+        const kerzeMs = RW_KERZE_MS[iv] || 144e5;
+        let nEff = 0, letzt = -Infinity;
+        for (const at of evL.map(([at]) => at).sort((x, y) => x - y)) { if (at - letzt >= hk * kerzeMs) { nEff++; letzt = at; } }
+        nEff = Math.max(1, nEff);
         const z = vorsprung / Math.sqrt(b * (1 - b) / nEff);
-        const proCoin = {}; for (const r of g) { const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, ok: 0 }); c.n++; if ((ret(r) > 0) === (dir === 'up')) c.ok++; }
-        const coinsMit = Object.values(proCoin).filter(c => c.n >= 15), coinsOk = coinsMit.filter(c => c.ok / c.n - b >= 0.02).length;
+        // BITCOIN-GLEICHLAUF (26.11.2026): Faellt der ganze Markt gleichzeitig, sollen nicht 8 Coins "bestaetigen".
+        // Jeder Fall zaehlt je Coin mit Gewicht 1 / (Zahl der Coins mit Signal zur selben Kerze).
+        const proCoin = {}; for (const r of g) { const e = ev.get(r.at), w = 1 / Math.max(1, e ? e.n : 1); const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, w: 0, okw: 0 }); c.n++; c.w += w; if ((ret(r) > 0) === (dir === 'up')) c.okw += w; }
+        const coinsMit = Object.values(proCoin).filter(c => c.n >= 15 && c.w >= 6), coinsOk = coinsMit.filter(c => c.okw / c.w - b >= 0.02).length;
+        // GROESSE DER BEWEGUNG (26.11.2026): Trefferquote allein reicht nicht -- im Schnitt muss sich der Kurs nach dem
+        // Signal auch STAERKER in Signalrichtung bewegen als normal in dieser Phase (sonst: oft ein bisschen richtig,
+        // selten viel falsch). Rendite in % in Signalrichtung, je Zeitpunkt gemittelt.
+        const bewEv = new Map(); for (const r of g) { const e = bewEv.get(r.at) || { s: 0, n: 0 }; e.s += dir === 'up' ? ret(r) : -ret(r); e.n++; bewEv.set(r.at, e); }
+        const bewegung = +(100 * [...bewEv.values()].reduce((a, e) => a + e.s / e.n, 0) / Math.max(1, bewEv.size)).toFixed(2);
+        const bewBasisKey = hk + ph + dir;
+        if (!(bewBasisKey in bewBasisCache)) { let s = 0, n = 0; for (const r of rows) { if (r.phase !== ph) continue; s += dir === 'up' ? ret(r) : -ret(r); n++; } bewBasisCache[bewBasisKey] = n ? +(100 * s / n).toFixed(2) : 0; }
+        const bewegungBasis = bewBasisCache[bewBasisKey];
         const haelfte = sel => { const n = evL.filter(([at]) => sel(at)).length; return n >= 20 ? evQ(sel) - b : null; };
         const h1 = haelfte(at => at < mitte), h2 = haelfte(at => at >= mitte);
         const gegenTrend = (ph === 'ab' && dir === 'up') || (ph === 'auf' && dir === 'down');
         const minV = gegenTrend ? 0.08 : 0.05, minZ = gegenTrend ? 3.3 : 2.5;
-        const eintrag = { phase: ph, key, dir, horizont: hName, hk, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, zeitpunkte: evL.length, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
-          h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2), gegenTrend };
+        const eintrag = { phase: ph, key, dir, horizont: hName, hk, treffer: Math.round(100 * treffer), basis: Math.round(100 * b), n: g.length, zeitpunkte: evL.length, unabhaengig: nEff, coins: coinsOk, coinsMitDaten: coinsMit.length, z: +z.toFixed(2),
+          h1: h1 == null ? null : Math.round(100 * h1), h2: h2 == null ? null : Math.round(100 * h2), gegenTrend, bewegung, bewegungBasis };
         geprueft.push(eintrag);
+        const bewOk = bewegung > bewegungBasis && bewegung > 0;
         // Grund fuers Durchfallen (fuer die grauen "nicht verlaesslich"-Dreiecke im Chart)
-        eintrag.grund = vorsprung < minV ? 'vorsprung' : z < minZ ? 'zufall' : coinsOk < Math.max(4, Math.ceil(coinsMit.length * 0.5)) ? 'coins' : (h1 == null || h2 == null || h1 < 0.02 || h2 < 0.02) ? 'haelften' : null;
-        if (vorsprung >= minV && z >= minZ && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02) {
+        eintrag.grund = vorsprung < minV ? 'vorsprung' : z < minZ ? 'zufall' : coinsOk < Math.max(4, Math.ceil(coinsMit.length * 0.5)) ? 'coins' : (h1 == null || h2 == null || h1 < 0.02 || h2 < 0.02) ? 'haelften' : !bewOk ? 'bewegung' : null;
+        if (vorsprung >= minV && z >= minZ && coinsOk >= Math.max(4, Math.ceil(coinsMit.length * 0.5)) && h1 != null && h2 != null && h1 >= 0.02 && h2 >= 0.02 && bewOk) {
           const k1 = kennzahlen(g, dir, hk), vgl = vergleich(ph, dir);
-          Object.assign(eintrag, { bewegung: k1.bewegung, bewegungBasis: vgl.bewegung, zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
+          Object.assign(eintrag, { zielVorStopp: k1.zielVorStopp, zielBasis: vgl.zielVorStopp });
           kandidaten.push(eintrag);
         }
       }
@@ -10760,7 +10778,7 @@ async function botSignaleLernen(env, iv) {
   for (const e of geprueft) { if (!e.grund || e.treffer <= e.basis) continue; const k = e.phase + ':' + e.key + ':' + e.dir; if (neuSet.has(k)) continue; if (!abgMap.has(k) || abgMap.get(k).z < e.z) abgMap.set(k, e); }
   const abgelehnt = [...abgMap.values()].sort((a, b) => b.z - a.z).slice(0, 30).map(e => ({ phase: e.phase, key: e.key, dir: e.dir, horizont: e.horizont, hk: e.hk, treffer: e.treffer, basis: e.basis, z: e.z, grund: e.grund, gegenTrend: e.gegenTrend,
     // fuer die Bilanz beim Antippen im Chart
-    n: e.n, zeitpunkte: e.zeitpunkte, coins: e.coins, coinsMitDaten: e.coinsMitDaten, h1: e.h1, h2: e.h2 }));
+    n: e.n, zeitpunkte: e.zeitpunkte, unabhaengig: e.unabhaengig, coins: e.coins, coinsMitDaten: e.coinsMitDaten, h1: e.h1, h2: e.h2, bewegung: e.bewegung, bewegungBasis: e.bewegungBasis }));
   const info = { ebene: iv, at: Date.now(), methode: 'zeitpunkte-hz3', horizont: rwBotIv(iv).hzt, zeitraeume: HZ.map(h => h[1]), n: basisRows.length, signale: uebernommen, abgelehnt, aenderung: alt ? aenderung : null, geprueft: geprueft.length };
   await env.DB.prepare('INSERT OR REPLACE INTO bot_status (k, v) VALUES (?, ?)').bind('signale:' + iv, JSON.stringify(info)).run();
   return { ...info, kandidaten: geprueft.sort((a, b) => b.z - a.z).slice(0, 8) };
