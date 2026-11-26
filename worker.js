@@ -5679,7 +5679,7 @@ async function rwTagRewardsLesen(env, url) {
   return { tage: ((g && g.results) || []).map(r => ({ tag: r.tag, h: r.h, ms: r.ms, v: vm[r.tag] || 0 })) };
 }
 
-export default {
+const rwHauptExport = {
   async fetch(request, env, ctx) {
     try {
       currentEnv = env;
@@ -15715,3 +15715,89 @@ const TPAnalysis = (() => {
 })();
   return TPAnalysis;
 })();
+
+// ===================== FEHLERBERICHTE DER APP (26.11.2026) =====================
+// Die App meldet Abstuerze (abgestuerzte Bereiche, unbehandelte Fehler) an POST /client-fehler.
+// Gespeichert wird nur: Zeit, Fehlertext, gekuerzter Stack, Bereich, Build, Bildschirmbreite, grober Browsertyp.
+// Keine IP, keine Wallet-Adressen (werden vor dem Speichern unkenntlich gemacht).
+// Ansehen: GET /client-fehler?key=<FEHLER_KEY>  (Secret FEHLER_KEY in Cloudflare setzen).
+const RW_FEHLER_CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
+const rwFehlerDrossel = new Map();
+let rwFehlerTabelleOk = false;
+async function rwFehlerTabelle(env) {
+  if (rwFehlerTabelleOk) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS client_fehler (sig TEXT PRIMARY KEY, erst INTEGER, zuletzt INTEGER, anzahl INTEGER,
+    art TEXT, msg TEXT, stack TEXT, wo TEXT, build TEXT, breite INTEGER, browser TEXT)`).run();
+  rwFehlerTabelleOk = true;
+}
+function rwFehlerSauber(t, max) {
+  return String(t == null ? '' : t)
+    .replace(/\b(thor|maya|bc1|ltc1|cosmos|tb1)[0-9a-z]{20,}\b/gi, '<adr>')
+    .replace(/\b0x[0-9a-fA-F]{20,}\b/g, '<adr>')
+    .replace(/\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b/g, '<adr>')
+    .slice(0, max);
+}
+function rwFehlerBrowser(ua) {
+  ua = String(ua || '');
+  const os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'anders';
+  const br = /Edg\//.test(ua) ? 'Edge' : /CriOS|Chrome\//.test(ua) ? 'Chrome' : /FxiOS|Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'anders';
+  return os + ' ' + br;
+}
+async function rwFehlerSig(s) {
+  const d = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].slice(0, 10).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const rwFehlerEsc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+async function rwFehlerRoute(request, env) {
+  const url = new URL(request.url);
+  if (url.pathname !== '/client-fehler') return null;
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: RW_FEHLER_CORS });
+  try {
+    await rwFehlerTabelle(env);
+    if (request.method === 'POST') {
+      // Drossel je Isolat und IP (IP wird nicht gespeichert): max. 20 Meldungen pro Stunde
+      const ip = request.headers.get('CF-Connecting-IP') || 'x', jetzt = Date.now();
+      const d = rwFehlerDrossel.get(ip) || { n: 0, ab: jetzt };
+      if (jetzt - d.ab > 3600e3) { d.n = 0; d.ab = jetzt; }
+      d.n++; rwFehlerDrossel.set(ip, d);
+      if (rwFehlerDrossel.size > 5000) rwFehlerDrossel.clear();
+      if (d.n > 20) return new Response('{"ok":false}', { status: 429, headers: { ...RW_FEHLER_CORS, 'Content-Type': 'application/json' } });
+      const roh = await request.text();
+      if (roh.length > 6000) return new Response('{"ok":false}', { status: 413, headers: RW_FEHLER_CORS });
+      let b = {}; try { b = JSON.parse(roh); } catch (_) {}
+      const art = rwFehlerSauber(b.art, 60), msg = rwFehlerSauber(b.m, 300), stack = rwFehlerSauber(b.s, 1200), wo = rwFehlerSauber(b.w, 400);
+      if (!msg) return new Response('{"ok":false}', { status: 400, headers: RW_FEHLER_CORS });
+      const build = rwFehlerSauber(b.v, 30), breite = Math.max(0, Math.min(10000, Number(b.b) || 0)), browser = rwFehlerBrowser(request.headers.get('User-Agent'));
+      // gleicher Fehler (Text + erste Stack-Zeile + Build) wird gezaehlt statt doppelt gespeichert
+      const sig = await rwFehlerSig(art + '|' + msg + '|' + stack.split('\n').slice(0, 2).join('|') + '|' + build);
+      await env.DB.prepare(`INSERT INTO client_fehler (sig, erst, zuletzt, anzahl, art, msg, stack, wo, build, breite, browser) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sig) DO UPDATE SET zuletzt = excluded.zuletzt, anzahl = anzahl + 1, browser = excluded.browser, breite = excluded.breite`)
+        .bind(sig, jetzt, jetzt, art, msg, stack, wo, build, breite, browser).run();
+      if (Math.random() < 0.05) await env.DB.prepare('DELETE FROM client_fehler WHERE zuletzt < ?').bind(jetzt - 30 * 864e5).run();
+      return new Response('{"ok":true}', { headers: { ...RW_FEHLER_CORS, 'Content-Type': 'application/json' } });
+    }
+    if (request.method === 'GET') {
+      if (!env.FEHLER_KEY || url.searchParams.get('key') !== env.FEHLER_KEY) return new Response('Nicht erlaubt', { status: 403, headers: RW_FEHLER_CORS });
+      const zeilen = ((await env.DB.prepare('SELECT * FROM client_fehler ORDER BY zuletzt DESC LIMIT 200').all()).results) || [];
+      if (url.searchParams.get('format') === 'json') return new Response(JSON.stringify(zeilen), { headers: { ...RW_FEHLER_CORS, 'Content-Type': 'application/json' } });
+      const f = ms => new Date(ms).toISOString().replace('T', ' ').slice(0, 16);
+      const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>rune.watch Fehler</title>
+<style>body{font:14px/1.45 -apple-system,Inter,sans-serif;background:#121212;color:#eee;margin:0;padding:16px}h1{font-size:20px}.k{background:#1c1c1c;border-radius:14px;padding:12px 14px;margin:10px 0}.m{font-weight:700;color:#fff;word-break:break-word}.i{color:#9a9a9a;font-size:12px;margin:4px 0}pre{white-space:pre-wrap;word-break:break-all;font-size:11px;color:#bbb;margin:6px 0 0;max-height:160px;overflow:auto}.n{float:right;background:#fff;color:#000;border-radius:999px;padding:1px 9px;font-weight:800;font-size:12px}</style>
+<h1>Fehlerberichte (${zeilen.length}, letzte 30 Tage)</h1>${zeilen.length ? '' : '<p>Keine Fehler gemeldet. 🎉</p>'}
+${zeilen.map(z => `<div class="k"><span class="n">${z.anzahl}×</span><div class="m">${rwFehlerEsc(z.msg)}</div><div class="i">${rwFehlerEsc(z.art)} · Build ${rwFehlerEsc(z.build)} · ${rwFehlerEsc(z.browser)} · ${z.breite}px · zuerst ${f(z.erst)} · zuletzt ${f(z.zuletzt)}</div>${z.wo ? `<div class="i">${rwFehlerEsc(z.wo)}</div>` : ''}${z.stack ? `<pre>${rwFehlerEsc(z.stack)}</pre>` : ''}</div>`).join('')}`;
+      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+    }
+    return new Response('Methode nicht erlaubt', { status: 405, headers: RW_FEHLER_CORS });
+  } catch (e) {
+    console.warn('[client-fehler]', e && e.message);
+    return new Response('{"ok":false}', { status: 500, headers: { ...RW_FEHLER_CORS, 'Content-Type': 'application/json' } });
+  }
+}
+
+export default {
+  ...rwHauptExport,
+  async fetch(request, env, ctx) {
+    const r = await rwFehlerRoute(request, env);
+    return r || rwHauptExport.fetch(request, env, ctx);
+  },
+};
