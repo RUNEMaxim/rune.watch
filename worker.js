@@ -5702,7 +5702,7 @@ async function rwTagRewardsLesen(env, url) {
   return { tage: ((g && g.results) || []).map(r => ({ tag: r.tag, h: r.h, ms: r.ms, v: vm[r.tag] || 0 })) };
 }
 
-export default {
+const RW_HAUPT = {
   async fetch(request, env, ctx) {
     try {
       currentEnv = env;
@@ -15817,4 +15817,57 @@ const TPAnalysis = (() => {
 })();
   return TPAnalysis;
 })();
+
+// THORNODE-DURCHGANG /tn (26.11.2026, gewuenscht: "meinen Worker als Ausweichpunkt", kein Single Point of Failure).
+// Die App fragt zuerst Liquify direkt; antwortet Liquify nicht, kommt dieselbe Abfrage hierher.
+// Der Worker probiert der Reihe nach alle THORNode-Quellen (getThornodeBases: Liquify mit Schluessel, Liquify,
+// nativeswap, thorchain.network). Nur lesende Abfragen auf erlaubten Pfaden. Antworten zu einer festen Blockhoehe
+// aendern sich nie -> 30 Tage im Cache; lastblock 6 s.
+const RW_TN_ERLAUBT = [/^\/thorchain\/node\/thor1[0-9a-z]{38,}$/, /^\/thorchain\/lastblock$/, /^\/cosmos\/base\/tendermint\/v1beta1\/blocks\/\d{1,12}$/];
+async function rwTnDurchgang(request, env, ctx, url) {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, x-client-id' };
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+  if (request.method !== 'GET') return new Response('{"error":"NUR_GET"}', { status: 405, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const pfad = url.pathname.slice(3);
+  const hoehe = url.searchParams.get('height');
+  if (!RW_TN_ERLAUBT.some(r => r.test(pfad)) || (hoehe != null && !/^\d{1,12}$/.test(hoehe))) {
+    return new Response('{"error":"PFAD_NICHT_ERLAUBT"}', { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+  const fest = hoehe != null || pfad.startsWith('/cosmos/');
+  const ziel = pfad + (hoehe != null ? '?height=' + hoehe : '');
+  const cache = caches.default;
+  const schluessel = new Request('https://rw-tn-cache.intern' + ziel);
+  if (fest) { try { const c = await cache.match(schluessel); if (c) { const r = new Response(c.body, c); for (const [k, v] of Object.entries(cors)) r.headers.set(k, v); r.headers.set('x-rw-quelle', 'cache'); return r; } } catch (e) {} }
+  currentEnv = env;
+  let letzter = null;
+  for (const base of getThornodeBases({ needsHeight: hoehe != null })) {
+    try {
+      const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 12000);
+      let r;
+      try { r = await fetch(base + ziel, { headers: { 'x-client-id': 'rune-watch-worker' }, signal: ac.signal }); } finally { clearTimeout(t); }
+      if (r.ok) {
+        const text = await r.text();
+        const h = { ...cors, 'Content-Type': 'application/json', 'Cache-Control': fest ? 'public, max-age=2592000' : 'public, max-age=6', 'x-rw-quelle': base.replace(/api=[^/]+/, 'api=***') };
+        if (fest) { try { ctx.waitUntil(cache.put(schluessel, new Response(text, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=2592000' } }))); } catch (e) {} }
+        return new Response(text, { status: 200, headers: h });
+      }
+      letzter = { status: r.status, text: (await r.text()).slice(0, 300) };
+    } catch (e) { letzter = { status: 502, text: String(e && e.message || e).slice(0, 300) }; }
+  }
+  const st = letzter && (letzter.status === 400 || letzter.status === 404 || letzter.status === 500 || letzter.status === 501) ? letzter.status : 502;
+  return new Response(JSON.stringify({ error: 'ALLE_QUELLEN_FEHLGESCHLAGEN', letzter }), { status: st, headers: { ...cors, 'Content-Type': 'application/json' } });
+}
+
+export default {
+  ...RW_HAUPT,
+  async fetch(request, env, ctx) {
+    try {
+      const url = new URL(request.url);
+      if (url.pathname.startsWith('/tn/')) return await rwTnDurchgang(request, env, ctx, url);
+    } catch (e) {
+      return new Response(JSON.stringify({ error: 'TN_FEHLER', detail: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' } });
+    }
+    return RW_HAUPT.fetch.call(RW_HAUPT, request, env, ctx);
+  },
+};
 
