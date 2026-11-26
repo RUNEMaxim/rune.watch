@@ -10729,15 +10729,19 @@ async function botSignaleLernen(env, iv) {
         // UEBERLAPPUNG (26.11.2026): vorher pauschal Zeitpunkte / (hk/3). Jetzt echt gezaehlt: nur Zeitpunkte, deren
         // Haltedauer sich NICHT mit dem vorigen gezaehlten ueberschneidet (mind. hk Kerzen Abstand). Ein Signal, das
         // 10 Kerzen am Stueck anliegt, zaehlt so als 1 unabhaengiger Fall statt als 10.
+        // KORREKTUR (26.11.2026, 2. Fassung): die erste Fassung hat ueber ALLE Coins hinweg ausgeduennt -- dann gibt es
+        // in 5 Jahren hoechstens ~600 unabhaengige 3-Tages-Fenster, und z >= 2,5 bei 5 Punkten Vorsprung war rechnerisch
+        // unerreichbar (0 Signale). Jetzt: Ueberlappung JE COIN ausduennen, gleichzeitige Faelle mehrerer Coins zaehlen als einer.
         const kerzeMs = RW_KERZE_MS[iv] || 144e5;
-        let nEff = 0, letzt = -Infinity;
-        for (const at of evL.map(([at]) => at).sort((x, y) => x - y)) { if (at - letzt >= hk * kerzeMs) { nEff++; letzt = at; } }
-        nEff = Math.max(1, nEff);
+        const atsProCoin = {}; for (const r of g) (atsProCoin[r.coin] = atsProCoin[r.coin] || []).push(r.at);
+        const behalten = new Set();
+        for (const c in atsProCoin) { let letzt = -Infinity; for (const at of atsProCoin[c].sort((x, y) => x - y)) { if (at - letzt >= hk * kerzeMs) { behalten.add(at); letzt = at; } } }
+        const nEff = Math.max(1, behalten.size);
         const z = vorsprung / Math.sqrt(b * (1 - b) / nEff);
         // BITCOIN-GLEICHLAUF (26.11.2026): Faellt der ganze Markt gleichzeitig, sollen nicht 8 Coins "bestaetigen".
         // Jeder Fall zaehlt je Coin mit Gewicht 1 / (Zahl der Coins mit Signal zur selben Kerze).
         const proCoin = {}; for (const r of g) { const e = ev.get(r.at), w = 1 / Math.max(1, e ? e.n : 1); const c = (proCoin[r.coin] = proCoin[r.coin] || { n: 0, w: 0, okw: 0 }); c.n++; c.w += w; if ((ret(r) > 0) === (dir === 'up')) c.okw += w; }
-        const coinsMit = Object.values(proCoin).filter(c => c.n >= 15 && c.w >= 6), coinsOk = coinsMit.filter(c => c.okw / c.w - b >= 0.02).length;
+        const coinsMit = Object.values(proCoin).filter(c => c.n >= 15 && c.w >= 3), coinsOk = coinsMit.filter(c => c.okw / c.w - b >= 0.02).length;
         // GROESSE DER BEWEGUNG (26.11.2026): Trefferquote allein reicht nicht -- im Schnitt muss sich der Kurs nach dem
         // Signal auch STAERKER in Signalrichtung bewegen als normal in dieser Phase (sonst: oft ein bisschen richtig,
         // selten viel falsch). Rendite in % in Signalrichtung, je Zeitpunkt gemittelt.
