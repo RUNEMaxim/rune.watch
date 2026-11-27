@@ -16086,9 +16086,15 @@ async function rwVolHeuteAbruf(request, env, ctx) {
 export default {
   ...RW_HAUPT,
   async scheduled(event, env, ctx) {
-    try { ctx.waitUntil(rwT3Schritt(env).catch(() => {})); } catch (e) {}
+    // 27.11.2026: Hauptlauf (Rewards, Push-Meldungen usw.) ZUERST und vollstaendig; die Zusatzaufgaben
+    // (TOTAL3, Volumen-Zaehler) erst danach, damit sie dem Hauptlauf nie Anfragen-Kontingent oder Zeit wegnehmen.
+    // TOTAL3-Aufbau nicht zwischen 23:50 und 01:30 UTC (Tageswechsel, dann laufen die Reward-Meldungen).
+    let haupt;
+    if (typeof RW_HAUPT.scheduled === 'function') haupt = await RW_HAUPT.scheduled.call(RW_HAUPT, event, env, ctx);
+    const min = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
     try { ctx.waitUntil(rwVolSchritt(env).catch(() => {})); } catch (e) {}
-    if (typeof RW_HAUPT.scheduled === 'function') return RW_HAUPT.scheduled.call(RW_HAUPT, event, env, ctx);
+    if (min > 90 && min < 1430) { try { ctx.waitUntil(rwT3Schritt(env).catch(() => {})); } catch (e) {} }
+    return haupt;
   },
   async fetch(request, env, ctx) {
     try {
