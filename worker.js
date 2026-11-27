@@ -3087,11 +3087,46 @@ async function handleStats(request, env, ctx) {
   details .lang { font-size: 11.5px; color: #9a9a9a; line-height: 1.6; margin-top: 6px; padding-left: 10px; border-left: 2px solid #2a2a2a; overflow-wrap: anywhere; }
   details .lang b { color: #d0d0d0; font-weight: 700; }
   .tab-nav:hover:not(.active) { color: #ffffff; }
+  /* NEUES DESIGN (27.11.2026, gewuenscht: "die ganze Statistikseite uebersichtlicher und cooler"): Noir wie die App --
+     zentrierte Spalte, Kopf mit Logo und Live-Pille, glaesern-klebende Reiter, runde Karten mit feinem Rand,
+     grosse Zahlen, ruhige Abschnittstitel. Doppelte Navigation (Punkte, Seitentitel) ausgeblendet. */
+  body { max-width: 560px; margin: 0 auto; padding: 18px 16px 56px; background: #121212; }
+  .dot { background: #ffffff; }
+  .kopfzeile { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .kopfzeile svg { width: 46px; height: 46px; flex-shrink: 0; filter: drop-shadow(0 6px 10px rgba(0,0,0,.6)); }
+  .kopfzeile h1 { font-size: 24px; margin: 0; letter-spacing: -0.02em; }
+  .kopfzeile .subtitle { margin: 2px 0 0; font-size: 12px; line-height: 1.4; }
+  .live { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; background: #222222; color: #ffffff; border-radius: 999px; padding: 5px 10px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .live .dot { width: 6px; height: 6px; }
+  .tabs { background: rgba(18,18,18,.72); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); margin: 0 -16px 16px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .tab-nav { height: 36px; padding: 0 16px; font-size: 13.5px; background: #222; }
+  .page-title, .dots, .swipe-hint { display: none !important; }
+  .grid { max-width: none; gap: 10px; }
+  .tile { background: linear-gradient(180deg, #1c1c1c 0%, #171717 100%); border: 1px solid rgba(255,255,255,.055); border-radius: 16px; padding: 16px; }
+  .tile-label { font-size: 12.5px; color: #a7a7a7; font-weight: 600; }
+  .tile-value { font-size: 30px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; margin-top: 4px; }
+  .tile-label + .tile-value { margin-top: 6px; }
+  .tile-value + .tile-label { margin-top: 4px; }
+  .tile-hint { font-size: 11px; color: #777; margin-top: 4px; }
+  .tile.hero { background: #242424; border-color: rgba(255,255,255,.10); }
+  .tile-value.small, .tile.small-val .tile-value { font-size: 22px; }
+  .sec { font-size: 11px; color: #d0d0d0; letter-spacing: 0.1em; margin: 22px 0 2px; }
+  .sec::after { background: linear-gradient(90deg, #2e2e2e, transparent); }
+  .depth-bar-track { height: 10px; border-radius: 6px; background: #262626; }
+  .depth-bar-fill { border-radius: 6px; background: #ffffff; }
+  details summary { display: inline-block; background: #222; color: #b3b3b3; border-radius: 999px; padding: 5px 11px; margin-top: 4px; }
+  details[open] summary { background: #2a2a2a; color: #fff; }
+  .refresh { justify-content: center; }
+  .version { text-align: center; }
+  @media (min-width: 700px) { body { max-width: 760px; } .grid { grid-template-columns: repeat(4, 1fr); } .tile.wide, .sec { grid-column: 1 / -1; } }
 </style>
 </head>
 <body>
-  <h1>rune.watch stats</h1>
-  <div class="subtitle">Address based, across devices (not Cloudflare "visits") · recording <span id="v-since">${trackingHint}</span></div>
+  <div class="kopfzeile">
+    <svg viewBox="30 30 964 964" aria-hidden="true"><path d="M66,527 Q512,107 970,527 Q512,924 66,527 Z" fill="none" stroke="#fff" stroke-width="36" stroke-linejoin="miter"/><circle cx="512" cy="505" r="188" fill="none" stroke="#fff" stroke-width="36"/><path d="M534.2,371.4 L407.7,542.8 L522.7,524.4 L491.7,635.9 L615.9,468.0 L499.7,487.6 Z" fill="#fff"/></svg>
+    <div><h1>rune.watch stats</h1><div class="subtitle">Address based, across devices · recording <span id="v-since">${trackingHint}</span></div></div>
+    <span class="live"><span class="dot"></span>live</span>
+  </div>
 
   <div class="tabs" role="tablist">
     <button class="tab-nav active" data-page="0" role="tab">Addresses</button>
@@ -3104,34 +3139,94 @@ async function handleStats(request, env, ctx) {
     <section class="page">
       <div class="page-title">1 · Addresses (wallet entered)</div>
       <div class="grid">
-        <div class="sec">Last 24 hours</div>
-        <div class="tile">
-          <div class="tile-head">
-            <div class="tile-label" style="margin-top:0">Active addresses</div>
-            <div class="tile-period">24h</div>
-          </div>
+        <!-- UEBERSICHT (27.11.2026, gewuenscht: "uebersichtlicher und cooler"): die vier wichtigsten Zahlen zuerst -->
+        <div class="sec">Overview</div>
+        <div class="tile hero">
           <div class="tile-value" id="v-active">${stats.activeLast1d}</div>
-          <div class="tile-hint">addresses that synced in the last 24h</div>
+          <div class="tile-label">Active today</div>
+          <div class="tile-hint">addresses, last 24h</div>
         </div>
-        <div class="tile">
-          <div class="tile-head">
-            <div class="tile-label" style="margin-top:0">Total requests</div>
-            <div class="tile-period">24h</div>
-          </div>
-          <div class="tile-value" id="v-requests">${stats.totalRequestsLast1d}</div>
-          <div class="tile-hint">all sync calls in the last 24h, not deduplicated per day</div>
-        </div>
-        ${tile('avgreq', 'Ø requests per active address', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'last 24h, per address active in those 24h')}
-        <div class="sec">Last 30 days</div>
-        ${tile('avgday30', 'Ø active per day', stats.avgActiveDay30 == null ? '—' : stats.avgActiveDay30, 'average daily active addresses, last 30 full days')}
-        ${tile('active30', 'Monthly active', stats.activeLast30d, 'different addresses that synced in the last 30 days' + (stats.stickiness30 != null ? ' · ' + stats.stickiness30 + '% use it on an average day' : ''))}
-        <div class="sec">All time</div>
-        <div class="tile wide">${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint).replace('<div class="tile">', '<div>')}</div>
+        ${tile('avgday30', 'Ø active per day', stats.avgActiveDay30 == null ? '—' : stats.avgActiveDay30, 'last 30 full days')}
+        ${tile('active30', 'Monthly active', stats.activeLast30d, 'last 30 days' + (stats.stickiness30 != null ? ' · ' + stats.stickiness30 + '% on an average day' : ''))}
+        ${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint)}
         <!-- 27.11.2026: Kacheln "Returning – all time" und "Retention rate" entfernt -- dieselben Zahlen wie "Usage depth >= 2 days" -->
         ${(() => {
-          // WACHSTUM (27.11.2026): Wochen-Balken neu (gruen) + wiederkehrend (grau), Linie = Ø aktiv pro Tag; Monatstabelle.
+          // WACHSTUM v2 (27.11.2026, gewuenscht: "besser darstellen, man versteht wenig, vergangene Werte sehen"):
+          // zwei einfache Diagramme (Ø aktiv pro Tag, neue Adressen), je eigene Skala, Zahl auf jedem Balken,
+          // Umschalter Woche/Monat, Antippen zeigt alle Werte, aufklappbare Listen aller Wochen/Monate.
           const V = stats.verlauf;
           if (!V || !V.wochen || !V.wochen.length) return '';
+          {
+            const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            const mKurz = s => MON[parseInt(s.slice(5, 7), 10) - 1], mLang = s => mKurz(s) + ' ' + s.slice(0, 4);
+            const wName = s => parseInt(s.slice(8, 10), 10) + ' ' + mKurz(s);
+            const WO = V.wochen.slice(-52), MO = V.monate.slice(-24);
+            const zahl = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
+            const diagramm = (liste, feld, farbe, art) => {
+              const n = liste.length, B = 320, H = 118, oben = 13, unten = 16, bw = B / n;
+              const max = Math.max(1, ...liste.map(x => x[feld]));
+              // LINIENDIAGRAMM (27.11.2026, gewuenscht): Linie mit Punkten und leichter Flaeche; letzter Abschnitt
+              // (laufender Zeitraum) gestrichelt; jeder Punkt antippbar.
+              let s = '', letzter = '';
+              const px = i => n === 1 ? B / 2 : 10 + i * (B - 20) / (n - 1), py = v => oben + (H - oben - unten) * (1 - v / max);
+              const P = liste.map((x, i) => [px(i), py(x[feld])]);
+              const fertig = liste.length > 1 && liste[n - 1].laufend ? P.slice(0, -1) : P;
+              const pfad = pts => pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+              if (fertig.length > 1) s += `<path d="${pfad(fertig)} L${fertig[fertig.length - 1][0].toFixed(1)},${H - unten} L${fertig[0][0].toFixed(1)},${H - unten} Z" fill="${farbe}" opacity=".08"/>`;
+              s += `<path d="${pfad(fertig)}" fill="none" stroke="${farbe}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+              if (fertig.length < P.length && P.length > 1) s += `<path d="${pfad(P.slice(-2))}" fill="none" stroke="${farbe}" stroke-width="2" stroke-dasharray="3 3" opacity=".6"/>`;
+              s += `<line x1="0" y1="${H - unten}" x2="${B}" y2="${H - unten}" stroke="#2a2a2a" stroke-width="1"/>`;
+              liste.forEach((x, i) => {
+                const [cx, cy] = P[i], v = x[feld], zeigeZahl = n <= 16 || i === n - 1 || i % 2 === (n - 1) % 2;
+                s += `<g class="g-bar" data-art="${art}" data-i="${i}" style="cursor:pointer"><rect x="${(cx - (B / n) / 2).toFixed(1)}" y="0" width="${(B / n).toFixed(1)}" height="${H}" fill="transparent"/>` +
+                  `<circle class="g-fill" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${n > 26 ? 2 : 3}" fill="${x.laufend ? '#121212' : farbe}" stroke="${farbe}" stroke-width="1.5"/>` +
+                  (zeigeZahl && n <= 30 ? `<text x="${cx.toFixed(1)}" y="${(cy - 7).toFixed(1)}" font-size="${n > 16 ? 6.5 : 8}" fill="#b3b3b3" text-anchor="middle">${zahl(v)}</text>` : '') + '</g>';
+                const etikett = art === 'm' ? (n <= 12 || i % 2 === 0 ? mKurz(x.start) : '') : (x.start.slice(0, 7) !== letzter ? mKurz(x.start) : '');
+                if (art === 'w') letzter = x.start.slice(0, 7);
+                if (etikett) s += `<text x="${cx.toFixed(1)}" y="${H - 3}" font-size="8.5" fill="#8a8a8a" text-anchor="${i === 0 ? 'start' : 'middle'}">${etikett}</text>`;
+              });
+              return `<svg viewBox="0 0 ${B} ${H}" width="100%" style="display:block; overflow:visible;">${s}</svg>`;
+            };
+            const satz = (art, liste) => `<div class="g-set" data-set="${art}" style="${art === 'm' ? 'display:none;' : ''}">
+                <div class="tile-label" style="margin:4px 0 2px;">Ø active addresses per day</div>
+                <div class="tile-hint" style="margin:0 0 6px;">the main growth measure – higher = more people use rune.watch on a normal day</div>
+                ${diagramm(liste, 'proTag', '#ffffff', art)}
+                <div class="tile-label" style="margin:16px 0 2px;">New addresses</div>
+                <div class="tile-hint" style="margin:0 0 6px;">entered in rune.watch for the first time</div>
+                ${diagramm(liste, 'neu', '#9a9a9a', art)}
+              </div>`;
+            const pfeil = (a, b) => b == null || !(b > 0) ? '' : `<span style="color:${a >= b ? '#1ed760' : '#ff5c5c'}; font-size:10px;"> ${a >= b ? '▲' : '▼'}${Math.abs(Math.round((a - b) / b * 100))}%</span>`;
+            const tabelle = (liste, art) => {
+              const kopf = `<tr style="opacity:.6; font-size:10.5px;"><th style="text-align:left; font-weight:500; padding:0 4px 4px;">${art === 'm' ? 'month' : 'week of'}</th><th style="text-align:right; font-weight:500;">Ø/day</th><th style="text-align:right; font-weight:500;">active</th><th style="text-align:right; font-weight:500;">new</th><th style="text-align:right; font-weight:500;">returning</th></tr>`;
+              const rows = liste.map((x, i) => { const v = i ? liste[i - 1] : null;
+                return `<tr style="border-top:1px solid #242424;"><td style="padding:6px 4px; white-space:nowrap;">${art === 'm' ? mLang(x.start) : wName(x.start)}${x.laufend ? ' <span style="opacity:.5">(so far)</span>' : ''}</td><td style="text-align:right;">${zahl(x.proTag)}${pfeil(x.proTag, v && v.proTag)}</td><td style="text-align:right;">${x.aktiv}${x.laufend ? '' : pfeil(x.aktiv, v && v.aktiv)}</td><td style="text-align:right;">${x.neu}</td><td style="text-align:right;">${x.wieder}</td></tr>`; }).reverse().join('');
+              return `<table style="width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; margin-top:6px;">${kopf}${rows}</table>`;
+            };
+            // Kopfzeile: laufender Monat gegen den letzten fertigen
+            const jetztM = MO[MO.length - 1], vorM = MO.length > 1 ? MO[MO.length - 2] : null;
+            const kopfzeile = jetztM ? `<div style="display:flex; gap:18px; flex-wrap:wrap; margin:2px 0 14px;">
+                <div><div class="tile-value" style="font-size:26px;">${zahl(jetztM.proTag)}${vorM ? pfeil(jetztM.proTag, vorM.proTag) : ''}</div><div class="tile-hint">Ø active per day · ${mLang(jetztM.start)}${jetztM.laufend ? ' so far' : ''}${vorM ? ' · ' + mLang(vorM.start) + ': ' + zahl(vorM.proTag) : ''}</div></div>
+                <div><div class="tile-value" style="font-size:26px;">${jetztM.neu}</div><div class="tile-hint">new addresses · ${mLang(jetztM.start)}${vorM ? ' · ' + mLang(vorM.start) + ': ' + vorM.neu : ''}</div></div>
+              </div>` : '';
+            const daten = JSON.stringify({ w: WO.map(x => [wName(x.start), x.proTag, x.aktiv, x.neu, x.wieder, x.tage, x.laufend ? 1 : 0]), m: MO.map(x => [mLang(x.start), x.proTag, x.aktiv, x.neu, x.wieder, x.tage, x.laufend ? 1 : 0]) }).replace(/</g, '\\u003c');
+            const knopf = (art, text, an) => `<button class="g-tab" data-tab="${art}" style="background:${an ? '#ffffff' : '#2a2a2a'}; color:${an ? '#000' : '#fff'}; border:none; border-radius:999px; padding:6px 14px; font:600 12px Figtree, sans-serif; cursor:pointer;">${text}</button>`;
+            return `<div class="sec">Growth</div>
+          <div class="tile wide">
+            ${kopfzeile}
+            <div style="display:flex; gap:6px; margin-bottom:10px;">${knopf('w', 'Weeks', true)}${knopf('m', 'Months', false)}</div>
+            ${satz('w', WO)}${satz('m', MO)}
+            <div id="g-info" style="margin-top:12px; background:#202020; border-radius:8px; padding:10px 12px; font-size:12px; color:#b3b3b3; line-height:1.5;">Tap a point to see all values of that week or month.</div>
+            <details><summary>All weeks</summary>${tabelle(WO, 'w')}</details>
+            <details><summary>All months</summary>${tabelle(MO, 'm')}</details>
+            <details><summary>How to read this</summary><div class="lang">Ø active per day = average number of addresses that used rune.watch on a day. If it rises, usage grows. New = addresses seen for the first time. Active = different addresses in that period, returning = active but seen before. Faded bar = current week/month (not finished yet). ▲▼ = change vs. the previous period.</div></details>
+            <script>(function(){var D=${daten};var box=document.getElementById('g-info');
+              function zeige(a,i){var x=D[a][i];if(!x)return;box.innerHTML='<b style="color:#fff">'+(a==='m'?x[0]:'Week of '+x[0])+(x[6]?' (so far)':'')+'</b><br>Ø active per day: <b style="color:#fff">'+x[1]+'</b> · active addresses: <b style="color:#fff">'+x[2]+'</b><br>new: <b style="color:#fff">'+x[3]+'</b> · returning: <b style="color:#fff">'+x[4]+'</b> · days recorded: '+x[5];
+                document.querySelectorAll('.g-bar').forEach(function(g){var f=g.querySelector('.g-fill');var sel=g.getAttribute('data-art')===a&&+g.getAttribute('data-i')===i;if(!f.getAttribute('data-r'))f.setAttribute('data-r',f.getAttribute('r'));f.setAttribute('r',sel?'5.5':f.getAttribute('data-r'));});}
+              document.querySelectorAll('.g-bar').forEach(function(g){g.addEventListener('click',function(){zeige(g.getAttribute('data-art'),+g.getAttribute('data-i'));});});
+              document.querySelectorAll('.g-tab').forEach(function(b){b.addEventListener('click',function(){var t=b.getAttribute('data-tab');document.querySelectorAll('.g-set').forEach(function(s){s.style.display=s.getAttribute('data-set')===t?'':'none';});document.querySelectorAll('.g-tab').forEach(function(k){var an=k===b;k.style.background=an?'#ffffff':'#2a2a2a';k.style.color=an?'#000':'#fff';});box.innerHTML='Tap a point to see all values of that '+(t==='m'?'month':'week')+'.';});});
+            })();</script>
+          </div>`;
+          }
           const W = V.wochen.slice(-26), n = W.length, B = 320, H = 150, oben = 14, unten = 22, links = 4;
           const maxA = Math.max(1, ...W.map(x => x.aktiv)), maxT = Math.max(1, ...W.map(x => x.proTag));
           const bw = (B - links) / n, y = v => oben + (H - oben - unten) * (1 - v / maxA), yT = v => oben + (H - oben - unten) * (1 - v / maxT);
@@ -3199,7 +3294,7 @@ async function handleStats(request, env, ctx) {
           const k = stats.kohorten;
           if (!k || !k.length) return '';
           const maxW = Math.max(...k.map(x => x.anteile.length));
-          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:4px 2px; border-radius:5px; background:rgba(30,215,96,${Math.max(0.06, v / 100 * 0.85)}); color:${v > 45 ? '#000000' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
+          const zelle = v => v == null ? '<td></td>' : `<td style="text-align:center; padding:4px 2px; border-radius:5px; background:rgba(255,255,255,${Math.max(0.05, v / 100 * 0.9)}); color:${v > 50 ? '#000000' : 'inherit'}; font-variant-numeric:tabular-nums;">${Math.round(v)}</td>`;
           return `<div class="tile wide">
             <div class="tile-label" style="margin-top:0; margin-bottom:10px;">Cohorts by first week</div>
             <div style="overflow-x:auto;"><table style="border-collapse:separate; border-spacing:2px; width:100%; font-size:11px;">
@@ -3209,6 +3304,13 @@ async function handleStats(request, env, ctx) {
             <details><summary>How to read this</summary><div class="lang">Addresses grouped by the week of their first sync (n). W1, W2 … = share (%) of that group that synced again 1, 2 … weeks later. W0 is always 100.</div></details>
           </div>`;
         })()}
+        <div class="sec">Technical · last 24h</div>
+        <div class="tile">
+          <div class="tile-label" style="margin-top:0">Sync requests</div>
+          <div class="tile-value small" id="v-requests">${stats.totalRequestsLast1d}</div>
+          <div class="tile-hint">all sync calls, not deduplicated</div>
+        </div>
+        ${tile('avgreq', 'Ø requests per address', stats.activeLast1d > 0 ? Math.round((stats.totalRequestsLast1d / stats.activeLast1d) * 10) / 10 : '—', 'per address active in the last 24h').replace('class="tile"', 'class="tile small-val"')}
       </div>
     </section>
 
