@@ -15858,12 +15858,245 @@ async function rwTnDurchgang(request, env, ctx, url) {
   return new Response(JSON.stringify({ error: 'ALLE_QUELLEN_FEHLGESCHLAGEN', letzter }), { status: st, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
+// TOTAL3 (26.11.2026, gewuenscht: TOTAL3-Chart, "Top 100 Coins ohne BTC und ETH", in allen Coins der App).
+// Quelle CoinGecko (kostenlos; mit Worker-Variable COINGECKO_KEY = Demo-Schluessel hoeheres Limit).
+// Aufbau schrittweise (Cron + beim Abruf): je Coin einmal 365 Tage Historie, danach alle 30 min der aktuelle Stand.
+// Gespeichert in D1 (Tabellen legt der Worker selbst an). Mitglieder wachsen nur dazu (neue Top-100-Coins werden nachgeladen).
+const RW_T3_QUOTES = ['thorchain', 'bitcoin', 'ethereum', 'binancecoin', 'ripple', 'monero', 'solana', 'tron', 'dogecoin', 'bitcoin-cash', 'litecoin', 'avalanche-2', 'cosmos', 'zcash', 'near', 'tcy', 'rujira'];
+const RW_T3_RAUS = new Set(['bitcoin', 'ethereum']);
+function rwT3Db(env) { return env.DB || Object.values(env || {}).find(v => v && typeof v.prepare === 'function' && typeof v.batch === 'function') || null; }
+async function rwT3Cg(env, pfad) {
+  const h = { accept: 'application/json' };
+  if (env.COINGECKO_KEY) h['x-cg-demo-api-key'] = env.COINGECKO_KEY;
+  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 15000);
+  try { const r = await fetch('https://api.coingecko.com/api/v3' + pfad, { headers: h, signal: ac.signal }); if (!r.ok) throw new Error('CG_' + r.status); return await r.json(); }
+  finally { clearTimeout(t); }
+}
+async function rwT3Tabellen(db) {
+  await db.batch([
+    db.prepare('CREATE TABLE IF NOT EXISTS t3_reihe (id TEXT NOT NULL, tag TEXT NOT NULL, mc REAL, px REAL, PRIMARY KEY (id, tag))'),
+    db.prepare('CREATE TABLE IF NOT EXISTS t3_status (id TEXT PRIMARY KEY, art TEXT NOT NULL, fertig INTEGER NOT NULL DEFAULT 0, versuche INTEGER NOT NULL DEFAULT 0, at INTEGER)'),
+    db.prepare('CREATE TABLE IF NOT EXISTS t3_meta (k TEXT PRIMARY KEY, v TEXT)'),
+  ]);
+}
+async function rwT3Meta(db, k, v) {
+  if (v === undefined) { const r = await db.prepare('SELECT v FROM t3_meta WHERE k = ?').bind(k).first(); return r ? r.v : null; }
+  await db.prepare('INSERT INTO t3_meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').bind(k, String(v)).run();
+}
+const rwT3Tag = ms => new Date(ms).toISOString().slice(0, 10);
+async function rwT3Schritt(env) {
+  const db = rwT3Db(env); if (!db) return { fehler: 'KEINE_D1' };
+  await rwT3Tabellen(db);
+  const jetzt = Date.now();
+  // Sperre: hoechstens ein Schritt alle 20 s
+  const lock = Number(await rwT3Meta(db, 'lock')) || 0;
+  if (jetzt - lock < 20000) return { uebersprungen: true };
+  await rwT3Meta(db, 'lock', jetzt);
+  const erg = { neu: 0, historie: 0, live: false };
+  // 1) Mitglieder + aktueller Stand, alle 30 min
+  const zuletzt = Number(await rwT3Meta(db, 'live_at')) || 0;
+  if (jetzt - zuletzt > 30 * 60e3) {
+    try {
+      const top = await rwT3Cg(env, '/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=120&page=1&sparkline=false');
+      const mitglieder = (Array.isArray(top) ? top : []).filter(c => c && c.id && !RW_T3_RAUS.has(c.id)).slice(0, 100);
+      const heute = rwT3Tag(jetzt), st = [];
+      for (const c of mitglieder) {
+        st.push(db.prepare("INSERT INTO t3_status (id, art, fertig, versuche, at) VALUES (?, 'm', 0, 0, ?) ON CONFLICT(id) DO UPDATE SET art = CASE WHEN t3_status.art = 'q' THEN 'mq' ELSE t3_status.art END").bind(c.id, jetzt));
+        if (c.market_cap > 0) st.push(db.prepare('INSERT INTO t3_reihe (id, tag, mc, px) VALUES (?, ?, ?, ?) ON CONFLICT(id, tag) DO UPDATE SET mc = excluded.mc, px = excluded.px').bind(c.id, heute, c.market_cap, c.current_price || null));
+      }
+      const px = await rwT3Cg(env, '/simple/price?vs_currencies=usd&ids=' + RW_T3_QUOTES.join(','));
+      for (const q of RW_T3_QUOTES) {
+        st.push(db.prepare("INSERT INTO t3_status (id, art, fertig, versuche, at) VALUES (?, 'q', 0, 0, ?) ON CONFLICT(id) DO UPDATE SET art = CASE WHEN t3_status.art = 'm' THEN 'mq' ELSE t3_status.art END").bind(q, jetzt));
+        const p = px && px[q] && px[q].usd;
+        if (p > 0) st.push(db.prepare('INSERT INTO t3_reihe (id, tag, px) VALUES (?, ?, ?) ON CONFLICT(id, tag) DO UPDATE SET px = excluded.px').bind(q, heute, p));
+      }
+      if (st.length) await db.batch(st);
+      await rwT3Meta(db, 'live_at', jetzt);
+      erg.live = true; erg.mitglieder = mitglieder.length;
+    } catch (e) { erg.liveFehler = String(e && e.message || e); }
+  }
+  // 2) Historie nachladen: je Schritt bis zu 3 Coins (CoinGecko-Limit schonen)
+  const offen = await db.prepare('SELECT id FROM t3_status WHERE fertig = 0 AND versuche < 6 ORDER BY versuche, at LIMIT 3').all();
+  for (const row of (offen && offen.results) || []) {
+    try {
+      const j = await rwT3Cg(env, `/coins/${encodeURIComponent(row.id)}/market_chart?vs_currency=usd&days=365&interval=daily`);
+      const mc = new Map((j.market_caps || []).map(([t, v]) => [rwT3Tag(t), v]));
+      const st = [];
+      for (const [t, p] of (j.prices || [])) {
+        const tag = rwT3Tag(t);
+        if (tag === rwT3Tag(jetzt)) continue; // heute kommt aus dem Live-Stand
+        st.push(db.prepare('INSERT INTO t3_reihe (id, tag, mc, px) VALUES (?, ?, ?, ?) ON CONFLICT(id, tag) DO UPDATE SET mc = COALESCE(excluded.mc, t3_reihe.mc), px = COALESCE(excluded.px, t3_reihe.px)').bind(row.id, tag, mc.get(tag) || null, p > 0 ? p : null));
+      }
+      for (let i = 0; i < st.length; i += 90) await db.batch(st.slice(i, i + 90));
+      await db.prepare('UPDATE t3_status SET fertig = 1, at = ? WHERE id = ?').bind(jetzt, row.id).run();
+      erg.historie++;
+    } catch (e) {
+      await db.prepare('UPDATE t3_status SET versuche = versuche + 1, at = ? WHERE id = ?').bind(jetzt, row.id).run();
+      erg.historieFehler = String(e && e.message || e);
+      if (/CG_429/.test(erg.historieFehler)) break;
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return erg;
+}
+async function rwT3Abruf(request, env, ctx, url) {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+  const db = rwT3Db(env);
+  if (!db) return new Response('{"error":"KEINE_D1"}', { status: 500, headers: cors });
+  const q = String(url.searchParams.get('quote') || 'usd').toLowerCase();
+  if (q !== 'usd' && !RW_T3_QUOTES.includes(q)) return new Response('{"error":"QUOTE_UNBEKANNT"}', { status: 400, headers: cors });
+  const cache = caches.default, ck = new Request('https://rw-t3-cache.intern/' + q);
+  try { const c = await cache.match(ck); if (c) { const r = new Response(c.body, c); r.headers.set('Access-Control-Allow-Origin', '*'); return r; } } catch (e) {}
+  await rwT3Tabellen(db);
+  ctx.waitUntil(rwT3Schritt(env).catch(() => {}));
+  const summe = await db.prepare("SELECT r.tag AS tag, SUM(r.mc) AS mc, COUNT(r.mc) AS n FROM t3_reihe r JOIN t3_status s ON s.id = r.id WHERE s.art IN ('m','mq') AND r.mc > 0 GROUP BY r.tag ORDER BY r.tag").all();
+  let px = null;
+  if (q !== 'usd') { const p = await db.prepare('SELECT tag, px FROM t3_reihe WHERE id = ? AND px > 0').bind(q).all(); px = new Map(((p && p.results) || []).map(x => [x.tag, x.px])); }
+  const stand = await db.prepare("SELECT COUNT(*) AS gesamt, SUM(fertig) AS fertig FROM t3_status WHERE art IN ('m','mq')").first();
+  const zeilen = (summe && summe.results) || [];
+  const nMax = zeilen.reduce((a, x) => Math.max(a, x.n), 0);
+  const tage = [];
+  for (const x of zeilen) {
+    if (x.n < nMax * 0.6) continue; // Tag mit zu wenigen Coins (Historie noch im Aufbau) auslassen
+    let v = x.mc;
+    if (px) { const p = px.get(x.tag); if (!(p > 0)) continue; v = x.mc / p; }
+    tage.push([Date.parse(x.tag + 'T00:00:00Z'), v, x.n]);
+  }
+  const fertig = stand && stand.gesamt > 0 && stand.fertig >= stand.gesamt;
+  const body = JSON.stringify({ quote: q, tage, mitglieder: stand ? stand.gesamt : 0, mitHistorie: stand ? stand.fertig || 0 : 0, vollstaendig: !!fertig });
+  if (fertig) { try { ctx.waitUntil(cache.put(ck, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600' } }))); } catch (e) {} }
+  return new Response(body, { status: 200, headers: { ...cors, 'Cache-Control': fertig ? 'public, max-age=600' : 'no-store' } });
+}
+
+// NEWS OHNE KI (26.11.2026, gewuenscht: Artikel zurueck, "auch weitere Artikel", keine KI-Kosten).
+// Sammelt Artikel aus RSS-Feeds, ordnet sie per Stichwort einer Kategorie zu, 30 min Cache.
+const RW_NEWS_FEEDS = [
+  { url: 'https://blog.thorchain.org/rss/', quelle: 'THORChain Blog', thor: true },
+  { url: 'https://cointelegraph.com/rss/tag/thorchain', quelle: 'Cointelegraph', thor: true },
+  { url: 'https://news.google.com/rss/search?q=THORChain&hl=en-US&gl=US&ceid=US:en' },
+  { url: 'https://news.google.com/rss/search?q=%22THORChain%22+RUNE&hl=en-US&gl=US&ceid=US:en' },
+  { url: 'https://news.google.com/rss/search?q=Rujira+THORChain&hl=en-US&gl=US&ceid=US:en' },
+  { url: 'https://news.google.com/rss/search?q=Vultisig&hl=en-US&gl=US&ceid=US:en' },
+  { url: 'https://news.google.com/rss/search?q=%22Maya+Protocol%22&hl=en-US&gl=US&ceid=US:en' },
+  { url: 'https://news.google.com/rss/search?q=THORChain&hl=de&gl=DE&ceid=DE:de' },
+];
+function rwNewsText(x) {
+  return String(x || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/\s+/g, ' ').trim();
+}
+function rwNewsKat(t) {
+  const s = t.toLowerCase();
+  if (/hack|exploit|vulnerab|attack|stolen|drain|security|breach|scam|phish/.test(s)) return 'sicherheit';
+  if (/upgrade|v3\.\d|release|hard ?fork|mainnet|stagenet|launch/.test(s)) return 'upgrade';
+  if (/vote|proposal|governance|adr|mimir/.test(s)) return 'abstimmung';
+  if (/rujira|vultisig|maya|tcy|ruji|wallet|integrat|partner/.test(s)) return 'oekosystem';
+  if (/price|rally|surge|plunge|crash|bull|bear|market|trading|etf|prediction|analyst/.test(s)) return 'markt';
+  return 'netzwerk';
+}
+async function rwNewsAbruf(request, env, ctx) {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+  const cache = caches.default, ck = new Request('https://rw-news-cache.intern/v1');
+  try { const c = await cache.match(ck); if (c) { const r = new Response(c.body, c); r.headers.set('Access-Control-Allow-Origin', '*'); return r; } } catch (e) {}
+  const grenze = Date.now() - 30 * 864e5, alle = [], fehler = [];
+  await Promise.all(RW_NEWS_FEEDS.map(async f => {
+    try {
+      const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 10000);
+      let xml;
+      try { const r = await fetch(f.url, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; rune.watch news)', accept: 'application/rss+xml, application/xml, text/xml' }, signal: ac.signal }); if (!r.ok) throw new Error('HTTP_' + r.status); xml = await r.text(); }
+      finally { clearTimeout(t); }
+      const items = xml.match(/<item[\s>][\s\S]*?<\/item>/g) || [];
+      for (const it of items.slice(0, 40)) {
+        const feld = n => { const m = it.match(new RegExp('<' + n + '[^>]*>([\\s\\S]*?)<\\/' + n + '>')); return m ? rwNewsText(m[1]) : ''; };
+        let titel = feld('title'), link = feld('link'), quelle = feld('source') || f.quelle || '';
+        const ms = Date.parse(feld('pubDate') || feld('dc:date'));
+        if (!titel || !/^https:\/\//.test(link) || !(ms > grenze)) continue;
+        if (quelle && titel.endsWith(' - ' + quelle)) titel = titel.slice(0, -(quelle.length + 3));
+        const gesamt = titel + ' ' + feld('description');
+        if (!f.thor && !/thorchain|\brune\b|rujira|vultisig|maya|tcy/i.test(gesamt)) continue;
+        let text = f.url.includes('news.google.') ? '' : feld('description');
+        if (text.length > 220) text = text.slice(0, 217).replace(/\s+\S*$/, '') + ' …';
+        const kat = rwNewsKat(gesamt);
+        alle.push({ titelDe: titel, titelEn: titel, textDe: text, textEn: text, link, quelle, datum: new Date(ms).toISOString().slice(0, 10), ms, kategorie: kat, wichtig: kat === 'sicherheit' || kat === 'upgrade' });
+      }
+    } catch (e) { fehler.push((f.quelle || f.url.slice(0, 60)) + ': ' + String(e && e.message || e)); }
+  }));
+  // Doppelte (gleicher Link oder fast gleicher Titel) entfernen
+  const gesehen = new Set(), eintraege = [];
+  for (const x of alle.sort((a, b) => b.ms - a.ms)) {
+    const k = x.titelEn.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 70);
+    if (gesehen.has(k) || gesehen.has(x.link)) continue;
+    gesehen.add(k); gesehen.add(x.link); eintraege.push(x);
+    if (eintraege.length >= 80) break;
+  }
+  const body = JSON.stringify({ at: Date.now(), eintraege, quellenFehler: fehler.length ? fehler : undefined, letzterFehler: !eintraege.length && fehler.length ? fehler[0] : undefined });
+  if (eintraege.length) { try { ctx.waitUntil(cache.put(ck, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=1800' } }))); } catch (e) {} }
+  return new Response(body, { status: 200, headers: { ...cors, 'Cache-Control': 'public, max-age=600' } });
+}
+
+// HEUTIGES VOLUMEN SELBST MITZAEHLEN (27.11.2026, gewuenscht: "den Stand von 0 Uhr UTC selbst speichern",
+// Absicherung, falls vanaheimex und Liquify den heutigen Tag nicht liefern).
+// Jeder Cron-Lauf merkt sich den Gesamtzaehler swapVolume (Midgard /v2/stats). Heute = aktueller Zaehler - Tagesstart.
+// Tagesstart = letzter Stand von gestern, wenn der hoechstens 30 min vor Mitternacht lag, sonst der erste Stand heute.
+const RW_VOL_QUELLEN = ['https://gateway.liquify.com/chain/thorchain_midgard/v2/stats', 'https://midgard.thorchain.network/v2/stats'];
+async function rwVolStats() {
+  let letzter = null;
+  for (const u of RW_VOL_QUELLEN) {
+    try {
+      const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 10000);
+      try {
+        const r = await fetch(u, { headers: { accept: 'application/json' }, signal: ac.signal });
+        if (!r.ok) throw new Error('HTTP_' + r.status);
+        const j = await r.json(), v = Number(j.swapVolume);
+        if (v > 0) return { v, preis: Number(j.runePriceUSD) || null };
+        throw new Error('KEIN_SWAPVOLUME');
+      } finally { clearTimeout(t); }
+    } catch (e) { letzter = e; }
+  }
+  throw letzter || new Error('STATS');
+}
+async function rwVolSchritt(env) {
+  const db = rwT3Db(env); if (!db) return;
+  await db.prepare('CREATE TABLE IF NOT EXISTS vol_tag (tag TEXT PRIMARY KEY, start_e8 REAL, start_at INTEGER, last_e8 REAL, last_at INTEGER, preis REAL)').run();
+  const jetzt = Date.now(), tagStart = Math.floor(jetzt / 864e5) * 864e5, tag = rwT3Tag(jetzt), gestern = rwT3Tag(jetzt - 864e5);
+  const heute = await db.prepare('SELECT * FROM vol_tag WHERE tag = ?').bind(tag).first();
+  if (heute && jetzt - heute.last_at < 60e3) return; // hoechstens einmal pro Minute
+  const s = await rwVolStats();
+  if (!heute) {
+    const g = await db.prepare('SELECT * FROM vol_tag WHERE tag = ?').bind(gestern).first();
+    const start = g && g.last_at >= tagStart - 30 * 60e3 && g.last_e8 > 0 && g.last_e8 <= s.v ? { v: g.last_e8, at: g.last_at } : { v: s.v, at: jetzt };
+    await db.prepare('INSERT INTO vol_tag (tag, start_e8, start_at, last_e8, last_at, preis) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(tag) DO NOTHING').bind(tag, start.v, start.at, s.v, jetzt, s.preis).run();
+  } else if (s.v >= heute.last_e8) {
+    await db.prepare('UPDATE vol_tag SET last_e8 = ?, last_at = ?, preis = COALESCE(?, preis) WHERE tag = ?').bind(s.v, jetzt, s.preis, tag).run();
+  }
+}
+async function rwVolHeuteAbruf(request, env, ctx) {
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+  const db = rwT3Db(env);
+  if (!db) return new Response('{"error":"KEINE_D1"}', { status: 500, headers: cors });
+  try { await rwVolSchritt(env); } catch (e) {}
+  const jetzt = Date.now(), tagStart = Math.floor(jetzt / 864e5) * 864e5;
+  let h = null;
+  try { h = await db.prepare('SELECT * FROM vol_tag WHERE tag = ?').bind(rwT3Tag(jetzt)).first(); } catch (e) {}
+  if (!h) return new Response('{"error":"NOCH_KEIN_STAND"}', { status: 404, headers: cors });
+  const rune = Math.max(0, (h.last_e8 - h.start_e8) / 1e8);
+  return new Response(JSON.stringify({ tag: h.tag, startTime: Math.floor(tagStart / 1000), volumeRune: rune, runePriceUSD: h.preis, usd: h.preis ? rune * h.preis : null, ab: h.start_at, bis: h.last_at, vollerTag: h.start_at - tagStart <= 15 * 60e3 }), { status: 200, headers: cors });
+}
+
 export default {
   ...RW_HAUPT,
+  async scheduled(event, env, ctx) {
+    try { ctx.waitUntil(rwT3Schritt(env).catch(() => {})); } catch (e) {}
+    try { ctx.waitUntil(rwVolSchritt(env).catch(() => {})); } catch (e) {}
+    if (typeof RW_HAUPT.scheduled === 'function') return RW_HAUPT.scheduled.call(RW_HAUPT, event, env, ctx);
+  },
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
       if (url.pathname.startsWith('/tn/')) return await rwTnDurchgang(request, env, ctx, url);
+      if (url.pathname === '/total3') return await rwT3Abruf(request, env, ctx, url);
+      if (url.pathname === '/news') return await rwNewsAbruf(request, env, ctx);
+      if (url.pathname === '/volume-heute') return await rwVolHeuteAbruf(request, env, ctx);
     } catch (e) {
       return new Response(JSON.stringify({ error: 'TN_FEHLER', detail: String(e && e.message || e).slice(0, 200) }), { status: 500, headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' } });
     }
