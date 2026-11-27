@@ -2876,8 +2876,32 @@ async function handleStats(request, env, ctx) {
         woche: w, start: utcDayString(startMs + w * 7 * 86400000), n: liste.length,
         anteile: Array.from({ length: Math.min(9, aktuell - w + 1) }, (_, k) => Math.round(liste.filter(e => e.wochen.has(w + k)).length / liste.length * 1000) / 10),
       }));
+      // VERLAUF (27.11.2026, gewuenscht: "welche Monate die aktivsten sind und ob ich mehr aktive User
+      // hinzugewinne"): je Woche und je Monat aktive Adressen, davon neu (erster Sync in diesem Zeitraum)
+      // und wiederkehrend, plus Durchschnitt aktiver Adressen pro Tag.
+      const ersterTag = new Map();
+      for (const r of rows) { const a = ersterTag.get(r.address); if (!a || r.day < a) ersterTag.set(r.address, r.day); }
+      const heuteStr = utcDayString(now);
+      const baue = (schluessel, startVon) => {
+        const m = new Map();
+        for (const r of rows) {
+          const k = schluessel(r.day); let e = m.get(k);
+          if (!e) { e = { k, start: startVon(r.day), adr: new Set(), neu: new Set(), adrTage: 0, tage: new Set() }; m.set(k, e); }
+          e.adr.add(r.address); e.adrTage++; e.tage.add(r.day);
+          if (schluessel(ersterTag.get(r.address)) === k) e.neu.add(r.address);
+        }
+        return [...m.values()].sort((a, b) => a.start < b.start ? -1 : 1).map(e => ({
+          start: e.start, aktiv: e.adr.size, neu: e.neu.size, wieder: e.adr.size - e.neu.size,
+          proTag: e.tage.size ? Math.round(e.adrTage / e.tage.size * 10) / 10 : 0, tage: e.tage.size,
+          laufend: schluessel(heuteStr) === e.k,
+        }));
+      };
+      stats.verlauf = {
+        wochen: baue(d => woche(d), d => utcDayString(startMs + woche(d) * 7 * 86400000)),
+        monate: baue(d => d.slice(0, 7), d => d.slice(0, 7)),
+      };
     }
-  } catch (e) { stats.kohorten = null; }
+  } catch (e) { stats.kohorten = null; stats.verlauf = null; }
   // AKTIV/PASSIV (ab Einbau): aktive vs. passive Aufrufe, Adressen mit aktiven Tagen.
   try {
     const exclArt = excl.length ? ` AND LOWER(address) NOT IN (${excl.map(() => '?').join(',')})` : '';
@@ -3102,9 +3126,44 @@ async function handleStats(request, env, ctx) {
         ${tile('avgday30', 'Ø active per day', stats.avgActiveDay30 == null ? '—' : stats.avgActiveDay30, 'average daily active addresses, last 30 full days')}
         ${tile('active30', 'Monthly active', stats.activeLast30d, 'different addresses that synced in the last 30 days' + (stats.stickiness30 != null ? ' · ' + stats.stickiness30 + '% use it on an average day' : ''))}
         <div class="sec">All time</div>
-        ${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint)}
-        ${tile('returning', 'Returning – all time', stats.returningAllTime, 'synced on ≥2 separate days since recording began')}
-        ${tile('rate', 'Retention rate', stats.retentionRateAllTime == null ? '—' : stats.retentionRateAllTime + '%', 'share of returning addresses among all addresses')}
+        <div class="tile wide">${tile('total', 'Addresses total', stats.totalUniqueAddressesEver, trackingHint).replace('<div class="tile">', '<div>')}</div>
+        <!-- 27.11.2026: Kacheln "Returning – all time" und "Retention rate" entfernt -- dieselben Zahlen wie "Usage depth >= 2 days" -->
+        ${(() => {
+          // WACHSTUM (27.11.2026): Wochen-Balken neu (gruen) + wiederkehrend (grau), Linie = Ø aktiv pro Tag; Monatstabelle.
+          const V = stats.verlauf;
+          if (!V || !V.wochen || !V.wochen.length) return '';
+          const W = V.wochen.slice(-26), n = W.length, B = 320, H = 150, oben = 14, unten = 22, links = 4;
+          const maxA = Math.max(1, ...W.map(x => x.aktiv)), maxT = Math.max(1, ...W.map(x => x.proTag));
+          const bw = (B - links) / n, y = v => oben + (H - oben - unten) * (1 - v / maxA), yT = v => oben + (H - oben - unten) * (1 - v / maxT);
+          let svg = '';
+          W.forEach((x, i) => {
+            const x0 = links + i * bw + bw * 0.15, w = bw * 0.7, yW = y(x.wieder), yN = y(x.aktiv), y0 = y(0);
+            svg += `<rect x="${x0.toFixed(1)}" y="${yW.toFixed(1)}" width="${w.toFixed(1)}" height="${(y0 - yW).toFixed(1)}" rx="2" fill="#535353"${x.laufend ? ' opacity=".55"' : ''}><title>${deDate(x.start)}: ${x.wieder} returning</title></rect>`;
+            svg += `<rect x="${x0.toFixed(1)}" y="${yN.toFixed(1)}" width="${w.toFixed(1)}" height="${(yW - yN).toFixed(1)}" rx="2" fill="#1ed760"${x.laufend ? ' opacity=".55"' : ''}><title>${deDate(x.start)}: ${x.neu} new</title></rect>`;
+            if (n <= 16 || i % 2 === 0) svg += `<text x="${(x0 + w / 2).toFixed(1)}" y="${H - 6}" font-size="8" fill="#7a7a7a" text-anchor="middle">${(deDate(x.start) || '').replace(/ \d{4}$/, '')}</text>`;
+            svg += `<text x="${(x0 + w / 2).toFixed(1)}" y="${(yN - 3).toFixed(1)}" font-size="8" fill="#b3b3b3" text-anchor="middle">${x.aktiv}</text>`;
+          });
+          const pkt = W.map((x, i) => `${(links + i * bw + bw / 2).toFixed(1)},${yT(x.proTag).toFixed(1)}`).join(' ');
+          svg += `<polyline points="${pkt}" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round" opacity=".9"/>`;
+          const M = V.monate.slice(-12);
+          const mName = s => { const [yy, mm] = s.split('-'); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(mm, 10) - 1] + ' ' + yy; };
+          const pfeil = (a, b) => b == null || b === 0 ? '' : `<span style="color:${a >= b ? '#1ed760' : '#ff5c5c'}; font-size:10px;"> ${a >= b ? '▲' : '▼'}${Math.abs(Math.round((a - b) / b * 100))}%</span>`;
+          const bester = M.filter(x => !x.laufend).reduce((b, x) => !b || x.proTag > b.proTag ? x : b, null);
+          const zeilen = M.map((x, i) => { const v = i ? M[i - 1] : null;
+            return `<tr${bester && x.start === bester.start ? ' style="background:rgba(30,215,96,.08)"' : ''}><td style="padding:5px 4px; white-space:nowrap;">${mName(x.start)}${x.laufend ? ' <span style="opacity:.5">(so far)</span>' : ''}</td><td style="text-align:right;">${x.aktiv}${pfeil(x.aktiv, v && v.aktiv)}</td><td style="text-align:right;">${x.neu}</td><td style="text-align:right;">${x.wieder}</td><td style="text-align:right;">${x.proTag}${pfeil(x.proTag, v && v.proTag)}</td></tr>`; }).join('');
+          return `<div class="sec">Growth</div>
+          <div class="tile wide">
+            <div class="tile-label" style="margin-top:0; margin-bottom:6px;">Active addresses per week</div>
+            <div class="tile-hint" style="margin:0 0 8px;"><span style="color:#1ed760">■</span> new · <span style="color:#8a8a8a">■</span> returning · <span style="color:#fff">—</span> Ø active per day (own scale) · faded = current week</div>
+            <svg viewBox="0 0 ${B} ${H}" width="100%" style="display:block;">${svg}</svg>
+            <div class="tile-label" style="margin:16px 0 6px;">By month</div>
+            <table style="width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums;">
+              <tr style="opacity:.6; font-size:10.5px;"><th style="text-align:left; font-weight:500; padding:0 4px 4px;">month</th><th style="text-align:right; font-weight:500;">active</th><th style="text-align:right; font-weight:500;">new</th><th style="text-align:right; font-weight:500;">returning</th><th style="text-align:right; font-weight:500;">Ø / day</th></tr>
+              ${zeilen}
+            </table>
+            <details><summary>How to read this</summary><div class="lang">Active = different addresses that synced in that week/month. New = first sync ever in that period, returning = had synced before. Ø / day = average active addresses per day – the best measure for "more active users": if it rises month over month, usage grows. Highlighted row = most active finished month. ▲▼ = change vs. previous month (current month is incomplete).</div></details>
+          </div>`;
+        })()}
         <div class="sec">Engagement</div>
         <div class="tile wide">
           <div class="tile-label" style="margin-top:0; margin-bottom:12px;">Usage depth (all time)</div>
